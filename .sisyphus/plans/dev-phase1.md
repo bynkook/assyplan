@@ -286,7 +286,7 @@ Max Concurrent: 3
   - Message: `chore: initial project scaffold`
   - Files: `pyproject.toml`, `src/python/`, `src/rust/`
 
-- [ ] 4. CSV 파서 구현 (UTF-8/EUC-KR)
+- [x] 4. CSV 파서 구현 (UTF-8/EUC-KR)
 
   **What to do**:
   - `data_loader.py`에 CSV 파싱 함수 구현
@@ -337,7 +337,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 2 완료 후 일괄)
 
-- [ ] 5. eframe 최소 앱 구현
+- [x] 5. eframe 최소 앱 구현
 
   **What to do**:
   - `src/rust/src/lib.rs`에 eframe 앱 구조체 정의
@@ -380,7 +380,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 2 완료 후 일괄)
 
-- [ ] 6. 인코딩 감지 유틸리티 구현
+- [x] 6. 인코딩 감지 유틸리티 구현
 
   **What to do**:
   - `encoding.py`에 인코딩 감지 함수 구현
