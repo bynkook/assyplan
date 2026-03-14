@@ -704,7 +704,7 @@ Max Concurrent: 3
   - Message: `feat: add validation and PyO3 integration`
   - Files: `src/python/validators.py`, `src/rust/src/lib.rs`, `src/rust/src/graphics/ui.rs`
 
-- [ ] 13. 통합 테스트 구현
+- [x] 13. 통합 테스트 구현
 
   **What to do**:
   - `tests/test_integration.py` 작성
@@ -744,7 +744,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 5 완료 후 일괄)
 
-- [ ] 14. SKILLS.md 작성
+- [x] 14. SKILLS.md 작성
 
   **What to do**:
   - 프로젝트 루트에 `SKILLS.md` 작성
@@ -784,7 +784,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 5 완료 후 일괄)
 
-- [ ] 15. 최종 검증
+- [x] 15. 최종 검증
 
   **What to do**:
   - 모든 테스트 실행: pytest + cargo test

@@ -1,0 +1,15 @@
+# AssyPlan Development Phase 1 Requirements
+# Python 3.12+
+
+# Data processing
+pandas>=2.0
+numpy>=1.26
+
+# Encoding detection
+charset_normalizer>=3.0
+
+# Testing
+pytest>=8.0
+
+# Python-Rust bridge (maturin build)
+maturin>=1.4
