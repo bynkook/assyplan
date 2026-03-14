@@ -699,4 +699,271 @@ mod tests {
         assert!(!step_data.next_step());
         assert!(!step_data.prev_step());
     }
+
+    // ========================================================================
+    // Integration Tests: Step Rendering + UI State + Cache Coordination
+    // ========================================================================
+
+    #[test]
+    fn test_step_data_ui_state_sync() {
+        // Tests that step data and UI state sync correctly
+        let base = create_test_render_data();
+        let mut step_data = StepRenderData::new(base);
+
+        let step_table = vec![
+            (1, 0, "Column".to_string()),
+            (2, 1, "Girder".to_string()),
+            (3, 2, "Column".to_string()),
+        ];
+
+        step_data.set_step_data(step_table);
+
+        // Initial state should be step 1
+        assert_eq!(step_data.current_step, 1);
+        assert_eq!(step_data.max_step, 3);
+
+        // Navigate forward
+        assert!(step_data.next_step());
+        assert_eq!(step_data.current_step, 2);
+
+        assert!(step_data.next_step());
+        assert_eq!(step_data.current_step, 3);
+
+        // At max, can't go further
+        assert!(!step_data.next_step());
+        assert_eq!(step_data.current_step, 3);
+
+        // Navigate backward
+        assert!(step_data.prev_step());
+        assert_eq!(step_data.current_step, 2);
+
+        assert!(step_data.prev_step());
+        assert_eq!(step_data.current_step, 1);
+
+        // At min, can't go further
+        assert!(!step_data.prev_step());
+        assert_eq!(step_data.current_step, 1);
+    }
+
+    #[test]
+    fn test_cumulative_cache_with_navigation() {
+        // Tests that cache works correctly during navigation
+        let base = create_test_render_data();
+        let mut step_data = StepRenderData::new(base);
+
+        let step_table = vec![
+            (1, 0, "Column".to_string()),
+            (2, 1, "Girder".to_string()),
+            (3, 2, "Column".to_string()),
+        ];
+
+        step_data.set_step_data(step_table);
+
+        // Navigate to step 2 and get cumulative
+        step_data.set_current_step(2);
+        let cum2_first = step_data.get_cumulative_elements(2);
+        assert_eq!(cum2_first, vec![0, 1]);
+
+        // Cache should be populated
+        assert_eq!(step_data.cumulative_cache.len(), 1);
+
+        // Navigate to step 3
+        step_data.next_step();
+        let cum3 = step_data.get_cumulative_elements(3);
+        assert_eq!(cum3, vec![0, 1, 2]);
+
+        // Cache should have both entries
+        assert_eq!(step_data.cumulative_cache.len(), 2);
+
+        // Navigate back to step 2 - should use cache
+        step_data.prev_step();
+        let cum2_second = step_data.get_cumulative_elements(2);
+        assert_eq!(cum2_second, cum2_first);
+
+        // Cache size unchanged (reused)
+        assert_eq!(step_data.cumulative_cache.len(), 2);
+    }
+
+    #[test]
+    fn test_step_data_reset_invalidates_cache() {
+        // Tests that setting new step data invalidates cache
+        let base = create_test_render_data();
+        let mut step_data = StepRenderData::new(base);
+
+        // Initial step data
+        let step_table1 = vec![(1, 0, "Column".to_string()), (2, 1, "Girder".to_string())];
+
+        step_data.set_step_data(step_table1);
+        let _ = step_data.get_cumulative_elements(2);
+        assert!(!step_data.cumulative_cache.is_empty());
+
+        // Set new step data - cache should be cleared
+        let step_table2 = vec![
+            (1, 0, "Column".to_string()),
+            (1, 1, "Girder".to_string()),
+            (2, 2, "Column".to_string()),
+        ];
+
+        step_data.set_step_data(step_table2);
+        assert!(step_data.cumulative_cache.is_empty());
+    }
+
+    #[test]
+    fn test_direct_step_input_validation() {
+        // Tests direct step input (simulating UI input)
+        let base = create_test_render_data();
+        let mut step_data = StepRenderData::new(base);
+
+        let step_table = vec![
+            (1, 0, "Column".to_string()),
+            (2, 1, "Girder".to_string()),
+            (3, 2, "Column".to_string()),
+            (4, 3, "Girder".to_string()),
+            (5, 4, "Column".to_string()),
+        ];
+
+        step_data.set_step_data(step_table);
+
+        // Valid direct input
+        assert!(step_data.set_current_step(3));
+        assert_eq!(step_data.current_step, 3);
+
+        // Jump to max
+        assert!(step_data.set_current_step(5));
+        assert_eq!(step_data.current_step, 5);
+
+        // Jump to min
+        assert!(step_data.set_current_step(1));
+        assert_eq!(step_data.current_step, 1);
+
+        // Invalid: step 0
+        assert!(!step_data.set_current_step(0));
+        assert_eq!(step_data.current_step, 1); // unchanged
+
+        // Invalid: step > max
+        assert!(!step_data.set_current_step(100));
+        assert_eq!(step_data.current_step, 1); // unchanged
+    }
+
+    #[test]
+    fn test_many_steps_performance_scenario() {
+        // Tests handling of many steps (simulates large model)
+        let mut base = RenderData::new();
+
+        // Create 100 nodes
+        for i in 1..=100 {
+            base.add_node(renderer::Node {
+                id: i,
+                x: (i as f64) * 1000.0,
+                y: 0.0,
+                z: 0.0,
+            });
+        }
+
+        // Create 99 elements connecting consecutive nodes
+        for i in 0..99 {
+            base.add_element(renderer::Element {
+                id: (i + 1) as i32,
+                node_i_id: (i + 1) as i32,
+                node_j_id: (i + 2) as i32,
+                member_type: if i % 2 == 0 {
+                    "Column".to_string()
+                } else {
+                    "Girder".to_string()
+                },
+            });
+        }
+
+        let mut step_data = StepRenderData::new(base);
+
+        // Create step table with 50 steps (2 elements per step)
+        let step_table: Vec<(i32, usize, String)> = (0..99)
+            .map(|i| {
+                let step = (i / 2) + 1;
+                let member_type = if i % 2 == 0 { "Column" } else { "Girder" };
+                (step as i32, i, member_type.to_string())
+            })
+            .collect();
+
+        step_data.set_step_data(step_table);
+
+        assert_eq!(step_data.max_step, 50);
+        assert_eq!(step_data.total_element_count(), 99);
+
+        // Navigate to middle step
+        assert!(step_data.set_current_step(25));
+        let cum25 = step_data.get_cumulative_elements(25);
+        assert_eq!(cum25.len(), 50); // 25 steps * 2 elements per step
+
+        // Navigate to last step
+        assert!(step_data.set_current_step(50));
+        let cum50 = step_data.get_cumulative_elements(50);
+        assert_eq!(cum50.len(), 99); // All elements
+
+        // Verify cache is working
+        assert!(!step_data.cumulative_cache.is_empty());
+    }
+
+    #[test]
+    fn test_element_visibility_by_step() {
+        // Tests that elements are correctly visible/hidden by step
+        let base = create_test_render_data();
+        let mut step_data = StepRenderData::new(base);
+
+        let step_table = vec![
+            (1, 0, "Column".to_string()), // Element 0 in step 1
+            (1, 1, "Girder".to_string()), // Element 1 in step 1
+            (2, 2, "Column".to_string()), // Element 2 in step 2
+            (3, 3, "Girder".to_string()), // Element 3 in step 3
+        ];
+
+        step_data.set_step_data(step_table);
+
+        // At step 1: only elements 0, 1 visible
+        step_data.set_current_step(1);
+        let step1_elements = step_data.get_cumulative_elements(1);
+        assert_eq!(step1_elements, vec![0, 1]);
+        assert_eq!(step_data.get_step_element_count(1), 2);
+
+        // At step 2: elements 0, 1, 2 visible
+        step_data.set_current_step(2);
+        let step2_elements = step_data.get_cumulative_elements(2);
+        assert_eq!(step2_elements, vec![0, 1, 2]);
+        assert_eq!(step_data.get_step_element_count(2), 1);
+
+        // At step 3: all elements visible
+        step_data.set_current_step(3);
+        let step3_elements = step_data.get_cumulative_elements(3);
+        assert_eq!(step3_elements, vec![0, 1, 2, 3]);
+        assert_eq!(step_data.get_step_element_count(3), 1);
+    }
+
+    #[test]
+    fn test_get_step_info_formats() {
+        // Tests step info formatting
+        let base = create_test_render_data();
+        let mut step_data = StepRenderData::new(base);
+
+        // No steps
+        assert_eq!(step_data.get_step_info(), "No steps");
+
+        // With steps
+        let step_table = vec![
+            (1, 0, "Column".to_string()),
+            (2, 1, "Girder".to_string()),
+            (3, 2, "Column".to_string()),
+        ];
+        step_data.set_step_data(step_table);
+
+        // At step 1
+        assert_eq!(step_data.get_step_info(), "Step 1/3");
+
+        // Navigate to step 2
+        step_data.next_step();
+        assert_eq!(step_data.get_step_info(), "Step 2/3");
+
+        // Navigate to step 3
+        step_data.next_step();
+        assert_eq!(step_data.get_step_info(), "Step 3/3");
+    }
 }
