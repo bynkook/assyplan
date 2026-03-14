@@ -422,7 +422,7 @@ Max Concurrent: 3
   - Message: `feat: add data parser and graphics core`
   - Files: `src/python/data_loader.py`, `src/python/encoding.py`, `src/rust/src/lib.rs`
 
-- [ ] 7. Node 테이블 생성 (x→y→z 정렬)
+- [x] 7. Node 테이블 생성 (x→y→z 정렬)
 
   **What to do**:
   - `node_table.py`에 Node 테이블 생성 함수 구현
@@ -466,7 +466,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 3 완료 후 일괄)
 
-- [ ] 8. Element 테이블 생성 (Column/Girder 분류)
+- [x] 8. Element 테이블 생성 (Column/Girder 분류)
 
   **What to do**:
   - `element_table.py`에 Element 테이블 생성 함수 구현
@@ -510,7 +510,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 3 완료 후 일괄)
 
-- [ ] 9. 기본 렌더링 구현 (grid, node, element)
+- [x] 9. 기본 렌더링 구현 (grid, node, element)
 
   **What to do**:
   - `renderer.rs`에 렌더링 함수 구현
