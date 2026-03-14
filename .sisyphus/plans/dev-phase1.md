@@ -557,7 +557,7 @@ Max Concurrent: 3
   - Message: `feat: add node/element table generation`
   - Files: `src/python/node_table.py`, `src/python/element_table.py`, `src/rust/src/graphics/renderer.rs`
 
-- [ ] 10. 검증 로직 구현
+- [x] 10. 검증 로직 구현
 
   **What to do**:
   - `validators.py`에 검증 함수 구현
@@ -610,7 +610,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 4 완료 후 일괄)
 
-- [ ] 11. PyO3 바인딩 구현
+- [x] 11. PyO3 바인딩 구현
 
   **What to do**:
   - `lib.rs`에 PyO3 함수 노출
@@ -653,7 +653,7 @@ Max Concurrent: 3
 
   **Commit**: NO (Wave 4 완료 후 일괄)
 
-- [ ] 12. UI 레이아웃 + 버튼 구현
+- [x] 12. UI 레이아웃 + 버튼 구현
 
   **What to do**:
   - `ui.rs`에 UI 레이아웃 구현
