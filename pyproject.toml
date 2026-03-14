@@ -1,0 +1,20 @@
+[project]
+name = "assyplan"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "charset_normalizer>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["maturin>=1.4"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "src/python"
+module-name = "assyplan._core"
