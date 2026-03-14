@@ -1,6 +1,6 @@
 // UI module for AssyPlan application
 
-use eframe::egui;
+use eframe::egui::{self, Widget};
 
 /// UI State for managing application state
 pub struct UiState {
@@ -18,6 +18,12 @@ pub struct UiState {
     pub has_data: bool,
     /// Whether validation passed
     pub validation_passed: bool,
+    /// Current step (1-indexed)
+    pub current_step: usize,
+    /// Maximum step number
+    pub max_step: usize,
+    /// Direct input for step number
+    pub step_input: String,
 }
 
 impl UiState {
@@ -31,6 +37,9 @@ impl UiState {
             status_message: "Ready".to_string(),
             has_data: false,
             validation_passed: false,
+            current_step: 1,
+            max_step: 0,
+            step_input: "1".to_string(),
         }
     }
 
@@ -43,6 +52,16 @@ impl UiState {
         self.status_message = "Ready".to_string();
         self.has_data = false;
         self.validation_passed = false;
+        self.current_step = 1;
+        self.max_step = 0;
+        self.step_input = "1".to_string();
+    }
+
+    /// Set step data from Python step table
+    pub fn set_step_data(&mut self, max_step: usize) {
+        self.max_step = max_step;
+        self.current_step = 1;
+        self.step_input = "1".to_string();
     }
 }
 
@@ -104,6 +123,63 @@ pub fn render_header(ui: &mut egui::Ui, state: &mut UiState) {
 
         // ID labels toggle
         ui.checkbox(&mut state.show_id_labels, "Show IDs");
+
+        // Step navigation (only show if we have steps)
+        if state.max_step > 0 {
+            ui.separator();
+
+            // Step label
+            ui.label(format!("Step {}/{}", state.current_step, state.max_step));
+
+            // Previous button
+            let prev_enabled = state.current_step > 1;
+            if ui
+                .add_enabled(prev_enabled, egui::Button::new("◀"))
+                .clicked()
+            {
+                state.current_step = state.current_step.saturating_sub(1);
+                state.step_input = state.current_step.to_string();
+            }
+
+            // Slider for step navigation
+            let mut step_slider = state.current_step;
+            ui.add(
+                egui::Slider::new(&mut step_slider, 1..=state.max_step)
+                    .step_by(1.0)
+                    .show_value(false),
+            );
+            if step_slider != state.current_step {
+                state.current_step = step_slider;
+                state.step_input = state.current_step.to_string();
+            }
+
+            // Next button
+            let next_enabled = state.current_step < state.max_step;
+            if ui
+                .add_enabled(next_enabled, egui::Button::new("▶"))
+                .clicked()
+            {
+                state.current_step = (state.current_step + 1).min(state.max_step);
+                state.step_input = state.current_step.to_string();
+            }
+
+            // Direct input field
+            let step_input_response = egui::TextEdit::singleline(&mut state.step_input)
+                .desired_width(50.0)
+                .ui(ui);
+
+            // Parse input on Enter or when focus is lost
+            if step_input_response.lost_focus() {
+                if let Ok(step) = state.step_input.parse::<usize>() {
+                    let clamped = step.max(1).min(state.max_step);
+                    state.current_step = clamped;
+                    state.step_input = clamped.to_string();
+                } else {
+                    // Invalid input - reset to current step
+                    state.step_input = state.current_step.to_string();
+                }
+            }
+        }
     });
 }
 
@@ -237,6 +313,9 @@ mod tests {
         assert_eq!(state.mode, "Development");
         assert!(!state.has_data);
         assert!(!state.validation_passed);
+        assert_eq!(state.current_step, 1);
+        assert_eq!(state.max_step, 0);
+        assert_eq!(state.step_input, "1");
     }
 
     #[test]
@@ -247,6 +326,9 @@ mod tests {
         state.file_path = "test.csv".to_string();
         state.has_data = true;
         state.validation_passed = true;
+        state.current_step = 5;
+        state.max_step = 10;
+        state.step_input = "5".to_string();
 
         state.reset();
 
@@ -255,5 +337,40 @@ mod tests {
         assert!(state.file_path.is_empty());
         assert!(!state.has_data);
         assert!(!state.validation_passed);
+        assert_eq!(state.current_step, 1);
+        assert_eq!(state.max_step, 0);
+        assert_eq!(state.step_input, "1");
+    }
+
+    #[test]
+    fn test_set_step_data() {
+        let mut state = UiState::new();
+
+        // Initial state
+        assert_eq!(state.current_step, 1);
+        assert_eq!(state.max_step, 0);
+
+        // Set step data
+        state.set_step_data(5);
+
+        assert_eq!(state.current_step, 1);
+        assert_eq!(state.max_step, 5);
+        assert_eq!(state.step_input, "1");
+    }
+
+    #[test]
+    fn test_set_step_data_overwrites() {
+        let mut state = UiState::new();
+
+        state.set_step_data(5);
+        state.current_step = 3;
+        state.step_input = "3".to_string();
+
+        // Setting new step data should reset to step 1
+        state.set_step_data(10);
+
+        assert_eq!(state.current_step, 1);
+        assert_eq!(state.max_step, 10);
+        assert_eq!(state.step_input, "1");
     }
 }

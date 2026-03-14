@@ -129,6 +129,50 @@ impl From<graphics::RenderData> for PyRenderData {
     }
 }
 
+/// Python-compatible StepTable representation
+/// Format: [(workfront_id, step, member_id), ...]
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct PyStepTable {
+    #[pyo3(get)]
+    pub entries: Vec<(i32, usize, String)>, // (workfront_id, step, member_id)
+    #[pyo3(get)]
+    pub max_step: usize,
+}
+
+#[pymethods]
+impl PyStepTable {
+    #[new]
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            max_step: 0,
+        }
+    }
+
+    fn add_entry(&mut self, workfront_id: i32, step: usize, member_id: String) {
+        self.entries.push((workfront_id, step, member_id));
+        if step > self.max_step {
+            self.max_step = step;
+        }
+    }
+
+    fn get_entries_raw(&self) -> Vec<(i32, usize, String)> {
+        self.entries.clone()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.max_step = 0;
+    }
+}
+
+impl Default for PyStepTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // eframe Application
 // ============================================================================
@@ -274,13 +318,44 @@ fn render_data(data: &PyRenderData) -> PyResult<()> {
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
+/// Load step data from a PyStepTable
+#[pyfunction]
+fn load_step_data(step_table: &PyStepTable) -> PyResult<usize> {
+    // Returns max_step for verification
+    Ok(step_table.max_step)
+}
+
+/// Get step table info
+#[pyfunction]
+fn get_step_table_info(step_table: &PyStepTable) -> PyResult<String> {
+    Ok(format!(
+        "StepTable with {} entries, max_step={}",
+        step_table.entries.len(),
+        step_table.max_step
+    ))
+}
+
+/// Create a PyStepTable from Python list of tuples
+#[pyfunction]
+fn create_step_table(entries: Vec<(i32, usize, String)>) -> PyResult<PyStepTable> {
+    let mut table = PyStepTable::new();
+    for (workfront_id, step, member_id) in entries {
+        table.add_entry(workfront_id, step, member_id);
+    }
+    Ok(table)
+}
+
 #[pymodule]
 fn assyplan(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_and_validate, m)?)?;
     m.add_function(wrap_pyfunction!(render_data, m)?)?;
+    m.add_function(wrap_pyfunction!(load_step_data, m)?)?;
+    m.add_function(wrap_pyfunction!(get_step_table_info, m)?)?;
+    m.add_function(wrap_pyfunction!(create_step_table, m)?)?;
     m.add_class::<PyNode>()?;
     m.add_class::<PyElement>()?;
     m.add_class::<PyRenderData>()?;
+    m.add_class::<PyStepTable>()?;
     Ok(())
 }
 
@@ -293,5 +368,77 @@ mod tests {
     #[test]
     fn test_app_struct_exists() {
         assert!(true);
+    }
+
+    #[test]
+    fn test_pystep_table_new() {
+        use super::PyStepTable;
+
+        let table = PyStepTable::new();
+        assert!(table.entries.is_empty());
+        assert_eq!(table.max_step, 0);
+    }
+
+    #[test]
+    fn test_pystep_table_add_entry() {
+        use super::PyStepTable;
+
+        let mut table = PyStepTable::new();
+        table.add_entry(1, 1, "member_1".to_string());
+
+        assert_eq!(table.entries.len(), 1);
+        assert_eq!(table.max_step, 1);
+        assert_eq!(table.entries[0], (1, 1, "member_1".to_string()));
+    }
+
+    #[test]
+    fn test_pystep_table_multiple_entries() {
+        use super::PyStepTable;
+
+        let mut table = PyStepTable::new();
+        table.add_entry(1, 1, "member_1".to_string());
+        table.add_entry(2, 1, "member_2".to_string());
+        table.add_entry(3, 2, "member_3".to_string());
+        table.add_entry(4, 2, "member_4".to_string());
+
+        assert_eq!(table.entries.len(), 4);
+        assert_eq!(table.max_step, 2);
+    }
+
+    #[test]
+    fn test_pystep_table_get_entries() {
+        use super::PyStepTable;
+
+        let mut table = PyStepTable::new();
+        table.add_entry(1, 1, "member_1".to_string());
+
+        let entries = table.get_entries_raw();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_pystep_table_clear() {
+        use super::PyStepTable;
+
+        let mut table = PyStepTable::new();
+        table.add_entry(1, 1, "member_1".to_string());
+        table.clear();
+
+        assert!(table.entries.is_empty());
+        assert_eq!(table.max_step, 0);
+    }
+
+    #[test]
+    fn test_pystep_table_order_preserved() {
+        use super::PyStepTable;
+
+        let mut table = PyStepTable::new();
+        table.add_entry(3, 2, "member_c".to_string());
+        table.add_entry(1, 1, "member_a".to_string());
+        table.add_entry(2, 1, "member_b".to_string());
+
+        assert_eq!(table.entries[0].0, 3);
+        assert_eq!(table.entries[1].0, 1);
+        assert_eq!(table.entries[2].0, 2);
     }
 }
