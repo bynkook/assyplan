@@ -1,10 +1,10 @@
 // Step-based cumulative rendering module for AssyPlan
 // Provides step-by-step construction visualization with caching for 60fps performance
 
-use eframe::egui::{Color32, Painter, Rect, Stroke};
-use std::collections::HashMap;
+use eframe::egui::{Color32, Painter, Pos2, Rect, Stroke};
+use std::collections::{BTreeSet, HashMap};
 
-use super::renderer::RenderData;
+use super::{renderer::RenderData, renderer::VisibilitySettings, view_state::ViewState};
 
 /// Step-based render data with cumulative rendering support
 ///
@@ -214,25 +214,54 @@ impl StepRenderData {
     ///
     /// - Steps 1 to (current_step-1): grey, semi-transparent
     /// - Step current_step: original colors (red for Column, green for Girder)
-    /// - Grid and nodes: always render normally
+    /// - Grid and nodes: render based on visibility settings
     ///
     /// # Arguments
     /// * `painter` - Egui painter for rendering
     /// * `rect` - Clipping rectangle
-    pub fn render_step(&self, painter: &Painter, rect: Rect) {
-        // Render grid and nodes always (all visible) - inline to avoid private method issue
-        self.render_grid_inline(painter, rect);
-        self.render_nodes_inline(painter, rect);
+    /// * `visibility` - Visibility settings for grid, nodes, elements
+    pub fn render_step(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        view_state: &ViewState,
+        visibility: &VisibilitySettings,
+    ) {
+        // Render grid and nodes based on visibility settings
+        if visibility.show_grid {
+            self.render_grid_inline(painter, rect, view_state);
+        }
+        if visibility.show_nodes {
+            self.render_nodes_inline(painter, rect, view_state);
+        }
 
         // Render elements with step coloring
-        self.render_step_elements(painter, rect);
+        if visibility.show_elements {
+            self.render_step_elements(painter, rect, view_state);
+        }
     }
 
-    /// Render grid lines (inlined from RenderData to avoid private method issue)
-    fn render_grid_inline(&self, painter: &Painter, rect: Rect) {
+    /// Render grid lines (Revit-style with bubble markers)
+    /// Grid lines are drawn at unique X and Y node coordinates on the min_z plane
+    fn render_grid_inline(&self, painter: &Painter, _rect: Rect, view_state: &ViewState) {
         if self.base.nodes.is_empty() {
             return;
         }
+
+        // Collect unique X and Y coordinates using BTreeSet for sorted order
+        // Use i64 keys (coordinate * 10) to handle floating point comparison
+        let unique_x: BTreeSet<i64> = self
+            .base
+            .nodes
+            .iter()
+            .map(|n| (n.x * 10.0).round() as i64)
+            .collect();
+        let unique_y: BTreeSet<i64> = self
+            .base
+            .nodes
+            .iter()
+            .map(|n| (n.y * 10.0).round() as i64)
+            .collect();
 
         // Find bounds
         let min_x = self
@@ -259,40 +288,134 @@ impl StepRenderData {
             .iter()
             .map(|n| n.y)
             .fold(f64::NEG_INFINITY, f64::max);
+        let min_z = self
+            .base
+            .nodes
+            .iter()
+            .map(|n| n.z)
+            .fold(f64::INFINITY, f64::min);
 
-        let grid_size = 1000.0; // Grid spacing
+        // Grid line stroke
+        let stroke = Stroke::new(1.0, Color32::from_gray(120));
 
-        // Vertical grid lines
-        let start_x = (min_x / grid_size).floor() * grid_size;
-        let end_x = (max_x / grid_size).ceil() * grid_size;
-        let mut x = start_x;
-        while x <= end_x {
-            let p1 = self.base.project_to_2d(x, min_y, 0.0);
-            let p2 = self.base.project_to_2d(x, max_y, 0.0);
-            if rect.contains(p1) || rect.contains(p2) {
-                painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_gray(100)));
-            }
-            x += grid_size;
+        // Extension distance for grid lines beyond data bounds (for bubble marker placement)
+        let extend_dist = (max_x - min_x).max(max_y - min_y) * 0.15;
+
+        // Bubble marker settings
+        let bubble_radius = 12.0_f32;
+        let bubble_stroke = Stroke::new(1.5, Color32::from_gray(100));
+        let text_color = Color32::from_gray(80);
+
+        // Draw X-direction grid lines (vertical lines in plan view)
+        for (idx, &x_key) in unique_x.iter().enumerate() {
+            let x = x_key as f64 / 10.0;
+            let p1 = self
+                .base
+                .project_to_2d(x, min_y - extend_dist, min_z, view_state);
+            let p2 = self
+                .base
+                .project_to_2d(x, max_y + extend_dist, min_z, view_state);
+
+            // Draw grid line
+            painter.line_segment([p1, p2], stroke);
+
+            // Draw numbered bubble marker at extended end
+            self.draw_grid_bubble(
+                painter,
+                p1,
+                idx + 1,
+                bubble_radius,
+                bubble_stroke,
+                text_color,
+            );
         }
 
-        // Horizontal grid lines
-        let start_y = (min_y / grid_size).floor() * grid_size;
-        let end_y = (max_y / grid_size).ceil() * grid_size;
-        let mut y = start_y;
-        while y <= end_y {
-            let p1 = self.base.project_to_2d(min_x, y, 0.0);
-            let p2 = self.base.project_to_2d(max_x, y, 0.0);
-            if rect.contains(p1) || rect.contains(p2) {
-                painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_gray(100)));
-            }
-            y += grid_size;
+        // Draw Y-direction grid lines (horizontal lines in plan view)
+        // Use letters A, B, C... for Y-direction grids (Revit convention)
+        for (idx, &y_key) in unique_y.iter().enumerate() {
+            let y = y_key as f64 / 10.0;
+            let p1 = self
+                .base
+                .project_to_2d(min_x - extend_dist, y, min_z, view_state);
+            let p2 = self
+                .base
+                .project_to_2d(max_x + extend_dist, y, min_z, view_state);
+
+            // Draw grid line
+            painter.line_segment([p1, p2], stroke);
+
+            // Draw lettered bubble marker at extended end
+            let label = Self::index_to_letter(idx);
+            self.draw_grid_bubble_text(
+                painter,
+                p1,
+                &label,
+                bubble_radius,
+                bubble_stroke,
+                text_color,
+            );
         }
     }
 
+    /// Draw a numbered bubble marker for grid lines
+    fn draw_grid_bubble(
+        &self,
+        painter: &Painter,
+        pos: Pos2,
+        number: usize,
+        radius: f32,
+        stroke: Stroke,
+        text_color: Color32,
+    ) {
+        // Draw circle
+        painter.circle_stroke(pos, radius, stroke);
+
+        // Draw number text centered in bubble
+        let text = format!("{}", number);
+        let font_id = eframe::egui::FontId::proportional(radius * 1.2);
+        let galley = painter.layout_no_wrap(text, font_id, text_color);
+        let text_pos = Pos2::new(pos.x - galley.size().x / 2.0, pos.y - galley.size().y / 2.0);
+        painter.galley(text_pos, galley, text_color);
+    }
+
+    /// Draw a text bubble marker for grid lines (for letter labels)
+    fn draw_grid_bubble_text(
+        &self,
+        painter: &Painter,
+        pos: Pos2,
+        text: &str,
+        radius: f32,
+        stroke: Stroke,
+        text_color: Color32,
+    ) {
+        // Draw circle
+        painter.circle_stroke(pos, radius, stroke);
+
+        // Draw text centered in bubble
+        let font_id = eframe::egui::FontId::proportional(radius * 1.2);
+        let galley = painter.layout_no_wrap(text.to_string(), font_id, text_color);
+        let text_pos = Pos2::new(pos.x - galley.size().x / 2.0, pos.y - galley.size().y / 2.0);
+        painter.galley(text_pos, galley, text_color);
+    }
+
+    /// Convert index to letter (0 -> "A", 1 -> "B", ..., 25 -> "Z", 26 -> "AA", ...)
+    fn index_to_letter(idx: usize) -> String {
+        let mut result = String::new();
+        let mut n = idx;
+        loop {
+            result.insert(0, (b'A' + (n % 26) as u8) as char);
+            if n < 26 {
+                break;
+            }
+            n = n / 26 - 1;
+        }
+        result
+    }
+
     /// Render nodes as small dots (inlined from RenderData to avoid private method issue)
-    fn render_nodes_inline(&self, painter: &Painter, rect: Rect) {
+    fn render_nodes_inline(&self, painter: &Painter, rect: Rect, view_state: &ViewState) {
         for node in &self.base.nodes {
-            let pos = self.base.project_to_2d(node.x, node.y, node.z);
+            let pos = self.base.project_to_2d(node.x, node.y, node.z, view_state);
             if rect.contains(pos) {
                 // Draw a small circle for each node
                 let radius = 3.0;
@@ -302,7 +425,7 @@ impl StepRenderData {
     }
 
     /// Render elements with step-based coloring
-    fn render_step_elements(&self, painter: &Painter, rect: Rect) {
+    fn render_step_elements(&self, painter: &Painter, rect: Rect, view_state: &ViewState) {
         if self.base.elements.is_empty() || self.max_step == 0 {
             return;
         }
@@ -334,8 +457,8 @@ impl StepRenderData {
             let node_j = self.base.nodes.iter().find(|n| n.id == element.node_j_id);
 
             if let (Some(ni), Some(nj)) = (node_i, node_j) {
-                let p1 = self.base.project_to_2d(ni.x, ni.y, ni.z);
-                let p2 = self.base.project_to_2d(nj.x, nj.y, nj.z);
+                let p1 = self.base.project_to_2d(ni.x, ni.y, ni.z, view_state);
+                let p2 = self.base.project_to_2d(nj.x, nj.y, nj.z, view_state);
 
                 // Only draw if at least one point is in rect
                 if rect.contains(p1) || rect.contains(p2) {
@@ -376,12 +499,10 @@ impl Default for StepRenderData {
     }
 }
 
-// Import the parent module for RenderData
-use super::renderer;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphics::renderer;
 
     fn create_test_render_data() -> RenderData {
         let mut data = RenderData::new();

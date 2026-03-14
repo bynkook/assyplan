@@ -6,6 +6,10 @@ use eframe::egui::{self, Widget};
 pub struct UiState {
     /// Whether to show ID labels on nodes
     pub show_id_labels: bool,
+    /// Whether to show node IDs
+    pub show_node_ids: bool,
+    /// Whether to show element IDs
+    pub show_element_ids: bool,
     /// Current mode: "Development" or "Simulation"
     pub mode: String,
     /// Current file path loaded
@@ -24,6 +28,12 @@ pub struct UiState {
     pub max_step: usize,
     /// Direct input for step number
     pub step_input: String,
+    /// Visibility: show grid lines
+    pub show_grid: bool,
+    /// Visibility: show nodes
+    pub show_nodes: bool,
+    /// Visibility: show elements
+    pub show_elements: bool,
 }
 
 impl UiState {
@@ -31,6 +41,8 @@ impl UiState {
     pub fn new() -> Self {
         Self {
             show_id_labels: true,
+            show_node_ids: true,
+            show_element_ids: true,
             mode: "Development".to_string(),
             file_path: String::new(),
             current_tab: "View".to_string(),
@@ -40,12 +52,17 @@ impl UiState {
             current_step: 1,
             max_step: 0,
             step_input: "1".to_string(),
+            show_grid: true,
+            show_nodes: true,
+            show_elements: true,
         }
     }
 
     /// Reset state to initial values
     pub fn reset(&mut self) {
         self.show_id_labels = true;
+        self.show_node_ids = true;
+        self.show_element_ids = true;
         self.mode = "Development".to_string();
         self.file_path.clear();
         self.current_tab = "View".to_string();
@@ -55,6 +72,9 @@ impl UiState {
         self.current_step = 1;
         self.max_step = 0;
         self.step_input = "1".to_string();
+        self.show_grid = true;
+        self.show_nodes = true;
+        self.show_elements = true;
     }
 
     /// Set step data from Python step table

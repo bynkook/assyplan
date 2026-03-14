@@ -1,0 +1,10 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
