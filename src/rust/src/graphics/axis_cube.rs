@@ -96,28 +96,43 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
         ), // -Y (dark green)
     ];
 
-    // We use pure Painter's Algorithm: draw all 6 faces back-to-front by depth.
-    // No back-face culling — culling direction depends on coordinate conventions
-    // and is error-prone. Instead, sorting by depth (farthest first) naturally
-    // hides back faces behind front faces, which is correct for a convex solid.
+    // Rendering strategy:
+    // 1. Back-face culling: skip faces whose outward normal points away from camera.
+    //    dot(normal, forward) < 0  →  back-facing  →  skip.
+    //    This alone prevents back faces from ever being drawn, so painter's algorithm
+    //    only needs to order the (at most 3) visible front faces correctly.
+    // 2. Painter's algorithm on the remaining front faces: draw farthest first.
+    //    "Farthest" = smallest depth value along forward axis
+    //    (depth = dot(vertex, forward); smaller = farther from camera in ortho).
 
-    // Build draw list: skip degenerate projections, compute depth for sorting
+    let (_, _, forward) = view_state.camera_basis();
+
+    // Build draw list: cull back-faces, skip degenerate projections, compute depth
     let mut draw_list: Vec<(Vec<Pos2>, Color32, f32, usize)> = faces
         .iter()
         .enumerate()
-        .filter_map(|(face_idx, (indices, _normal, color))| {
+        .filter_map(|(face_idx, (indices, normal, color))| {
+            // Back-face culling: dot(outward normal, forward) must be > 0
+            // to be front-facing (normal pointing toward camera).
+            let n_dot_f = dot(*normal, forward);
+            if n_dot_f <= 0.0 {
+                return None;
+            }
+
             // Build 2D screen points
             let points: Vec<Pos2> = indices
                 .iter()
                 .map(|&i| to_screen(center, projected[i].0, 14.0))
                 .collect();
 
-            // Skip degenerate (edge-on) polygons to avoid tessellator artifacts
+            // Skip degenerate (edge-on) polygons to avoid tessellator artifacts.
+            // In practice, back-face culling already removes most edge-on faces;
+            // this is a safety net for the exactly-orthogonal case.
             if polygon_area_2d(&points) < MIN_FACE_AREA {
                 return None;
             }
 
-            // Average depth along forward axis — larger = farther from camera
+            // Average depth: dot(vertex, forward). Smaller = farther from camera.
             let avg_depth =
                 indices.iter().map(|&i| projected[i].1).sum::<f32>() / indices.len() as f32;
 
@@ -125,12 +140,10 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
         })
         .collect();
 
-    // Sort back-to-front (painter's algorithm).
-    // Tie-break by face_idx for a fully deterministic, stable order —
-    // prevents depth-sort flipping when multiple faces share the same average depth
-    // (which happens exactly when the view is orthogonal to one of the cube axes).
+    // Sort back-to-front: draw farthest faces first (smallest depth first).
+    // Tie-break by face_idx for fully deterministic, stable order.
     draw_list.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
+        a.2.partial_cmp(&b.2)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.3.cmp(&b.3))
     });
@@ -196,6 +209,12 @@ fn paint_axis_line(
         egui::FontId::proportional(10.0),
         Color32::WHITE,
     );
+}
+
+/// Dot product of two 3D vectors.
+#[inline]
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// Shoelace formula: signed area of a 2D polygon (returns absolute value).
