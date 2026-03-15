@@ -8,5 +8,5 @@ pub mod view_state;
 
 pub use renderer::{Element, Node, RenderData, VisibilitySettings};
 pub use step_renderer::StepRenderData;
-pub use ui::{render, render_result_tab, ConstructionViewMode, DisplayMode, UiState};
+pub use ui::{render_result_tab, ConstructionViewMode, DisplayMode, UiState};
 pub use view_state::{ViewMode, ViewState};

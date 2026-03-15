@@ -74,3 +74,24 @@ desktop.ini
 *.temp
 *.log
 *.bak
+
+# Windows artifacts
+nul
+
+# egui temp cache
+UsersBgKingAppDataLocalTempegui-*/
+
+# Build output / generated files
+output/
+*.csv
+
+# maturin build artifacts
+src/python/assyplan/
+src/graphics/
+
+# Compiled Python extensions
+*.pyd
+*.dll
+
+# Executables (release build copy at root)
+assyplan.exe

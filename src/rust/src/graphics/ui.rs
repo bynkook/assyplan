@@ -1,6 +1,6 @@
 // UI module for AssyPlan application
 
-use eframe::egui::{self, Widget};
+use eframe::egui::{self};
 
 /// View mode for the graphics display
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,6 +92,10 @@ pub struct UiState {
     /// Elements installed at each step: step -> Vec<(element_id, member_type, floor)>
     /// Used to calculate step-based metrics
     pub step_elements: Vec<Vec<(i32, String, i32)>>,
+    /// Upper-floor column installation threshold (0.0~1.0)
+    /// Floor N columns cannot start until floor N-1 reaches this rate.
+    /// Used for metric visualization only (simulation constraint applied in Phase 2).
+    pub upper_floor_threshold: f64,
 }
 
 impl UiState {
@@ -126,6 +130,7 @@ impl UiState {
             floor_column_data: Vec::new(),
             needs_recalc: false,
             step_elements: Vec::new(),
+            upper_floor_threshold: 0.3,
         }
     }
 
@@ -175,186 +180,6 @@ impl Default for UiState {
     }
 }
 
-/// Render the header with buttons
-pub fn render_header(ui: &mut egui::Ui, state: &mut UiState) {
-    ui.horizontal(|ui| {
-        // File open button
-        if ui.button("📁 Open File").clicked() {
-            state.status_message = "Opening file dialog...".to_string();
-            // Note: Native file dialog would require additional setup
-            // For now, we'll use a simple approach
-        }
-
-        // Recalc button - triggers construction calculation
-        // Highlighted when needs_recalc is true (after load or reset)
-        let recalc_enabled = state.has_data;
-        let recalc_button = if state.needs_recalc && recalc_enabled {
-            // Highlighted button - orange/yellow to draw attention
-            egui::Button::new("🔄 Recalc").fill(egui::Color32::from_rgb(255, 180, 50))
-        } else {
-            egui::Button::new("🔄 Recalc")
-        };
-
-        if ui.add_enabled(recalc_enabled, recalc_button).clicked() {
-            // Signal that recalc was requested - actual calculation happens in lib.rs
-            state.status_message = "Calculating construction sequence...".to_string();
-        }
-
-        // Reset button - clears state
-        if ui.button("🗑 Reset").clicked() {
-            state.reset();
-            state.status_message = "Reset complete".to_string();
-        }
-
-        ui.separator();
-
-        // Mode toggle - Development/Simulation
-        ui.label("Mode:");
-
-        // Development radio button (always enabled)
-        ui.radio_value(&mut state.mode, "Development".to_string(), "Development");
-
-        // Simulation radio button (disabled - shown but not functional)
-        // Note: Simulation mode is intentionally disabled per requirements
-        ui.add_enabled(
-            false,
-            egui::Label::new("Simulation").sense(egui::Sense::click()),
-        );
-
-        // If somehow simulation was selected, revert to Development
-        if state.mode == "Simulation" {
-            state.mode = "Development".to_string();
-        }
-
-        ui.separator();
-
-        // ID labels toggle
-        ui.checkbox(&mut state.show_id_labels, "Show IDs");
-
-        // Step navigation (only show if we have steps)
-        if state.max_step > 0 {
-            ui.separator();
-
-            // Step label
-            ui.label(format!("Step {}/{}", state.current_step, state.max_step));
-
-            // Previous button
-            let prev_enabled = state.current_step > 1;
-            if ui
-                .add_enabled(prev_enabled, egui::Button::new("◀"))
-                .clicked()
-            {
-                state.current_step = state.current_step.saturating_sub(1);
-                state.step_input = state.current_step.to_string();
-            }
-
-            // Slider for step navigation
-            let mut step_slider = state.current_step;
-            ui.add(
-                egui::Slider::new(&mut step_slider, 1..=state.max_step)
-                    .step_by(1.0)
-                    .show_value(false),
-            );
-            if step_slider != state.current_step {
-                state.current_step = step_slider;
-                state.step_input = state.current_step.to_string();
-            }
-
-            // Next button
-            let next_enabled = state.current_step < state.max_step;
-            if ui
-                .add_enabled(next_enabled, egui::Button::new("▶"))
-                .clicked()
-            {
-                state.current_step = (state.current_step + 1).min(state.max_step);
-                state.step_input = state.current_step.to_string();
-            }
-
-            // Direct input field
-            let step_input_response = egui::TextEdit::singleline(&mut state.step_input)
-                .desired_width(50.0)
-                .ui(ui);
-
-            // Parse input on Enter or when focus is lost
-            if step_input_response.lost_focus() {
-                if let Ok(step) = state.step_input.parse::<usize>() {
-                    let clamped = step.max(1).min(state.max_step);
-                    state.current_step = clamped;
-                    state.step_input = clamped.to_string();
-                } else {
-                    // Invalid input - reset to current step
-                    state.step_input = state.current_step.to_string();
-                }
-            }
-        }
-    });
-}
-
-/// Render the status panel on the left
-pub fn render_status_panel(ui: &mut egui::Ui, state: &UiState) {
-    ui.heading("Status");
-    ui.separator();
-
-    ui.vertical(|ui| {
-        ui.label(format!("Mode: {}", state.mode));
-        ui.label(format!("Status: {}", state.status_message));
-
-        if state.has_data {
-            ui.label("Data loaded: Yes");
-            ui.label(format!(
-                "Validation: {}",
-                if state.validation_passed {
-                    "Passed"
-                } else {
-                    "Not validated"
-                }
-            ));
-        } else {
-            ui.label("Data loaded: No");
-        }
-
-        if !state.file_path.is_empty() {
-            ui.label(format!("File: {}", state.file_path));
-        }
-    });
-}
-
-/// Render tabs in the view panel
-pub fn render_tabs(ui: &mut egui::Ui, state: &mut UiState) {
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut state.current_tab, "Settings".to_string(), "Settings");
-        ui.selectable_value(&mut state.current_tab, "View".to_string(), "View");
-        ui.selectable_value(&mut state.current_tab, "Result".to_string(), "Result");
-    });
-    ui.separator();
-}
-
-/// Render the settings tab content
-pub fn render_settings_tab(ui: &mut egui::Ui, state: &mut UiState) {
-    ui.heading("Settings");
-    ui.separator();
-
-    ui.vertical(|ui| {
-        ui.checkbox(&mut state.show_id_labels, "Show ID Labels");
-
-        ui.label("View Options:");
-        ui.indent("view_opts", |ui| {
-            ui.label("Grid: Enabled");
-            ui.label("Nodes: Enabled");
-            ui.label("Elements: Enabled");
-        });
-    });
-}
-
-/// Render the view tab content
-pub fn render_view_tab(ui: &mut egui::Ui, _state: &UiState) {
-    ui.heading("View");
-    ui.separator();
-
-    ui.label("3D Viewport");
-    ui.label("(Render area for structure visualization)");
-}
-
 /// Render the result tab content
 pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
     ui.heading("Result");
@@ -365,6 +190,16 @@ pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
         return;
     }
 
+    egui::ScrollArea::vertical()
+        .id_source("result_tab_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            render_result_tab_inner(ui, state);
+        }); // end ScrollArea
+}
+
+/// Inner content of the result tab (wrapped in ScrollArea by render_result_tab)
+fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
     // Show warning if recalculation needed
     if state.needs_recalc {
         ui.horizontal(|ui| {
@@ -393,7 +228,43 @@ pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
     ui.separator();
 
     // ========================================================================
-    // Construction Summary
+    // Element Type Distribution  (섹션 1 - 먼저 출력)
+    // ========================================================================
+    ui.heading("Element Distribution");
+    ui.add_space(5.0);
+
+    if state.total_elements > 0 {
+        let column_ratio = state.total_columns as f32 / state.total_elements as f32;
+        let girder_ratio = state.total_girders as f32 / state.total_elements as f32;
+
+        ui.horizontal(|ui| {
+            ui.label("Columns:");
+            ui.add(
+                egui::ProgressBar::new(column_ratio)
+                    .text(format!("{:.1}%", column_ratio * 100.0))
+                    .fill(egui::Color32::from_rgb(100, 150, 200))
+                    .desired_width(150.0),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Girders:");
+            ui.add(
+                egui::ProgressBar::new(girder_ratio)
+                    .text(format!("{:.1}%", girder_ratio * 100.0))
+                    .fill(egui::Color32::from_rgb(200, 150, 100))
+                    .desired_width(150.0),
+            );
+        });
+    } else {
+        ui.label("No element data available.");
+    }
+
+    ui.add_space(15.0);
+    ui.separator();
+
+    // ========================================================================
+    // Construction Summary  (섹션 2)
     // ========================================================================
     ui.heading("Construction Summary");
     ui.add_space(5.0);
@@ -446,7 +317,7 @@ pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
     ui.separator();
 
     // ========================================================================
-    // Floor Column Installation Rates
+    // Floor Column Installation Rates  (섹션 3)
     // ========================================================================
     ui.heading("Floor Column Installation");
     ui.add_space(5.0);
@@ -455,6 +326,7 @@ pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
         ui.label("No floor data available.");
     } else {
         egui::ScrollArea::vertical()
+            .id_source("floor_scroll")
             .max_height(200.0)
             .show(ui, |ui| {
                 egui::Grid::new("floor_grid")
@@ -493,66 +365,579 @@ pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
     ui.separator();
 
     // ========================================================================
-    // Element Type Distribution
+    // Charts  (섹션 4)
     // ========================================================================
-    ui.heading("Element Distribution");
+
+    // Only show charts when step data is available
+    if state.max_step == 0 || state.step_elements.is_empty() {
+        ui.label("No step data. Press Recalc to generate charts.");
+        return;
+    }
+
+    // ---- Chart 1: 누적 총 부재 설치 갯수 per step ----
+    ui.heading("Cumulative Elements Installed");
     ui.add_space(5.0);
 
-    if state.total_elements > 0 {
-        let column_ratio = state.total_columns as f32 / state.total_elements as f32;
-        let girder_ratio = state.total_girders as f32 / state.total_elements as f32;
+    // Build cumulative data: (step as f32, cumulative_count as f32)
+    let mut cum: usize = 0;
+    let cumulative_data: Vec<(f32, f32)> = (1..=state.max_step)
+        .map(|s| {
+            if s < state.step_elements.len() {
+                cum += state.step_elements[s].len();
+            }
+            (s as f32, cum as f32)
+        })
+        .collect();
 
-        ui.horizontal(|ui| {
-            ui.label("Columns:");
-            ui.add(
-                egui::ProgressBar::new(column_ratio)
-                    .text(format!("{:.1}%", column_ratio * 100.0))
-                    .fill(egui::Color32::from_rgb(100, 150, 200))
-                    .desired_width(150.0),
-            );
-        });
+    let max_cum = cumulative_data.last().map(|p| p.1).unwrap_or(1.0).max(1.0);
+    let chart1_height = 160.0f32;
+    let chart_padding_left = 50.0f32;
+    let chart_padding_bottom = 24.0f32;
+    let chart_padding_top = 10.0f32;
+    let chart_padding_right = 20.0f32;
+    let chart_margin_h = 12.0f32; // horizontal outer margin
 
-        ui.horizontal(|ui| {
-            ui.label("Girders:");
-            ui.add(
-                egui::ProgressBar::new(girder_ratio)
-                    .text(format!("{:.1}%", girder_ratio * 100.0))
-                    .fill(egui::Color32::from_rgb(200, 150, 100))
-                    .desired_width(150.0),
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(chart_margin_h, 0.0))
+        .show(ui, |ui| {
+            let (chart1_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), chart1_height),
+                egui::Sense::hover(),
             );
-        });
+
+            {
+                let painter = ui.painter_at(chart1_rect);
+
+                // Background
+                painter.rect_filled(chart1_rect, 2.0, egui::Color32::from_rgb(30, 30, 40));
+
+                let plot_rect = egui::Rect::from_min_max(
+                    egui::pos2(
+                        chart1_rect.left() + chart_padding_left,
+                        chart1_rect.top() + chart_padding_top,
+                    ),
+                    egui::pos2(
+                        chart1_rect.right() - chart_padding_right,
+                        chart1_rect.bottom() - chart_padding_bottom,
+                    ),
+                );
+
+                // Axes
+                let axis_color = egui::Color32::from_rgb(160, 160, 160);
+                let grid_color = egui::Color32::from_rgb(60, 60, 70);
+
+                // Y-axis
+                painter.line_segment(
+                    [plot_rect.left_bottom(), plot_rect.left_top()],
+                    egui::Stroke::new(1.0, axis_color),
+                );
+                // X-axis
+                painter.line_segment(
+                    [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                    egui::Stroke::new(1.0, axis_color),
+                );
+
+                // Y-axis label: 0 and max
+                let font_id = egui::FontId::proportional(10.0);
+                painter.text(
+                    egui::pos2(chart1_rect.left(), plot_rect.bottom() - 5.0),
+                    egui::Align2::LEFT_CENTER,
+                    "0",
+                    font_id.clone(),
+                    axis_color,
+                );
+                painter.text(
+                    egui::pos2(chart1_rect.left(), plot_rect.top()),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{}", max_cum as usize),
+                    font_id.clone(),
+                    axis_color,
+                );
+
+                // Horizontal grid line at 50%
+                let mid_y = plot_rect.bottom() - plot_rect.height() * 0.5;
+                painter.line_segment(
+                    [
+                        egui::pos2(plot_rect.left(), mid_y),
+                        egui::pos2(plot_rect.right(), mid_y),
+                    ],
+                    egui::Stroke::new(0.5, grid_color),
+                );
+
+                // Helper: data coords -> screen coords
+                let max_step_f = state.max_step as f32;
+                let to_screen = |step: f32, val: f32| -> egui::Pos2 {
+                    let x = plot_rect.left()
+                        + (step - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                    let y = plot_rect.bottom() - (val / max_cum) * plot_rect.height();
+                    egui::pos2(x, y)
+                };
+
+                // Data line
+                if cumulative_data.len() >= 2 {
+                    let points: Vec<egui::Pos2> = cumulative_data
+                        .iter()
+                        .map(|(s, v)| to_screen(*s, *v))
+                        .collect();
+                    painter.add(egui::Shape::line(
+                        points,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 255)),
+                    ));
+                }
+
+                // Data points
+                for (s, v) in &cumulative_data {
+                    painter.circle_filled(
+                        to_screen(*s, *v),
+                        2.5,
+                        egui::Color32::from_rgb(100, 200, 255),
+                    );
+                }
+
+                // X-axis labels: show up to 10 evenly spaced step labels
+                let label_step = (state.max_step / 10).max(1);
+                for s in (1..=state.max_step).step_by(label_step) {
+                    let x = plot_rect.left()
+                        + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                    painter.text(
+                        egui::pos2(x, chart1_rect.bottom() - 4.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{}", s),
+                        font_id.clone(),
+                        axis_color,
+                    );
+                }
+
+                // Chart title inside
+                painter.text(
+                    egui::pos2(plot_rect.left() + 5.0, plot_rect.top() + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    "Step →",
+                    font_id.clone(),
+                    egui::Color32::from_rgb(120, 120, 140),
+                );
+            }
+
+            ui.add_space(10.0);
+        }); // end Chart 1 Frame
+    ui.separator();
+
+    // ---- Chart 2: 층별 기둥 설치율 per step ----
+    ui.heading("Floor Column Installation Rate by Step");
+    ui.add_space(5.0);
+
+    // Collect unique floors from floor_column_data (sorted ascending)
+    let mut floors: Vec<i32> = state.floor_column_data.iter().map(|(f, _, _)| *f).collect();
+    floors.sort();
+    floors.dedup();
+
+    // Build floor totals map: floor -> total_columns
+    let floor_totals: std::collections::HashMap<i32, usize> = state
+        .floor_column_data
+        .iter()
+        .map(|(f, total, _)| (*f, *total))
+        .collect();
+
+    // Compute per-step cumulative column count per floor
+    // floor_step_rate[floor_idx][step_idx (0-based)] = rate (0.0..=1.0)
+    let floor_step_rates: Vec<Vec<f32>> = floors
+        .iter()
+        .map(|floor| {
+            let total = *floor_totals.get(floor).unwrap_or(&1);
+            let total_f = total.max(1) as f32;
+            let mut cum_count: usize = 0;
+            (1..=state.max_step)
+                .map(|s| {
+                    if s < state.step_elements.len() {
+                        for (_eid, mtype, efloor) in &state.step_elements[s] {
+                            if mtype == "Column" && *efloor == *floor {
+                                cum_count += 1;
+                            }
+                        }
+                    }
+                    (cum_count as f32 / total_f).min(1.0)
+                })
+                .collect()
+        })
+        .collect();
+
+    // Floor line colors (shared by Chart 2 and Chart 3)
+    let floor_colors = [
+        egui::Color32::from_rgb(255, 100, 100),
+        egui::Color32::from_rgb(255, 180, 60),
+        egui::Color32::from_rgb(100, 220, 100),
+        egui::Color32::from_rgb(80, 180, 255),
+        egui::Color32::from_rgb(200, 100, 255),
+        egui::Color32::from_rgb(255, 120, 200),
+        egui::Color32::from_rgb(100, 240, 220),
+        egui::Color32::from_rgb(255, 240, 100),
+    ];
+
+    let chart2_height = 180.0f32;
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(chart_margin_h, 0.0))
+        .show(ui, |ui| {
+            let (chart2_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), chart2_height),
+                egui::Sense::hover(),
+            );
+
+            // Floor line colors (cycle through a palette)
+            {
+                let painter = ui.painter_at(chart2_rect);
+
+                // Background
+                painter.rect_filled(chart2_rect, 2.0, egui::Color32::from_rgb(30, 30, 40));
+
+                // Reserve right side for legend
+                let legend_width = 70.0f32;
+                let plot_rect = egui::Rect::from_min_max(
+                    egui::pos2(
+                        chart2_rect.left() + chart_padding_left,
+                        chart2_rect.top() + chart_padding_top,
+                    ),
+                    egui::pos2(
+                        chart2_rect.right() - chart_padding_right - legend_width,
+                        chart2_rect.bottom() - chart_padding_bottom,
+                    ),
+                );
+
+                let axis_color = egui::Color32::from_rgb(160, 160, 160);
+                let grid_color = egui::Color32::from_rgb(60, 60, 70);
+                let font_id = egui::FontId::proportional(10.0);
+
+                // Y-axis
+                painter.line_segment(
+                    [plot_rect.left_bottom(), plot_rect.left_top()],
+                    egui::Stroke::new(1.0, axis_color),
+                );
+                // X-axis
+                painter.line_segment(
+                    [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                    egui::Stroke::new(1.0, axis_color),
+                );
+
+                // Y-axis labels: 0%, 50%, 100%
+                for (frac, label) in &[(0.0f32, "0%"), (0.5, "50%"), (1.0, "100%")] {
+                    let y = plot_rect.bottom() - frac * plot_rect.height();
+                    painter.line_segment(
+                        [
+                            egui::pos2(plot_rect.left(), y),
+                            egui::pos2(plot_rect.right(), y),
+                        ],
+                        egui::Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
+                    );
+                    painter.text(
+                        egui::pos2(chart2_rect.left(), y),
+                        egui::Align2::LEFT_CENTER,
+                        *label,
+                        font_id.clone(),
+                        axis_color,
+                    );
+                }
+
+                let max_step_f = state.max_step as f32;
+
+                let to_screen2 = |step: f32, rate: f32| -> egui::Pos2 {
+                    let x = plot_rect.left()
+                        + (step - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                    let y = plot_rect.bottom() - rate * plot_rect.height();
+                    egui::pos2(x, y)
+                };
+
+                // Draw floor lines
+                for (fi, (floor, rates)) in floors.iter().zip(floor_step_rates.iter()).enumerate() {
+                    let color = floor_colors[fi % floor_colors.len()];
+
+                    if rates.len() >= 2 {
+                        let points: Vec<egui::Pos2> = rates
+                            .iter()
+                            .enumerate()
+                            .map(|(i, rate)| to_screen2(i as f32 + 1.0, *rate))
+                            .collect();
+                        painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+                    }
+
+                    // Legend
+                    let legend_x = chart2_rect.right() - legend_width + 5.0;
+                    let legend_y = chart2_rect.top() + chart_padding_top + fi as f32 * 14.0;
+                    painter.line_segment(
+                        [
+                            egui::pos2(legend_x, legend_y + 5.0),
+                            egui::pos2(legend_x + 14.0, legend_y + 5.0),
+                        ],
+                        egui::Stroke::new(2.0, color),
+                    );
+                    painter.text(
+                        egui::pos2(legend_x + 17.0, legend_y + 5.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("F{}", floor),
+                        font_id.clone(),
+                        color,
+                    );
+                }
+
+                // X-axis labels
+                let label_step = (state.max_step / 10).max(1);
+                for s in (1..=state.max_step).step_by(label_step) {
+                    let x = plot_rect.left()
+                        + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                    painter.text(
+                        egui::pos2(x, chart2_rect.bottom() - 4.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("{}", s),
+                        font_id.clone(),
+                        axis_color,
+                    );
+                }
+
+                // Step arrow label
+                painter.text(
+                    egui::pos2(plot_rect.left() + 5.0, plot_rect.top() + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    "Step →",
+                    font_id.clone(),
+                    egui::Color32::from_rgb(120, 120, 140),
+                );
+            }
+
+            ui.add_space(10.0);
+        }); // end Chart 2 Frame
+
+    ui.add_space(15.0);
+    ui.separator();
+
+    // ---- Chart 3: 상층부 기둥 설치율 (Upper-Floor Column Installation Rate) ----
+    ui.heading("Upper-Floor Column Installation Rate");
+    ui.add_space(3.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "Threshold: {:.0}%  —  each line F{{N+1}}/F{{N}} = upper(N+1) installed / lower(N) installed.",
+            state.upper_floor_threshold * 100.0
+        ))
+        .weak()
+        .small(),
+    );
+    ui.add_space(5.0);
+
+    // floors sorted ascending (same as Chart 2)
+    // For each floor N (except the top floor), compute per-step ratio:
+    //   cum_installed(N+1) / cum_installed(N)
+    // If cum(N) == 0, ratio = 0.0 (no columns on floor N yet, so upper rate is 0)
+    let lower_floors: Vec<i32> = floors
+        .iter()
+        .copied()
+        .filter(|&f| floors.contains(&(f + 1)))
+        .collect();
+
+    if lower_floors.is_empty() {
+        ui.label("Only one floor detected — no upper-floor constraint applicable.");
+    } else {
+        let threshold_f = state.upper_floor_threshold as f32;
+
+        // For each floor N, compute per-step: cum(N+1) / cum(N)
+        // If cum(N) == 0, ratio = 0.0
+        let upper_floor_rates: Vec<Vec<f32>> = lower_floors
+            .iter()
+            .map(|&floor_n| {
+                let upper_floor = floor_n + 1;
+                let mut cum_lower: usize = 0;
+                let mut cum_upper: usize = 0;
+                (1..=state.max_step)
+                    .map(|s| {
+                        if s < state.step_elements.len() {
+                            for (_eid, mtype, efloor) in &state.step_elements[s] {
+                                if mtype == "Column" {
+                                    if *efloor == floor_n {
+                                        cum_lower += 1;
+                                    } else if *efloor == upper_floor {
+                                        cum_upper += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if cum_lower == 0 {
+                            0.0f32
+                        } else {
+                            cum_upper as f32 / cum_lower as f32
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let chart3_height = 180.0f32;
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(chart_margin_h, 0.0))
+            .show(ui, |ui| {
+                let (chart3_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), chart3_height),
+                    egui::Sense::hover(),
+                );
+
+                {
+                    let painter = ui.painter_at(chart3_rect);
+
+                    // Background
+                    painter.rect_filled(chart3_rect, 2.0, egui::Color32::from_rgb(30, 30, 40));
+
+                    let legend_width = 70.0f32;
+                    let plot_rect = egui::Rect::from_min_max(
+                        egui::pos2(
+                            chart3_rect.left() + chart_padding_left,
+                            chart3_rect.top() + chart_padding_top,
+                        ),
+                        egui::pos2(
+                            chart3_rect.right() - chart_padding_right - legend_width,
+                            chart3_rect.bottom() - chart_padding_bottom,
+                        ),
+                    );
+
+                    let axis_color = egui::Color32::from_rgb(160, 160, 160);
+                    let grid_color = egui::Color32::from_rgb(60, 60, 70);
+                    let font_id = egui::FontId::proportional(10.0);
+
+                    // Dynamic Y-axis max: based on actual data range
+                    let y_max: f32 = upper_floor_rates
+                        .iter()
+                        .flat_map(|r| r.iter().copied())
+                        .fold(1.0f32, f32::max)
+                        .max(1.0);
+
+                    // Y-axis
+                    painter.line_segment(
+                        [plot_rect.left_bottom(), plot_rect.left_top()],
+                        egui::Stroke::new(1.0, axis_color),
+                    );
+                    // X-axis
+                    painter.line_segment(
+                        [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                        egui::Stroke::new(1.0, axis_color),
+                    );
+
+                    // Y-axis grid + labels: 0, 0.5*y_max, y_max
+                    for (frac, label) in &[
+                        (0.0f32, format!("0")),
+                        (0.5, format!("{:.1}", y_max * 0.5)),
+                        (1.0, format!("{:.1}", y_max)),
+                    ] {
+                        let y = plot_rect.bottom() - frac * plot_rect.height();
+                        painter.line_segment(
+                            [
+                                egui::pos2(plot_rect.left(), y),
+                                egui::pos2(plot_rect.right(), y),
+                            ],
+                            egui::Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
+                        );
+                        painter.text(
+                            egui::pos2(chart3_rect.left(), y),
+                            egui::Align2::LEFT_CENTER,
+                            label.as_str(),
+                            font_id.clone(),
+                            axis_color,
+                        );
+                    }
+
+                    let max_step_f = state.max_step as f32;
+
+                    let to_screen3 = |step: f32, ratio: f32| -> egui::Pos2 {
+                        let x = plot_rect.left()
+                            + (step - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                        let y = plot_rect.bottom() - (ratio / y_max) * plot_rect.height();
+                        egui::pos2(x, y)
+                    };
+
+                    // Threshold horizontal dashed line (threshold_f is 0~1, map to y_max scale)
+                    let threshold_ratio = threshold_f * y_max;
+                    let threshold_y =
+                        plot_rect.bottom() - (threshold_ratio / y_max) * plot_rect.height();
+                    // Draw dashed line manually (every 6px dash / 4px gap)
+                    {
+                        let dash_len = 6.0f32;
+                        let gap_len = 4.0f32;
+                        let mut x = plot_rect.left();
+                        let threshold_color = egui::Color32::from_rgb(255, 80, 80);
+                        while x < plot_rect.right() {
+                            let x_end = (x + dash_len).min(plot_rect.right());
+                            painter.line_segment(
+                                [egui::pos2(x, threshold_y), egui::pos2(x_end, threshold_y)],
+                                egui::Stroke::new(1.5, threshold_color),
+                            );
+                            x += dash_len + gap_len;
+                        }
+                        // Threshold label on right
+                        painter.text(
+                            egui::pos2(plot_rect.right() + 3.0, threshold_y),
+                            egui::Align2::LEFT_CENTER,
+                            format!("{:.0}%", threshold_f * 100.0),
+                            font_id.clone(),
+                            threshold_color,
+                        );
+                    }
+
+                    // Draw floor lines: F{N} line = cum(N+1) / cum(N) ratio
+                    for (fi, (&floor_n, rates)) in lower_floors
+                        .iter()
+                        .zip(upper_floor_rates.iter())
+                        .enumerate()
+                    {
+                        let color = floor_colors[fi % floor_colors.len()];
+
+                        if rates.len() >= 2 {
+                            let points: Vec<egui::Pos2> = rates
+                                .iter()
+                                .enumerate()
+                                .map(|(i, rate)| to_screen3(i as f32 + 1.0, *rate))
+                                .collect();
+                            painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, color)));
+                        }
+
+                        // Legend: "F{N+1}/F{N}" = upper(N+1) installed / lower(N) installed
+                        let legend_x = chart3_rect.right() - legend_width + 5.0;
+                        let legend_y = chart3_rect.top() + chart_padding_top + fi as f32 * 14.0;
+                        painter.line_segment(
+                            [
+                                egui::pos2(legend_x, legend_y + 5.0),
+                                egui::pos2(legend_x + 14.0, legend_y + 5.0),
+                            ],
+                            egui::Stroke::new(2.0, color),
+                        );
+                        painter.text(
+                            egui::pos2(legend_x + 17.0, legend_y + 5.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("F{}/F{}", floor_n + 1, floor_n),
+                            font_id.clone(),
+                            color,
+                        );
+                    }
+
+                    // X-axis labels
+                    let label_step = (state.max_step / 10).max(1);
+                    for s in (1..=state.max_step).step_by(label_step) {
+                        let x = plot_rect.left()
+                            + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                        painter.text(
+                            egui::pos2(x, chart3_rect.bottom() - 4.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            format!("{}", s),
+                            font_id.clone(),
+                            axis_color,
+                        );
+                    }
+
+                    // Step arrow label
+                    painter.text(
+                        egui::pos2(plot_rect.left() + 5.0, plot_rect.top() + 2.0),
+                        egui::Align2::LEFT_TOP,
+                        "Step →",
+                        font_id.clone(),
+                        egui::Color32::from_rgb(120, 120, 140),
+                    );
+                }
+
+                ui.add_space(10.0);
+            }); // end Chart 3 Frame
     }
-}
-
-/// Main UI rendering function that creates the full layout
-pub fn render(ui_state: &mut UiState, ctx: &egui::Context) {
-    // Top panel - Header with buttons
-    egui::TopBottomPanel::top("header").show(ctx, |ui| {
-        egui::menu::bar(ui, |ui| {
-            ui.label("AssyPlan - Development Mode");
-            ui.separator();
-            render_header(ui, ui_state);
-        });
-    });
-
-    // Left panel - Status
-    egui::SidePanel::left("status_panel")
-        .default_width(200.0)
-        .show(ctx, |ui| {
-            render_status_panel(ui, ui_state);
-        });
-
-    // Central panel - View with tabs
-    egui::CentralPanel::default().show(ctx, |ui| {
-        render_tabs(ui, ui_state);
-
-        match ui_state.current_tab.as_str() {
-            "Settings" => render_settings_tab(ui, ui_state),
-            "View" => render_view_tab(ui, ui_state),
-            "Result" => render_result_tab(ui, ui_state),
-            _ => {}
-        }
-    });
 }
 
 #[cfg(test)]

@@ -806,8 +806,9 @@ impl eframe::App for AssyPlanApp {
                 // Recalc button - highlighted when calculation needed
                 let recalc_enabled = self.ui_state.has_data;
                 let recalc_button = if self.ui_state.needs_recalc && recalc_enabled {
-                    // Orange highlight to draw user attention
-                    egui::Button::new("🔄 Recalc").fill(egui::Color32::from_rgb(255, 180, 50))
+                    // Yellow border highlight to draw user attention
+                    egui::Button::new("🔄 Recalc")
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 0)))
                 } else {
                     egui::Button::new("🔄 Recalc")
                 };
