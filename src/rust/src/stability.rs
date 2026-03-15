@@ -586,8 +586,9 @@ pub fn assign_workfront_steps(
     sequence_table: &[SequenceEntry],
     elements: &[StabilityElement],
     nodes: &[StabilityNode],
-) -> Vec<StepEntry> {
+) -> (Vec<StepEntry>, Vec<String>) {
     let mut step_table: Vec<StepEntry> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
     // Create element lookup by ID
     let element_by_id: HashMap<i32, &StabilityElement> =
@@ -654,8 +655,23 @@ pub fn assign_workfront_steps(
             }
         }
 
-        // Handle remaining elements in final step (incomplete but must be saved)
+        // Handle remaining elements: loop ended without step_is_complete() ever returning true.
+        // These members could not form a stable configuration — this is a structural error.
         if !current_step_members.is_empty() {
+            errors.push(format!(
+                "Workfront {} step {} is incomplete: {} member(s) [{}] could not form a stable \
+                 configuration. Check that all required predecessor elements are present and \
+                 that the assembly satisfies minimum stability requirements.",
+                workfront_id,
+                current_step,
+                current_step_members.len(),
+                current_step_members
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            // Still record the step so the table is complete for diagnostics
             step_table.push(StepEntry {
                 workfront_id,
                 step: current_step,
@@ -664,7 +680,7 @@ pub fn assign_workfront_steps(
         }
     }
 
-    step_table
+    (step_table, errors)
 }
 
 /// Check if current step is complete (forms a stable configuration)
@@ -943,7 +959,9 @@ pub fn generate_all_tables(
     }
 
     // Assign workfront steps based on stability
-    result.step_table = assign_workfront_steps(&result.sequence_table, elements, nodes);
+    let (step_table, step_errors) = assign_workfront_steps(&result.sequence_table, elements, nodes);
+    result.step_table = step_table;
+    result.errors.extend(step_errors);
 
     // Calculate max step
     result.max_step = result.step_table.iter().map(|s| s.step).max().unwrap_or(0);
