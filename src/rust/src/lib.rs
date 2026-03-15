@@ -1448,9 +1448,91 @@ impl eframe::App for AssyPlanApp {
                             // Bottom panel: 3D view (resizable, default 300px)
                             egui::TopBottomPanel::bottom("sim_3d_panel")
                                 .resizable(true)
-                                .default_height(300.0)
-                                .min_height(80.0)
+                                .default_height(340.0)
+                                .min_height(100.0)
                                 .show_inside(ui, |ui| {
+                                    // ── Step navigation bar ───────────────────────────────
+                                    let (max_step, step_info) = self
+                                        .ui_state
+                                        .sim_selected_scenario
+                                        .and_then(|idx| self.ui_state.sim_scenarios.get(idx))
+                                        .map(|scenario| {
+                                            let ms = scenario.steps.len();
+                                            let step_disp = self.ui_state.sim_current_step.min(ms).max(1);
+                                            let info = scenario.steps.get(step_disp - 1).map(|s| {
+                                                format!(
+                                                    "WF {}  •  Floor {}  •  {} member(s): {:?}",
+                                                    s.workfront_id,
+                                                    s.floor,
+                                                    s.element_ids.len(),
+                                                    s.element_ids
+                                                )
+                                            });
+                                            (ms, info)
+                                        })
+                                        .unwrap_or((0, None));
+
+                                    ui.horizontal(|ui| {
+                                        // Prev
+                                        if ui
+                                            .add_enabled(
+                                                self.ui_state.sim_current_step > 1,
+                                                egui::Button::new("◀"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.ui_state.sim_current_step =
+                                                self.ui_state.sim_current_step.saturating_sub(1).max(1);
+                                            self.ui_state.sim_playing = false;
+                                        }
+                                        // Slider
+                                        if max_step > 0 {
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    &mut self.ui_state.sim_current_step,
+                                                    1..=max_step,
+                                                )
+                                                .text("Step")
+                                                .clamp_to_range(true),
+                                            );
+                                        }
+                                        // Next
+                                        if ui
+                                            .add_enabled(
+                                                max_step > 0
+                                                    && self.ui_state.sim_current_step < max_step,
+                                                egui::Button::new("▶"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.ui_state.sim_current_step =
+                                                (self.ui_state.sim_current_step + 1).min(max_step);
+                                            self.ui_state.sim_playing = false;
+                                        }
+                                        // Step counter
+                                        ui.separator();
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} / {}",
+                                                self.ui_state.sim_current_step.min(max_step.max(1)),
+                                                max_step
+                                            ))
+                                            .strong(),
+                                        );
+                                    });
+
+                                    // Step detail (floor / workfront / member list)
+                                    if let Some(info) = step_info {
+                                        ui.label(
+                                            egui::RichText::new(info)
+                                                .size(10.0)
+                                                .color(egui::Color32::from_rgb(160, 210, 255)),
+                                        );
+                                    }
+
+                                    ui.separator();
+
+                                    // ── 3D viewport (remaining space) ─────────────────────
                                     // Handle orbit/zoom/pan input first (needs &mut ViewState)
                                     let rect_3d = ui.available_rect_before_wrap();
                                     let resp = ui.allocate_rect(
