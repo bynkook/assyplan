@@ -237,7 +237,7 @@ pub sim_playing: bool,
 pub sim_speed: u32,          // 1, 2, or 4
 pub sim_current_step: usize, // 1-indexed
 pub sim_play_timer: f64,
-pub sim_weights: (f64, f64, f64),  // default (0.5, 0.3, 0.15)
+pub sim_weights: (f64, f64, f64),  // default (0.5, 0.3, 0.2) — sum = 1.0
 pub sim_running: bool,
 pub sim_scenario_count: usize,     // default 100
 ```
@@ -378,12 +378,30 @@ src/rust/
 | Result tab render_sim_result | ✅ |
 | XY Plot (egui::Painter) | ✅ |
 | Release build passing | ✅ |
+| Sim View 3D render (lib.rs View tab, inlined) | ✅ |
+| Scenario comparison chart (render_scenario_comparison_chart) | ✅ |
+| Debug file export (CSV per scenario + summary.txt) | ✅ |
+
+### Sim View 3D Render — Implementation Notes
+- Inlined directly in `lib.rs` View tab (NOT in sim_ui.rs — dead code `render_sim_3d` was removed)
+- When `DisplayMode::Simulation` and `sim_grid.is_some()` and a scenario is selected:
+  - Top panel: 3D render of installed elements at `sim_current_step` (orbit/zoom/pan via existing `ViewState`)
+  - Bottom panel: 2D grid plan with clickable workfront intersections
+- Element rendering uses `e.member_type == "Column"` string comparison (NOT enum)
+- Node access: `e.node_i_id` / `e.node_j_id` (SimElement fields, NOT `node_i`/`node_j`)
+- Grid stored as `self.sim_grid: Option<SimGrid>` on `AssyPlanApp` (NOT on `UiState`)
+- When storing: `self.sim_grid = Some(grid.clone())` to avoid borrow-after-move
+
+### Scenario Comparison Chart — Implementation Notes
+- Defined as `render_scenario_comparison_chart(ui, state)` in `sim_ui.rs`
+- Called at the bottom of `render_sim_result()` when `sim_scenarios.len() > 1`
+- Multi-line XY plot: X = step, Y = cumulative members installed
+- Shows top-10 scenarios (sorted by total_members_installed descending)
+- Selected scenario highlighted with thicker line + label
+- Drawn with `egui::Painter` directly (no external chart crate)
 
 ## Next Steps (Phase 3+)
 
-- **Playback animation**: auto-advance `sim_current_step` using `sim_play_timer` + `ctx.request_repaint()`
-- **Sim View 3D render**: render installed elements at `sim_current_step` in the View tab (currently shows 2D grid only)
-- **Scenario comparison chart**: multi-line XY plot for top-N scenarios
-- **Debug file export**: save scenario steps to CSV for external analysis
+- **Playback animation**: auto-advance `sim_current_step` using `sim_play_timer` + `ctx.request_repaint()` — explicitly deferred (not this session)
 - **get_floor_level() z-map caching**: see AGENTS.md §9.1 for optimization plan
 - **Background thread simulation**: prevent UI freeze during `run_all_scenarios()` on large grids

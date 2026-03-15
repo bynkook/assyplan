@@ -809,7 +809,6 @@ impl AssyPlanApp {
         );
 
         let grid = sim_grid::SimGrid::new(cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz);
-
         let scenarios =
             sim_engine::run_all_scenarios(count, &grid, &workfronts, weights, threshold);
 
@@ -1042,7 +1041,9 @@ impl eframe::App for AssyPlanApp {
                 }
 
                 // Recalc button - highlighted when calculation needed
-                let recalc_enabled = self.ui_state.has_data;
+                // Simulation mode doesn't require CSV data (generates its own grid)
+                let recalc_enabled = self.ui_state.has_data
+                    || self.ui_state.display_mode == graphics::DisplayMode::Simulation;
                 let recalc_button = if self.ui_state.needs_recalc && recalc_enabled {
                     // Yellow border highlight to draw user attention
                     egui::Button::new("🔄 Recalc")

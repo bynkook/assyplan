@@ -62,8 +62,7 @@ Thumbs.db
 desktop.ini
 
 # Sisyphus (AI agent state - optional, can be tracked if needed)
-.sisyphus/boulder.json
-.sisyphus/notepads/
+.sisyphus/
 
 # Local development files (keep in repo if needed for testing)
 # data.txt
@@ -75,6 +74,7 @@ desktop.ini
 *.log
 *.bak
 *.bat
+debug_output.txt
 
 # Screenshots / images (do not commit)
 *.png

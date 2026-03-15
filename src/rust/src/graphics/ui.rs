@@ -275,9 +275,9 @@ impl UiState {
             sim_speed: 1,
             sim_current_step: 1,
             sim_play_timer: 0.0,
-            sim_weights: (0.5, 0.3, 0.15),
+            sim_weights: (0.5, 0.3, 0.2),
             sim_running: false,
-            sim_scenario_count: 100,
+            sim_scenario_count: 2,
             sim_export_requested: false,
             sim_export_status: String::new(),
         }
