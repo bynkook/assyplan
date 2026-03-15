@@ -125,10 +125,13 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
     });
 
     for (points, color, _, _) in draw_list {
+        // Fill only — no stroke. egui 0.27's convex_polygon stroke is not clipped
+        // by the painter's clip_rect, causing edges to bleed across the screen.
+        // The face border effect is achieved by drawing a slightly darker fill.
         painter.add(Shape::convex_polygon(
             points,
             color.gamma_multiply(0.75),
-            Stroke::new(1.0, color),
+            Stroke::NONE,
         ));
     }
 
