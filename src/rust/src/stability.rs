@@ -470,9 +470,23 @@ pub fn build_construction_sequence(
             if let Some(&pred_idx) = member_id_to_idx.get(pred) {
                 in_degree[idx] += 1;
                 dependents[pred_idx].push(idx);
+            } else {
+                // Predecessor specified but not found in element list —
+                // treat as an independent workfront start (predecessor is external/missing)
+                current_workfront += 1;
+                workfront_ids[idx] = current_workfront;
             }
         } else {
             // No predecessor = workfront starting point
+            current_workfront += 1;
+            workfront_ids[idx] = current_workfront;
+        }
+    }
+
+    // Safety pass: any element still with workfront_id == 0 after graph construction
+    // (should not happen, but guard against it to enforce 1-indexed IDs)
+    for idx in 0..num_elements {
+        if in_degree[idx] == 0 && workfront_ids[idx] == 0 {
             current_workfront += 1;
             workfront_ids[idx] = current_workfront;
         }
@@ -588,13 +602,11 @@ pub fn assign_workfront_steps(
             .push(entry.element_id);
     }
 
-    // Process each workfront
-    for workfront_id in workfront_sequences
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-    {
+    // Process each workfront in sorted order for deterministic step assignment
+    let mut sorted_workfront_ids: Vec<i32> = workfront_sequences.keys().cloned().collect();
+    sorted_workfront_ids.sort();
+
+    for workfront_id in sorted_workfront_ids {
         let workfront_element_ids = workfront_sequences
             .get(&workfront_id)
             .cloned()
@@ -950,6 +962,40 @@ pub fn generate_all_tables(
                 step.element_ids.len(),
                 max_members_per_step
             ));
+        }
+    }
+
+    // Check minimum assembly stability for each workfront's first step:
+    // Disconnected first steps must satisfy minimum assembly (3 columns + 2 girders at 90°)
+    {
+        let element_by_id: HashMap<i32, &StabilityElement> =
+            elements.iter().map(|e| (e.id, e)).collect();
+        let mut workfront_first_step_checked: HashSet<i32> = HashSet::new();
+        for step in &result.step_table {
+            if workfront_first_step_checked.contains(&step.workfront_id) {
+                continue;
+            }
+            workfront_first_step_checked.insert(step.workfront_id);
+            // Collect elements in this first step
+            let step_elements: Vec<StabilityElement> = step
+                .element_ids
+                .iter()
+                .filter_map(|id| element_by_id.get(id).map(|e| (*e).clone()))
+                .collect();
+            if !has_minimum_assembly(nodes, &step_elements) {
+                result.errors.push(format!(
+                    "Workfront {} step {} does not form a stable minimum assembly \
+                     (requires 3+ ground columns + 2+ perpendicular girders). \
+                     Members: [{}]",
+                    step.workfront_id,
+                    step.step,
+                    step.element_ids
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
     }
 

@@ -7,10 +7,10 @@
 ## 1. 개발환경
 
 - **OS**: Windows 11 x64
-- **Shell**: cmd.exe (Git Bash 아님 — `SHELL=cmd.exe` 환경변수 영구 설정됨)
-  - ⚠️ opencode는 `$SHELL` 환경변수를 우선 사용. Git Bash가 설치되어 있어도 cmd.exe로 강제됨.
-  - bash 명령(if exist, del /F 등) 대신 PowerShell 또는 cmd.exe 명령 사용
-  - 예: `powershell -Command "..."` 형태로 실행
+- **Shell**: Git Bash (`SHELL=C:\Program Files\Git\bin\bash.exe` 환경변수 영구 설정됨)
+  - ⚠️ opencode는 `$SHELL` 환경변수를 우선 사용. bash prefix(`export CI=true ...`)를 자동 주입하므로 반드시 bash가 실행되어야 함.
+  - 이전에 `SHELL=cmd.exe`로 설정했다가 export prefix 오류 발생 → Git Bash로 변경 완료
+  - bash 문법 사용 가능: `&&`, `export`, `$()` 등
 - **Python**: 3.12+
 - **Rust**: 2021 edition, eframe 0.27
 - **가상환경**: `.venv/` (활성화: `.\.venv\Scripts\activate`)

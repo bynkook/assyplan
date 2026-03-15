@@ -74,6 +74,7 @@ desktop.ini
 *.temp
 *.log
 *.bak
+*.bat
 
 # Windows artifacts
 nul

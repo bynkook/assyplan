@@ -857,8 +857,14 @@ impl eframe::App for AssyPlanApp {
 
                 ui.separator();
 
-                // ID labels toggle
+                // ID labels toggle — sync sub-flags when turned on
+                let prev_show_ids = self.ui_state.show_id_labels;
                 ui.checkbox(&mut self.ui_state.show_id_labels, "Show IDs");
+                if self.ui_state.show_id_labels && !prev_show_ids {
+                    // Turning on: restore both sub-flags
+                    self.ui_state.show_node_ids = true;
+                    self.ui_state.show_element_ids = true;
+                }
 
                 ui.separator();
                 ui.label("View:");
@@ -1115,12 +1121,23 @@ impl eframe::App for AssyPlanApp {
                     });
 
                     ui.separator();
+                    // Settings 탭 Show ID Labels: prev 패턴으로 on/off 동기화
+                    let prev_show_id_labels = self.ui_state.show_id_labels;
                     ui.checkbox(&mut self.ui_state.show_id_labels, "Show ID Labels");
+                    if self.ui_state.show_id_labels && !prev_show_id_labels {
+                        // 방금 켜진 경우 → 하위 플래그 복원
+                        self.ui_state.show_node_ids = true;
+                        self.ui_state.show_element_ids = true;
+                    }
                     if self.ui_state.show_id_labels {
                         ui.indent("id_label_opts", |ui| {
                             ui.checkbox(&mut self.ui_state.show_node_ids, "Node ID");
                             ui.checkbox(&mut self.ui_state.show_element_ids, "Element ID");
                         });
+                        // 하위 둘 다 꺼지면 부모도 off
+                        if !self.ui_state.show_node_ids && !self.ui_state.show_element_ids {
+                            self.ui_state.show_id_labels = false;
+                        }
                     }
                 }
                 "View" => {
@@ -1286,6 +1303,43 @@ impl eframe::App for AssyPlanApp {
                                                     }
                                                 }
                                             }
+
+                                            // Draw element IDs at midpoint if enabled
+                                            if self.ui_state.show_id_labels
+                                                && self.ui_state.show_element_ids
+                                                && self.ui_state.show_elements
+                                            {
+                                                for element in &data.elements {
+                                                    let node_i = data
+                                                        .nodes
+                                                        .iter()
+                                                        .find(|n| n.id == element.node_i_id);
+                                                    let node_j = data
+                                                        .nodes
+                                                        .iter()
+                                                        .find(|n| n.id == element.node_j_id);
+                                                    if let (Some(ni), Some(nj)) = (node_i, node_j) {
+                                                        let mid_x = (ni.x + nj.x) / 2.0;
+                                                        let mid_y = (ni.y + nj.y) / 2.0;
+                                                        let mid_z = (ni.z + nj.z) / 2.0;
+                                                        let pos = data.project_to_2d(
+                                                            mid_x,
+                                                            mid_y,
+                                                            mid_z,
+                                                            &self.view_state,
+                                                        );
+                                                        if rect.contains(pos) {
+                                                            painter.text(
+                                                                pos + egui::vec2(3.0, -3.0),
+                                                                egui::Align2::LEFT_BOTTOM,
+                                                                element.id.to_string(),
+                                                                egui::FontId::proportional(9.0),
+                                                                egui::Color32::YELLOW,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     graphics::ConstructionViewMode::Step => {
@@ -1340,6 +1394,45 @@ impl eframe::App for AssyPlanApp {
                                                             egui::FontId::proportional(10.0),
                                                             egui::Color32::WHITE,
                                                         );
+                                                    }
+                                                }
+                                            }
+
+                                            // Draw element IDs at midpoint if enabled
+                                            if self.ui_state.show_id_labels
+                                                && self.ui_state.show_element_ids
+                                                && self.ui_state.show_elements
+                                            {
+                                                for element in &step_data.base.elements {
+                                                    let node_i = step_data
+                                                        .base
+                                                        .nodes
+                                                        .iter()
+                                                        .find(|n| n.id == element.node_i_id);
+                                                    let node_j = step_data
+                                                        .base
+                                                        .nodes
+                                                        .iter()
+                                                        .find(|n| n.id == element.node_j_id);
+                                                    if let (Some(ni), Some(nj)) = (node_i, node_j) {
+                                                        let mid_x = (ni.x + nj.x) / 2.0;
+                                                        let mid_y = (ni.y + nj.y) / 2.0;
+                                                        let mid_z = (ni.z + nj.z) / 2.0;
+                                                        let pos = step_data.base.project_to_2d(
+                                                            mid_x,
+                                                            mid_y,
+                                                            mid_z,
+                                                            &self.view_state,
+                                                        );
+                                                        if rect.contains(pos) {
+                                                            painter.text(
+                                                                pos + egui::vec2(3.0, -3.0),
+                                                                egui::Align2::LEFT_BOTTOM,
+                                                                element.id.to_string(),
+                                                                egui::FontId::proportional(9.0),
+                                                                egui::Color32::YELLOW,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }

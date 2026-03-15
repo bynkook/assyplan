@@ -508,9 +508,9 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                     );
                 }
 
-                // Chart title inside
+                // X-axis title: "Step →" at right end of x-axis
                 painter.text(
-                    egui::pos2(plot_rect.left() + 5.0, plot_rect.top() + 2.0),
+                    egui::pos2(plot_rect.right() + 2.0, plot_rect.bottom() + 3.0),
                     egui::Align2::LEFT_TOP,
                     "Step →",
                     font_id.clone(),
@@ -691,9 +691,9 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                     );
                 }
 
-                // Step arrow label
+                // X-axis title: "Step →" at right end of x-axis
                 painter.text(
-                    egui::pos2(plot_rect.left() + 5.0, plot_rect.top() + 2.0),
+                    egui::pos2(plot_rect.right() + 2.0, plot_rect.bottom() + 3.0),
                     egui::Align2::LEFT_TOP,
                     "Step →",
                     font_id.clone(),
@@ -925,9 +925,9 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                         );
                     }
 
-                    // Step arrow label
+                    // X-axis title: "Step →" at right end of x-axis
                     painter.text(
-                        egui::pos2(plot_rect.left() + 5.0, plot_rect.top() + 2.0),
+                        egui::pos2(plot_rect.right() + 2.0, plot_rect.bottom() + 3.0),
                         egui::Align2::LEFT_TOP,
                         "Step →",
                         font_id.clone(),

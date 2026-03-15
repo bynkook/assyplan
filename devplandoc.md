@@ -146,26 +146,158 @@ Windows 11 x64 를 로컬 개발환경 기준으로 한다.
 
 #### 개발 3단계 목표
 
-- **시뮬레이션 모드(Simulation Mode)** 의 구현
+- **시뮬레이션 모드(Simulation Mode)** 의 구현 항목
 
-- 환경 설정된 grid 범위 내 모든 기둥과 거더 부재를 생성하기 위한 node table, element table 을 생성한다.
+- 환경 설정된 grid 범위 내 모든 기둥과 거더 부재를 생성하기 위한 node table, element table 을 생성하는 기능 구현
+
+- 이 **부재 생성 단계** 기능은 시뮬레이션 중 반복적으로 발생할 수 있는 **기하학적·중복·유효성 오류**를 한 번에 검사하고 필터링할 수 있게 해준다.  따라서 실제 시뮬레이션 루프(부재 추가 단계)에서는 미리 확보한 부재 리스트에서 생성할 부재를 선택하게 되어 **검사 함수 호출 횟수를 획기적으로 줄이고**,  **런타임 오류 발생 가능성을 거의 제거**할 수 있다.
 
 - multiple workfront 시뮬레이션의 구현 : 사용자는 그래픽 화면에 그려진 grid 라인의 교차점을 선택하여 1개 이상의 workfront 를 설정한다.
 
-- 개발 및 검증 완료된 함수를 이용하여 확장된 큰 구조물에 대해 자동으로 step 과 부재 생성 시뮬레이션 수행
+- 각 Workfront 를 시작점으로 기둥 1개 설치하고 탐색 알고리즘을 실행하여 다음 부재 설치 위치를 결정한다.
 
-- 1개의 시나리오가 끝나면 다음 시나리오 작성을 정해진 갯수의 조합(예를 들어 100개의 조합)을 생성할때까지 작업을 반복하고
-각 시나리오별 결과 출력용 Metric 과 작업결과 데이터를 저장한다.
+- 유효한 시나리오를 생성하고 시뮬레이션 결과를 GUI 에 출력한다.
 
-- **시나리오 생성 알고리즘**: 각 `workfront`는 현재 위치를 기준으로 안정적으로 부재를 추가할 수 있는 모든 유효한 방향(동, 서, 남, 북, 상 - 최대 5개)을 탐색합니다. 다수의 시나리오(조합)는 이 선택의 순간에서 어떤 방향을 우선할지에 대한 전략에 따라 생성됩니다. 예를 들어, 유효한 확장 방향 목록에서 무작위로 하나를 선택하는 '무작위 탐색(Randomized Search)' 전략을 100번 반복하여 100개의 서로 다른 조립 순서(시나리오)를 생성할 수 있습니다.
+- 선택된(1개 또는 여러개) 시나리오의 Metric xy plot 출력 : x축은 step, y축은 각 층별 부재수 합계 또는 진행율 등.
 
-- 그래픽 인터페이스에서 임의의 선택된 시나리오의 모든 Step 의 부재 생성을 시각적으로 표현한다.
-
-- 선택된(1개 또는 여러개) 시나리오별 Metric xy plot 출력 : x축은 step, y축은 각 층별 기둥 설치 진행률(%) 및 누적 부재 수
+- 'recalc' 버튼은 시뮬레이션 실행에 사용된다.
 
 - 재생 제어 : play, pause, 특정 step으로 이동(seek bar), 배속 재생 기능
 
-#### 시뮬레이션 모드(Simulation Mode) 의 환경설정
+- 사용자 디버깅 및 검토용 텍스트 파일을 별도로 저장한다.
+
+#### 시뮬레이션 모드의 핵심 탐색 전략 (v2.0 – Minimal Incremental Attachment 우선)
+
+대규모 그리드(60×20)에서 전수 탐색은 불가능하므로 Monte-Carlo 샘플링을 유지하되,  
+**Step당 추가 부재 수를 최소화하고 기존 구조물에 가장 인접한 위치를 최우선**으로 하는 전략으로 변경한다.  
+이는 실제 시공 현장에서 “한 번에 큰 독립 조립체를 만들기보다는 이미 안정된 부분에 바로 붙여가며 점진적으로 확장”하는 현실적인 순서를 반영한다.
+
+**기본 원칙 (모든 전략 공통 적용)**
+
+- Step당 생성 부재 수 목표 : **최소 2~3개** (기둥3+거더2=5개 독립 단위는 최후순위)
+- 기존 구조물과의 연결 개수 최대화 (증분 연결 조건을 가장 먼저 만족)
+- Workfront 프론티어로부터의 거리 최소화 (Euclidean 또는 Manhattan 거리 기준)
+- 상층부 제약, 안정 조건은 부재 생성 시도시 강제 검증
+
+**탐색 알고리즘 구현 전략**
+
+시뮬레이션 엔진은 Monte-Carlo 시나리오 샘플링을 기반으로 하되, 매 후보 생성마다 안정성 검사 + 상층부 제약을 강력하게 pruning하고, Minimal Incremental 점수(부재수 최소화 + 연결성 + 거리)로 weighted sampling하여 incremental greedy-ish 방향을 선택한다. 이 조합으로 60×20 규모에서도 100개 시나리오를 1~2분 이내에 완료한다.
+
+```Rust
+// 전체 알고리즘 구조 예시 (한 눈에 보는 흐름)
+
+// Rust 코어 내부 (매 step 호출)
+fn generate_next_step(current_structure: &Structure, workfronts: &[Workfront]) -> Option<Step> {
+    for wf in workfronts.iter() {
+        // 1. 후보 생성 (incremental greedy-ish)
+        let candidates = generate_incremental_candidates(wf, &current_structure);  // 1~3개 단위 위주
+
+        // 2. 강한 pruning (개발 1단계 검사)
+        let valid_candidates = candidates
+            .into_iter()
+            .filter(|c| validate_basic_geometry(c))          // ← 1단계 원칙 전부 호출
+            .filter(|c| check_assembly_stability(c, current_structure))
+            .filter(|c| !violates_upper_floor_constraint(c))
+            .collect::<Vec<_>>();
+
+        if valid_candidates.is_empty() { continue; }
+
+        // 3. weighted sampling
+        let scores = valid_candidates.iter().map(|c| compute_score(c)).collect();
+        let chosen = weighted_random_choice(&valid_candidates, &scores);
+
+        return Some(Step::new(wf.id, chosen));
+    }
+    None
+}
+```
+
+**탐색 전략 옵션 (단계적 적용 계획)**
+
+Monte-Carlo + 강력 Pruning + Weighted Sampling + Incremental Greedy-ish
+
+1. Monte-Carlo (Randomized Scenario Sampling)
+   - 역할 : 100~200개의 서로 다른 실현 가능한 조립 순서를 빠르게 샘플링
+     - rayon 스레드 풀 또는 Python multiprocessing으로 완전 병렬 실행
+     - 각 시나리오는 독립 random seed
+     - Early Termination 4가지 조건 적용
+
+2. 강한 Pruning (개발 1·2단계 검사 로직 재사용)
+   - 매 후보 생성 직후 70~85% 를 즉시 폐기
+   - 검사 순차 호출:
+     1. check_assembly_stability()
+     2. upper_floor_ratio_check()
+
+3. Weighted Sampling – Minimal Incremental Attachment Search
+   - 매 workfront의 다음 확장 후보를 생성할 때 **모든 가능한 증분 조합**을 먼저 나열  
+     - 1기둥 + 1거더 (가장 작은 단위)  
+     - 1기둥 + 2거더  
+     - 2기둥 + 1거더  
+     - (마지막으로) 독립 3기둥 + 2거더  
+   - 각 후보에 아래 **종합 점수**를 부여하고 가중치 랜덤 선택  
+     **Score = w1×(1 / 추가부재수) + w2×(기존연결수) + w3×(1 / 거리)**  
+     - w1 = 0.5 (부재 수 최소화 최우선)  
+     - w2 = 0.3 (기존 구조와의 연결성)  
+     - w3 = 0.15 (프론티어 거리)  
+     - 가중치는 사용자 슬라이더로 조정 가능
+
+     ```rust
+     fn compute_score(c: &Candidate) -> f64 {
+        0.50 * (1.0 / c.member_count as f64)          // 부재 수 최우선
+          + 0.30 * c.connectivity_score()             // 기존 노드 공유 수 (0~6)
+          + 0.15 * (1.0 / c.frontier_distance())      // Manhattan 거리
+          + 0.05 * (if c.is_lowest_floor() {1.0} else {0.0})
+     }
+     ```
+
+   - 결과적으로 **Step당 평균 1.8~2.4개 부재** 수준으로 유지
+
+4. Incremental Greedy-ish Heuristic
+   - 큰 독립 단위(5개)보다 작은 증분 단위를 우선 생성
+   - 후보 생성 순서 강제 우선순위:
+     1. 1기둥 + 1거더 (최고)
+     2. 1기둥 + 2거더
+     3. 2기둥 + 1거더
+     4. 2기둥 + 2거더
+     5. 독립 3기둥 + 2거더 (최후)
+
+5. Early Termination 규칙 (v3.0 강화)
+   - 상층부 제약 3회 연속 위반
+   - 최근 300 global step 동안 부재 추가 3개 미만
+   - 독립 5개 단위만 5회 이상 연속 선택
+   - 1단계 기본 원칙 검사 통과 후보가 10회 연속 없음
+
+**향후 확장 가능 전략** (개발 3단계 완료 후 별도 모듈로 추가 예정)
+
+- Greedy Minimal-First (점수 기준 상위 3개 후보 중 최적 선택)
+- Frontier BFS (현재 프론티어 노드 집합을 queue로 관리하며 가장 가까운 미설치 노드부터 확장)
+- Hybrid Beam Search (상위 k=8개의 부분 경로만 유지하면서 Minimal 점수 우선)
+
+#### 시뮬레이션 모드(Simulation Mode) 의 환경설정 및 제약
+
+- 상층부 기둥 설치율 제약 : threshold 기본 0.3 (강제 적용)
+- **추가 제약** : 하나의 Step에서 독립안정구조(5개 단위)를 생성할 수 있는 경우라도,  
+  **기존 구조에 연결 가능한 증분 후보가 1개 이상 존재하면 반드시 증분 후보를 우선** 선택하도록 강제
+
+#### 성능 목표 및 최적화 전략
+
+- 목표 모델 규모 : 최대 60×20 그리드 ≈ 12,000~25,000 부재
+- 1개의 시나리오 평균 소요시간 : **0.7~1.8초** (Minimal 전략은 후보 수가 적어 더 빨라짐)
+- 100개 시나리오 전체 소요시간 : **1.2~3분** 이내 (8코어 병렬)
+- **핵심 사전 최적화 전략** : 전체 그리드 공간 내 가능한 모든 부재를 **시뮬레이션 시작 전에 한 번에 생성·검증**
+  - 개발 1단계의 “입력데이터의 검사 : 부재 생성 기본 원칙” 전체를 이 단계에서 1회만 집중 적용
+  - 시뮬레이션 루프 중에는 **이미 유효성이 입증된 부재 풀**에서만 선택하므로
+    - 기하학 오류(대각선, zero-length, 중복 등) 검사 생략 가능  
+    - orphan node 발생 가능성 사전 제거  
+    - 매 step마다 반복되던 기본 기하학 검사 횟수 대폭 감소 (70~90% 수준)
+
+#### 시각화 및 사용자 인터페이스
+
+- Metric XY Plot에 **Step당 평균 추가 부재 수** 추세선 추가 (새로운 KPI)
+- 시나리오 비교 테이블에 “평균 연결성 점수”, “평균 Step 부재 수” 컬럼 추가
+- 실패 원인에 “독립 5개 단위 과다 사용” 항목 신설
+
+#### 시뮬레이션 모드(Simulation Mode) 의 환경설정 메뉴 추가 구현
 
 - Grid Line 환경 설정
 
@@ -175,9 +307,15 @@ Windows 11 x64 를 로컬 개발환경 기준으로 한다.
 
 - *상층부 기둥 설치율 제약* : 임의의 층 N에 대해 (N+1층 기둥 누적 설치 갯수) / (N층 기둥 누적 설치 갯수) 비율이 임계값(threshold)을 초과하지 않도록 제어한다. 사용자는 0~1 사이의 값을 설정할 수 있으며 기본값은 **0.3(30%)**이다. 이 값이 낮을수록 상층부 공사는 하층부가 충분히 완료된 후에만 진행할 수 있다. N층 기둥이 1개도 설치되지 않은 경우(분모=0) 비율은 0.0으로 처리한다.
 
-#### 개발 3단계에 필요한 SKILLS.md 작성
+#### 개발 3단계에 필요한 SKILLS.md 업데이트 항목
 
-개발 1,2,3단계의 작업 내용을 바탕으로 개발에 필요한 SKILL 을 정의하여 프로젝트 폴더에 저장한다.
+- Rust rayon을 활용한 시나리오 병렬 실행 구현
+- 후보 생성 시 증분 조합 열거 로직 (combination generator) 및 필터링
+- Minimal Incremental Attachment 점수 계산 함수 (Score = w1/부재수 + w2×연결수 + w3/거리)
+- Weighted random choice 알고리즘 (alias method 또는 cumulative distribution)
+- 상층부 제약 검사 최적화 (층별 기둥 카운트 캐시)
+- 프론티어 관리 자료구조 (HashSet 또는 HashMap<NodeID, Distance>)
+- 사용자 가중치 슬라이더 UI 연동
 
 ## Definitions 용어 정의
 
