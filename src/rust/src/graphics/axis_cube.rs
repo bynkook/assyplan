@@ -2,12 +2,6 @@ use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke};
 
 use super::view_state::ViewState;
 
-/// Back-face culling threshold: skip a face if its outward normal
-/// has a dot product ≤ this value with the camera forward vector.
-/// 0.01 prevents flickering at near-orthogonal angles while still
-/// culling all truly back-facing and edge-on faces.
-const CULL_THRESHOLD: f32 = 0.01;
-
 /// Minimum 2D projected area (pixels²) for a face to be drawn.
 /// Prevents degenerate near-zero polygons from causing egui tessellator artifacts.
 const MIN_FACE_AREA: f32 = 0.5;
@@ -20,8 +14,9 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         size,
     );
 
-    // Isolate rendering to prevent artifacts bleeding into the main 3D scene
-    let clip_margin = 20.0;
+    // Isolate rendering to prevent artifacts bleeding into the main 3D scene.
+    // clip_margin covers the axis labels drawn outside the box (up to ~14px tip + text).
+    let clip_margin = 28.0;
     let clip_rect = rect.expand(clip_margin);
     let painter = painter.with_clip_rect(clip_rect);
 
@@ -90,37 +85,28 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         ), // -Y (dark green)
     ];
 
-    // camera_basis() returns (right, up, forward) where forward points FROM
-    // the camera INTO the scene. A face is visible when its outward normal
-    // points TOWARD the camera, i.e. opposite to forward.
-    // So the visibility condition is: dot(normal, forward) < 0
-    // equivalently: dot(normal, -forward) > CULL_THRESHOLD
-    let (_right, _up, forward) = view_state.camera_basis();
-    let view_dir = [-forward[0], -forward[1], -forward[2]]; // points toward camera
+    // We use pure Painter's Algorithm: draw all 6 faces back-to-front by depth.
+    // No back-face culling — culling direction depends on coordinate conventions
+    // and is error-prone. Instead, sorting by depth (farthest first) naturally
+    // hides back faces behind front faces, which is correct for a convex solid.
 
-    // Build draw list: cull back-faces, skip degenerate projections, compute depth
+    // Build draw list: skip degenerate projections, compute depth for sorting
     let mut draw_list: Vec<(Vec<Pos2>, Color32, f32, usize)> = faces
         .iter()
         .enumerate()
-        .filter_map(|(face_idx, (indices, normal, color))| {
-            // Back-face culling: skip faces whose normal points away from the camera
-            let dot = dot3(*normal, view_dir);
-            if dot <= CULL_THRESHOLD {
-                return None;
-            }
-
+        .filter_map(|(face_idx, (indices, _normal, color))| {
             // Build 2D screen points
             let points: Vec<Pos2> = indices
                 .iter()
                 .map(|&i| to_screen(center, projected[i].0, 14.0))
                 .collect();
 
-            // Degenerate polygon check (shoelace area)
+            // Skip degenerate (edge-on) polygons to avoid tessellator artifacts
             if polygon_area_2d(&points) < MIN_FACE_AREA {
                 return None;
             }
 
-            // Average depth (dot with forward); smaller = closer to camera
+            // Average depth along forward axis — larger = farther from camera
             let avg_depth =
                 indices.iter().map(|&i| projected[i].1).sum::<f32>() / indices.len() as f32;
 
@@ -195,11 +181,6 @@ fn paint_axis_line(
         egui::FontId::proportional(10.0),
         Color32::WHITE,
     );
-}
-
-/// Dot product of two 3-element f32 arrays.
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// Shoelace formula: signed area of a 2D polygon (returns absolute value).
