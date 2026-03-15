@@ -14,22 +14,10 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
         size,
     );
 
-    // Use a completely independent Foreground layer so the painter's clip_rect
-    // starts from content_rect (full screen), not from the viewport painter's clip_rect.
-    // This makes with_clip_rect(rect) actually work as a hard boundary.
-    //
-    // Background: ui.painter_at(viewport) creates a painter clipped to viewport.
-    // Calling painter.with_clip_rect(small_rect) does small_rect.intersect(viewport),
-    // which (when small_rect ⊂ viewport) equals small_rect — but only if small_rect is
-    // strictly inside the viewport. When expand() is used it may overflow and fail.
-    // A new layer_painter has clip_rect = content_rect (full screen), so
-    // with_clip_rect(rect) reliably clips to exactly rect. No bleeding.
+    // Foreground layer painter: clip_rect starts from full screen, so
+    // with_clip_rect(rect) is an exact hard boundary — no bleeding outside the cube box.
     let layer_id = LayerId::new(Order::Foreground, Id::new("axis_cube_overlay"));
-    let base_painter = ctx.layer_painter(layer_id);
-
-    // Clip the foreground painter to just the cube rect (no expand needed —
-    // faces and axis lines are all within this rect by construction).
-    let painter = base_painter.with_clip_rect(rect);
+    let painter = ctx.layer_painter(layer_id).with_clip_rect(rect);
 
     painter.rect_filled(rect, 6.0, Color32::from_black_alpha(120));
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_gray(90)));
@@ -96,14 +84,9 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
         ), // -Y (dark green)
     ];
 
-    // Rendering strategy:
-    // 1. Back-face culling: skip faces whose outward normal points away from camera.
-    //    dot(normal, forward) < 0  →  back-facing  →  skip.
-    //    This alone prevents back faces from ever being drawn, so painter's algorithm
-    //    only needs to order the (at most 3) visible front faces correctly.
-    // 2. Painter's algorithm on the remaining front faces: draw farthest first.
-    //    "Farthest" = smallest depth value along forward axis
-    //    (depth = dot(vertex, forward); smaller = farther from camera in ortho).
+    // Rendering: back-face culling + painter's algorithm (back-to-front by depth).
+    // Each face is drawn as a Mesh (two explicit triangles) to avoid egui's
+    // convex_polygon feathering artifact that caused faces to render oversized.
 
     let (_, _, forward) = view_state.camera_basis();
 
@@ -112,27 +95,25 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
         .iter()
         .enumerate()
         .filter_map(|(face_idx, (indices, normal, color))| {
-            // Back-face culling: dot(outward normal, forward) must be > 0
-            // to be front-facing (normal pointing toward camera).
+            // Back-face culling: skip faces whose outward normal points away from camera.
             let n_dot_f = dot(*normal, forward);
             if n_dot_f <= 0.0 {
                 return None;
             }
 
-            // Build 2D screen points
+            // Build 2D screen points.
             let points: Vec<Pos2> = indices
                 .iter()
                 .map(|&i| to_screen(center, projected[i].0, 14.0))
                 .collect();
 
-            // Skip degenerate (edge-on) polygons to avoid tessellator artifacts.
-            // In practice, back-face culling already removes most edge-on faces;
-            // this is a safety net for the exactly-orthogonal case.
+            // Skip exactly edge-on faces (back-face culling already removes most;
+            // this catches the degenerate n_dot_f ≈ 0 boundary case).
             if polygon_area_2d(&points) < MIN_FACE_AREA {
                 return None;
             }
 
-            // Average depth: dot(vertex, forward). Smaller = farther from camera.
+            // Average depth along forward axis. Smaller = farther from camera.
             let avg_depth =
                 indices.iter().map(|&i| projected[i].1).sum::<f32>() / indices.len() as f32;
 
@@ -149,24 +130,16 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
     });
 
     for (points, color, _, _) in draw_list {
-        // Draw quad as two explicit triangles instead of convex_polygon.
-        // Shape::convex_polygon uses a triangle fan from vertex[0]; if the projected
-        // quad becomes non-convex at certain orbit angles, the fan generates a giant
-        // degenerate triangle that causes the "face suddenly fills large area" artifact.
-        // Splitting into (0,1,2) + (0,2,3) avoids this entirely.
         if points.len() < 3 {
             continue;
         }
+        // Draw as a Mesh (two triangles) — avoids egui convex_polygon's feathering
+        // normal computation which caused an oversized-face artifact at certain angles.
         let fill = color.gamma_multiply(0.75);
         let mut mesh = Mesh::default();
-        // Add all 4 vertices (or however many points there are)
         for &p in &points {
             mesh.colored_vertex(p, fill);
         }
-        // Fan from index 0: (0,1,2), (0,2,3), ...
-        // But we split explicitly: for a quad, always (0,1,2) and (0,2,3).
-        // This matches convex_polygon's tessellation but we do it ourselves so
-        // we can validate each triangle independently in the future.
         let n = points.len() as u32;
         for i in 1..(n - 1) {
             mesh.add_triangle(0, i, i + 1);
