@@ -11,6 +11,8 @@ Phase 2 adds Step-based construction visualization to the Development Mode:
 - Construction Sequence Table and Workfront Step Table generation
 - Step-by-step cumulative rendering with caching (60fps target)
 - Step navigation UI (prev/next/slider/direct input)
+- **[Added]** Upper-Floor Column Installation Rate metric (Chart 3)
+- **[Added]** Construction constraint threshold slider in Settings tab
 
 ## Technology Stack
 
@@ -146,6 +148,36 @@ def assign_steps(sequence, nodes, elements):
 
 ### Rust Modules (src/rust/src/)
 
+#### stability.rs
+Core stability validation, table generation, and floor-level analysis.
+
+**Key Public Functions**:
+- `get_floor_level(node_id, nodes)`: Returns 1-indexed floor number for a node by sorting unique z values
+- `get_column_floor(element, nodes)`: Returns floor of a column using its i-node (lower node) z coordinate
+- `get_floor_column_counts(elements, nodes)`: Returns `HashMap<i32, usize>` mapping floor → total column count
+- `check_floor_installation_constraint(target_floor, installed_ids, all_elements, nodes, threshold_percentage)`: Returns `(allowed: bool, lower_floor_pct: f64)`
+- `build_step_elements_map(sequence_table, step_table, elements, nodes)`: Returns `Vec<Vec<(i32, String, i32)>>` indexed by step — each entry = `(element_id, member_type, floor_level)`
+- `generate_all_tables(nodes, elements)`: Main entry point for table generation
+- `get_floor_column_data(elements, nodes, max_step, step_elements)`: Returns `Vec<(i32, usize, usize)>` = (floor, total_columns, installed_at_max_step)
+
+**Floor Level Logic** (important):
+```rust
+pub fn get_floor_level(node_id: i32, nodes: &[StabilityNode]) -> i32 {
+    // Collect all unique z values across ALL nodes
+    let mut unique_z: Vec<i64> = nodes.iter()
+        .map(|n| (n.z * 1000.0) as i64)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    unique_z.sort();
+    
+    // Find this node's z and return 1-indexed position
+    let node_z = nodes.iter().find(|n| n.id == node_id).map(|n| (n.z * 1000.0) as i64).unwrap_or(0);
+    unique_z.iter().position(|&z| z == node_z).map(|p| p as i32 + 1).unwrap_or(1)
+}
+```
+- **Performance note**: Called O(N×M) times during table generation. Each call scans all nodes and sorts. For large structures (10k+ elements), cache the z-value map as `HashMap<i64, i32>` and pass it as a parameter instead.
+
 #### graphics/step_renderer.rs
 Step-based cumulative rendering with caching.
 
@@ -200,31 +232,70 @@ pub fn get_cumulative_elements(&mut self, step: usize) -> Vec<usize> {
 - Slider/button navigation reuses cache (no invalidation needed)
 
 #### graphics/ui.rs (Extended)
-Step navigation UI components.
+Step navigation UI, metrics display, and 3 charts.
 
-**UiState Extensions**:
+**UiState Extensions** (Phase 2 additions):
 ```rust
 pub struct UiState {
-    // ... existing fields ...
-    pub current_step: usize,    // Current step (1-indexed)
-    pub max_step: usize,        // Maximum step
-    pub step_input: String,     // Direct input field value
+    // ... existing Phase 1 fields ...
+    pub current_step: usize,          // Current step (1-indexed)
+    pub max_step: usize,              // Maximum step
+    pub step_input: String,           // Direct input field value
+    pub has_step_data: bool,          // Whether step data calculated
+    pub construction_view_mode: ConstructionViewMode,  // Sequence or Step
+    pub current_sequence: usize,      // 1-indexed sequence position
+    pub max_sequence: usize,          // Total elements
+    pub total_elements: usize,        // Metric: total
+    pub total_columns: usize,         // Metric: columns
+    pub total_girders: usize,         // Metric: girders
+    pub workfront_count: usize,       // Metric: workfronts
+    pub floor_column_data: Vec<(i32, usize, usize)>,  // (floor, total, installed)
+    pub needs_recalc: bool,           // Recalc flag
+    pub step_elements: Vec<Vec<(i32, String, i32)>>,  // Per-step elements
+    pub upper_floor_threshold: f64,   // 0.0~1.0, default 0.3 (30%)
 }
 ```
 
-**Step Navigation UI**:
-- Previous button (◀): `state.current_step - 1`, disabled at step 1
-- Next button (▶): `state.current_step + 1`, disabled at max_step
-- Slider: `egui::Slider::new(&mut step, 1..=max_step)`
-- Direct input: `egui::TextEdit::singleline(&mut step_input)`
+**Charts in Result Tab** (`render_result_tab_inner`):
 
-**Input Validation**:
+| Chart | Title | X-axis | Y-axis | Description |
+|-------|-------|--------|--------|-------------|
+| Chart 1 | Element Type Distribution | Step | Count | Cumulative columns vs girders per step |
+| Chart 2 | Floor-by-Floor Installation Progress | Step | Count | Per-floor column count per step |
+| Chart 3 | Upper-Floor Column Installation Rate | Step | 0~100% | For floor N: (N+1 cumulative installs) / (N cumulative installs); threshold line |
+
+**Chart 3 Details** (Upper-Floor Column Installation Rate):
+- Formula: **(cumulative columns installed at floor N+1) / (cumulative columns installed at floor N)**
+- When denominator (floor N columns) = 0: rate is **0.0** (not 1.0)
+- Legend labels: `F{N+1}/F{N}` (e.g., "F2/F1" means floor 2 installs ÷ floor 1 installs)
+- When a line crosses the threshold, floor N+1 columns are "getting ahead" of floor N
+- Threshold: configurable in Settings tab (default **30%**)
+- Threshold shown as red dashed line (manually drawn, 6px dash / 4px gap)
+- `floor_colors` array defined at `render_result_tab_inner` function scope — shared by Chart 2 and Chart 3
+
+**floor_colors array** (defined at function scope, not inside chart closure):
 ```rust
-if let Ok(step) = state.step_input.parse::<usize>() {
-    let clamped = step.max(1).min(state.max_step);
-    state.current_step = clamped;
-    state.step_input = clamped.to_string();
-}
+let floor_colors = [
+    Color32::from_rgb(100, 200, 255),  // light blue
+    Color32::from_rgb(100, 255, 150),  // light green
+    Color32::from_rgb(255, 200, 100),  // amber
+    Color32::from_rgb(255, 120, 200),  // pink
+    Color32::from_rgb(180, 130, 255),  // lavender
+    Color32::from_rgb(255, 255, 100),  // yellow
+];
+```
+⚠️ Defining `floor_colors` inside a chart's closure makes it inaccessible to other charts. Always define it at function scope.
+
+**Settings Tab — Construction Constraints**:
+```rust
+ui.heading("Construction Constraints");
+ui.add(
+    egui::Slider::new(&mut state.upper_floor_threshold, 0.0..=1.0)
+        .text("")
+        .fixed_decimals(2)
+        .clamp_to_range(true),
+);
+ui.label(format!("{:.0}%", state.upper_floor_threshold * 100.0));
 ```
 
 #### lib.rs (Extended)
@@ -265,16 +336,16 @@ CSV File (with 선행부재ID)
 [step_table.py] --> Workfront Step Table (with stability validation)
     |
     v
-[PyO3 bindings] --> PyStepTable
+[PyO3 bindings / stability.rs] --> Tables + step_elements + floor_column_data
     |
     v
-[step_renderer.rs] --> StepRenderData
+[ui.rs UiState] --> upper_floor_threshold, step_elements, floor_column_data
     |
     v
-[ui.rs] --> Step navigation controls
+[render_result_tab_inner] --> Chart 1, Chart 2, Chart 3
     |
     v
-[egui::Painter] --> Cumulative render
+[egui::Painter] --> Line charts drawn via painter.add(Shape::line(...))
 ```
 
 ## Step Assignment Algorithm
@@ -322,6 +393,18 @@ Key optimizations:
 3. **Lazy evaluation**: Cumulative elements computed only when needed
 4. **Clipping**: Only render elements within viewport rect
 
+### get_floor_level() Performance Warning
+`get_floor_level()` in `stability.rs` scans all nodes and sorts unique z values on **every call**.
+- Current scale (hundreds of elements): acceptable
+- Large scale (10k+ elements): O(N×M) becomes a bottleneck
+
+**Future optimization**:
+```rust
+// Build z-map once before any floor_level calls
+let z_map: HashMap<i64, i32> = build_z_level_map(nodes);
+// Then pass z_map to all floor-level functions instead of recomputing
+```
+
 ### Memory Management
 - Cache stores Vec<usize> (element indices), not full element data
 - Cache entries: O(max_step) in worst case
@@ -337,20 +420,18 @@ Key optimizations:
 - `test_step_table.py`: Step assignment, edge cases
 - `test_phase2.py`: E2E integration tests
 
-### Rust Tests (src/rust/src/graphics/step_renderer.rs)
-- `test_step_render_data_new`: Constructor
-- `test_set_step_data`: Data loading
+### Rust Tests (src/rust/src/stability.rs and step_renderer.rs)
+- `test_validate_minimum_assembly_valid`: Minimum assembly unit
+- `test_validate_column_support_ground_level`: Column ground support
+- `test_validate_girder_support`: Girder support
+- `test_floor_level_calculation`: Floor numbering correctness
+- `test_floor_installation_constraint`: check_floor_installation_constraint()
+- `test_generate_all_tables`: Full table generation
+- `test_step_table_for_rendering`: Rendering-ready data format
+- `test_step_render_data_new`: StepRenderData constructor
 - `test_cumulative_elements`: Cumulative calculation
 - `test_cumulative_cache`: Cache behavior
 - `test_cache_invalidation`: Cache clearing
-- `test_set_current_step`: Direct navigation
-- `test_next_step`, `test_prev_step`: Sequential navigation
-- `test_boundary_conditions`: Edge cases
-- `test_step_info`: Info formatting
-- `test_has_steps`: State checking
-- `test_element_counts`: Count calculations
-- `test_single_step`: Single step model
-- Integration tests: UI state sync, cache with navigation, etc.
 
 ## Integration Patterns
 
@@ -407,6 +488,32 @@ fn on_step_change(&mut self, new_step: usize) {
 - Navigation (next/prev/slider) does NOT invalidate cache
 - Only `set_step_data()` triggers invalidation
 
+### floor_colors Scope (IMPORTANT)
+- `floor_colors` must be defined **outside** all chart closures/frames
+- Defined at `render_result_tab_inner` function scope
+- If placed inside a closure (e.g., Chart 2's `egui::Frame::none().show(...)`), it will be inaccessible to Chart 3
+- This was a bug found during Chart 3 implementation — fixed by moving the definition up
+
+### Chart Dashed Lines (no external crate)
+egui has no built-in dashed line primitive. Draw manually:
+```rust
+let dash_len = 6.0f32;
+let gap_len = 4.0f32;
+let mut x = plot_rect.left();
+while x < plot_rect.right() {
+    let x_end = (x + dash_len).min(plot_rect.right());
+    painter.line_segment([pos2(x, y), pos2(x_end, y)], stroke);
+    x += dash_len + gap_len;
+}
+```
+
+### upper_floor_threshold Metric vs Constraint
+- `upper_floor_threshold` controls Chart 3 threshold line visualization ONLY
+- Formula: `(cumulative installs at floor N+1) / (cumulative installs at floor N)`, denominator=0 → 0.0
+- Default value: **0.3 (30%)**
+- Actual construction sequence is NOT re-generated when threshold changes (Phase 2 limitation)
+- Full constraint enforcement with sequence re-generation is planned for Phase 3 (Simulation Mode)
+
 ## Project Structure (Phase 2 Additions)
 
 ```
@@ -421,9 +528,12 @@ assyplan/
 │   └── rust/
 │       └── src/
 │           ├── lib.rs             # EXTENDED: PyStepTable, new bindings
+│           ├── stability.rs       # NEW: Full stability + table generation
 │           └── graphics/
 │               ├── step_renderer.rs # NEW: Step rendering + cache
-│               └── ui.rs          # EXTENDED: Step navigation UI
+│               ├── view_state.rs    # NEW: 3D viewport state
+│               ├── axis_cube.rs     # NEW: Orientation cube
+│               └── ui.rs          # EXTENDED: Step nav, Charts 1-3, Settings
 ├── tests/
 │   └── python/
 │       ├── test_precedent_graph.py     # NEW
@@ -440,6 +550,7 @@ assyplan/
 ## Next Steps / Future Phases
 
 - Phase 3: Simulation Mode activation
-- Phase 3: Automatic step generation algorithm
+- Phase 3: Automatic step generation algorithm with upper-floor threshold constraint enforcement
 - Phase 3: Workfront expansion direction selection
 - Phase 4: Interactive editing and member modification
+- Phase 4: get_floor_level() → z-map caching optimization for large structures

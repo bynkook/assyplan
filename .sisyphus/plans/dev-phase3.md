@@ -107,7 +107,9 @@ z_levels: int          # z 레벨 갯수 (층수)
 z_interval: float      # 층고 (상수)
 
 # 제약 조건
-floor_column_constraint: float  # 0~1, 층별 기둥 설치율 제약
+# 상층부 기둥 설치율 제약: (N+1층 누적 설치수) / (N층 누적 설치수) 비율이 이 값을 초과하지 않도록 제어
+# 기본값 0.3 (30%). 분모=0인 경우 비율은 0.0
+upper_floor_threshold: float  # 0~1, default 0.3
 ```
 
 ---
