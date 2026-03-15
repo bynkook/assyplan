@@ -125,7 +125,7 @@ impl ViewState {
         }
     }
 
-    fn camera_basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    pub fn camera_basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         match self.view_mode {
             ViewMode::XY => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
             ViewMode::YZ => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
