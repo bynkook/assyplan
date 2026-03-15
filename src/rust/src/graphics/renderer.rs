@@ -324,8 +324,12 @@ impl RenderData {
             let p1 = self.project_to_2d(x, min_y - extend_dist, min_z, view_state);
             let p2 = self.project_to_2d(x, max_y + extend_dist, min_z, view_state);
 
-            // Draw grid line
-            painter.line_segment([p1, p2], stroke);
+            // Shrink line start by bubble_radius so it does not penetrate the circle marker
+            let dir = (p2 - p1).normalized();
+            let p1_trimmed = p1 + dir * bubble_radius;
+
+            // Draw grid line (trimmed at bubble end)
+            painter.line_segment([p1_trimmed, p2], stroke);
 
             // Draw bubble marker at the extended end (bottom side, min_y - extend_dist)
             let bubble_pos = p1;
@@ -347,8 +351,12 @@ impl RenderData {
             let p1 = self.project_to_2d(min_x - extend_dist, y, min_z, view_state);
             let p2 = self.project_to_2d(max_x + extend_dist, y, min_z, view_state);
 
-            // Draw grid line
-            painter.line_segment([p1, p2], stroke);
+            // Shrink line start by bubble_radius so it does not penetrate the circle marker
+            let dir = (p2 - p1).normalized();
+            let p1_trimmed = p1 + dir * bubble_radius;
+
+            // Draw grid line (trimmed at bubble end)
+            painter.line_segment([p1_trimmed, p2], stroke);
 
             // Draw bubble marker at the extended end (left side, min_x - extend_dist)
             let bubble_pos = p1;
