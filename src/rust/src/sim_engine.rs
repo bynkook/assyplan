@@ -553,88 +553,130 @@ fn collect_single_candidates(
 /// Generate bootstrap candidate (first step only): 3 columns + 2 girders
 /// anchored at the workfront position (wf.grid_x, wf.grid_y), floor zi=0.
 ///
-/// Searches a 3×3 patch around the workfront.  Returns the first valid bundle.
+/// Searches a 3×3 patch around the workfront, then expands if needed.
+/// Returns valid bundles where the 2 girders are both fully connected to the
+/// selected column j-nodes AND form a 90-degree pair (satisfying has_minimum_assembly).
 fn generate_bootstrap_candidates(
     wf: &SimWorkfront,
     grid: &SimGrid,
     node_pos: &std::collections::HashMap<i32, (usize, usize, usize)>,
 ) -> Vec<Candidate> {
     let anchor_zi = 0usize;
+    let upper_zi = 1usize;
 
-    // Collect columns in 3×3 patch around wf position
-    let patch: i32 = 1; // ±1 → 3×3
-    let mut patch_cols: Vec<i32> = Vec::new();
-    let mut seen_c: HashSet<i32> = HashSet::new();
-    // Anchor position first
-    for dxi in -patch..=patch {
-        for dyi in -patch..=patch {
-            let pxi = wf.grid_x as i32 + dxi;
-            let pyi = wf.grid_y as i32 + dyi;
-            if pxi < 0 || pyi < 0 {
-                continue;
-            }
-            if let Some(col_id) = grid.column_starting_at(pxi as usize, pyi as usize, anchor_zi) {
-                if seen_c.insert(col_id) {
-                    patch_cols.push(col_id);
+    // Build column j-node map: col_id → j_node_id
+    let col_jnode: std::collections::HashMap<i32, i32> = grid
+        .elements
+        .iter()
+        .filter(|e| e.member_type == "Column")
+        .map(|e| (e.id, e.node_j_id))
+        .collect();
+
+    // Build girder map: gdr_id → (node_i, node_j), only zi=upper_zi
+    let all_floor1_gdrs: Vec<(i32, i32, i32)> = grid
+        .elements
+        .iter()
+        .filter(|e| {
+            e.member_type == "Girder"
+                && node_pos.get(&e.node_i_id).map(|p| p.2).unwrap_or(999) == upper_zi
+        })
+        .map(|e| (e.id, e.node_i_id, e.node_j_id))
+        .collect();
+
+    // Try expanding patch radius until we get at least one valid bundle
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for patch in 1i32..=(grid.nx.max(grid.ny) as i32) {
+        // Collect columns in patch
+        let mut patch_cols: Vec<i32> = Vec::new();
+        let mut seen_c: HashSet<i32> = HashSet::new();
+        for dxi in -patch..=patch {
+            for dyi in -patch..=patch {
+                let pxi = wf.grid_x as i32 + dxi;
+                let pyi = wf.grid_y as i32 + dyi;
+                if pxi < 0 || pyi < 0 {
+                    continue;
+                }
+                if let Some(col_id) = grid.column_starting_at(pxi as usize, pyi as usize, anchor_zi)
+                {
+                    if seen_c.insert(col_id) {
+                        patch_cols.push(col_id);
+                    }
                 }
             }
         }
-    }
 
-    // Girders at zi=1 (upper face of floor 0 columns)
-    let upper_zi = 1usize;
-    let upper_nodes: HashSet<i32> = patch_cols
-        .iter()
-        .filter_map(|&cid| {
-            grid.elements
-                .iter()
-                .find(|e| e.id == cid)
-                .map(|e| e.node_j_id)
-        })
-        .collect();
-
-    let mut patch_girdrs: Vec<i32> = Vec::new();
-    let mut seen_g: HashSet<i32> = HashSet::new();
-    for gdr in grid.elements.iter().filter(|e| e.member_type == "Girder") {
-        let zi_g = node_pos.get(&gdr.node_i_id).map(|p| p.2).unwrap_or(999);
-        if zi_g != upper_zi {
+        if patch_cols.len() < 3 {
             continue;
         }
-        if (upper_nodes.contains(&gdr.node_i_id) || upper_nodes.contains(&gdr.node_j_id))
-            && seen_g.insert(gdr.id)
-        {
-            patch_girdrs.push(gdr.id);
-        }
-    }
 
-    // Generate 3-col + 2-girder combinations (cap at 100)
-    let mut candidates: Vec<Candidate> = Vec::new();
-    'outer: for ci in 0..patch_cols.len() {
-        for cj in (ci + 1)..patch_cols.len() {
-            for ck in (cj + 1)..patch_cols.len() {
-                for gi in 0..patch_girdrs.len() {
-                    for gj in (gi + 1)..patch_girdrs.len() {
-                        let ids = vec![
-                            patch_cols[ci],
-                            patch_cols[cj],
-                            patch_cols[ck],
-                            patch_girdrs[gi],
-                            patch_girdrs[gj],
-                        ];
-                        candidates.push(Candidate {
-                            element_ids: ids,
-                            member_count: 5,
-                            connectivity: 0.0,
-                            frontier_dist: 0.0,
-                            is_lowest_floor: true,
-                            is_independent: true,
-                        });
-                        if candidates.len() >= 100 {
-                            break 'outer;
+        // Generate 3-col combinations; for each, find valid 90-degree girder pairs
+        'outer: for ci in 0..patch_cols.len() {
+            for cj in (ci + 1)..patch_cols.len() {
+                for ck in (cj + 1)..patch_cols.len() {
+                    let c_ids = [patch_cols[ci], patch_cols[cj], patch_cols[ck]];
+                    // j-node set for these 3 columns
+                    let jnodes: HashSet<i32> = c_ids
+                        .iter()
+                        .filter_map(|&cid| col_jnode.get(&cid).copied())
+                        .collect();
+                    if jnodes.len() < 3 {
+                        continue; // degenerate
+                    }
+
+                    // Girders fully within jnodes (both ends in jnodes)
+                    let valid_gdrs: Vec<i32> = all_floor1_gdrs
+                        .iter()
+                        .filter(|&&(_, ni, nj)| jnodes.contains(&ni) && jnodes.contains(&nj))
+                        .map(|&(gid, _, _)| gid)
+                        .collect();
+
+                    // Find 90-degree girder pairs (use grid index positions — integer, no float signum issues)
+                    for gi in 0..valid_gdrs.len() {
+                        for gj in (gi + 1)..valid_gdrs.len() {
+                            let gid_a = valid_gdrs[gi];
+                            let gid_b = valid_gdrs[gj];
+                            if let (Some(&(_, ni_a, nj_a)), Some(&(_, ni_b, nj_b))) = (
+                                all_floor1_gdrs.iter().find(|&&(id, _, _)| id == gid_a),
+                                all_floor1_gdrs.iter().find(|&&(id, _, _)| id == gid_b),
+                            ) {
+                                // Use grid positions (xi,yi) to determine direction — avoids float signum issues
+                                let gpos = |nid: i32| -> (i32, i32) {
+                                    node_pos
+                                        .get(&nid)
+                                        .map(|&(xi, yi, _)| (xi as i32, yi as i32))
+                                        .unwrap_or((0, 0))
+                                };
+                                let (ax1, ay1) = gpos(ni_a);
+                                let (ax2, ay2) = gpos(nj_a);
+                                let (bx1, by1) = gpos(ni_b);
+                                let (bx2, by2) = gpos(nj_b);
+                                let da = ((ax2 - ax1).signum(), (ay2 - ay1).signum());
+                                let db = ((bx2 - bx1).signum(), (by2 - by1).signum());
+                                let dot = da.0 * db.0 + da.1 * db.1;
+                                if dot == 0 {
+                                    // 90-degree pair — valid bundle
+                                    let ids = vec![c_ids[0], c_ids[1], c_ids[2], gid_a, gid_b];
+                                    candidates.push(Candidate {
+                                        element_ids: ids,
+                                        member_count: 5,
+                                        connectivity: 0.0,
+                                        frontier_dist: 0.0,
+                                        is_lowest_floor: true,
+                                        is_independent: true,
+                                    });
+                                    if candidates.len() >= 100 {
+                                        break 'outer;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+
+        if !candidates.is_empty() {
+            break; // found valid candidates at this patch radius
         }
     }
     candidates
@@ -1013,6 +1055,23 @@ mod tests {
         let scenarios = run_all_scenarios(3, &grid, &wfs, (0.5, 0.3, 0.2), 0.3);
         let ids: Vec<usize> = scenarios.iter().map(|s| s.id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    /// Center workfront (1,2) on 4×4×3 grid — must also produce steps.
+    #[test]
+    fn test_run_scenario_center_workfront() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 2,
+        }];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.3);
+        assert!(
+            scenario.metrics.total_steps >= 1,
+            "should produce at least 1 step with center workfront"
+        );
     }
 
     /// Default grid (4×4×3) — must finish quickly and install all or most elements.
