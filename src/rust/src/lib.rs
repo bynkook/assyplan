@@ -1282,12 +1282,18 @@ impl eframe::App for AssyPlanApp {
                                 match self.ui_state.construction_view_mode {
                                     graphics::ConstructionViewMode::Sequence => {
                                         // Sequence mode: render elements 1 to current_sequence
-                                        // Uses render_data directly (no step calculation needed)
+                                        // Uses step_render_data.base for transform (same as Step mode)
                                         if let Some(ref mut data) = self.render_data {
                                             data.calculate_transform(rect, &self.view_state);
 
                                             // Use step_render_data for rendering with sequence mode
-                                            if let Some(ref step_data) = self.step_render_data {
+                                            if let Some(ref mut step_data) = self.step_render_data {
+                                                // Must calculate transform on step_data.base so that
+                                                // render_sequence uses up-to-date zoom/pan from view_state
+                                                step_data
+                                                    .base
+                                                    .calculate_transform(rect, &self.view_state);
+
                                                 step_data.render_sequence(
                                                     &painter,
                                                     rect,
