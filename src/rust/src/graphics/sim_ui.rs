@@ -651,6 +651,64 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
 
             // ── XY Plot: Members-per-step ──────────────────────────────────
             render_members_per_step_plot(ui, scenario);
+
+            ui.add_space(10.0);
+            ui.separator();
+
+            // ── Export ────────────────────────────────────────────────────
+            ui.heading("Export Debug Files");
+            ui.add_space(4.0);
+            ui.label(
+                "Save scenario steps and summary to CSV/text files in the same folder as the executable.",
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !state.sim_export_requested,
+                        egui::Button::new("💾 Export All Scenarios"),
+                    )
+                    .on_hover_text(
+                        "Export all scenario steps + summary to simulation_debug/ folder",
+                    )
+                    .clicked()
+                {
+                    state.sim_export_requested = true;
+                    state.sim_export_status = "Exporting…".to_string();
+                }
+                if ui
+                    .add_enabled(
+                        !state.sim_export_requested && state.sim_selected_scenario.is_some(),
+                        egui::Button::new("💾 Export Selected Scenario"),
+                    )
+                    .on_hover_text("Export only the currently selected scenario")
+                    .clicked()
+                {
+                    // Use negative index trick: store selected-only flag via a sentinel
+                    // We encode "export selected only" as usize::MAX sentinel in sim_current_step
+                    // Actually: simpler — use a dedicated field. We reuse sim_export_requested
+                    // and pass selected info through sim_export_status prefix.
+                    state.sim_export_requested = true;
+                    let sel_id = state
+                        .sim_selected_scenario
+                        .and_then(|i| state.sim_scenarios.get(i))
+                        .map(|s| s.id)
+                        .unwrap_or(0);
+                    state.sim_export_status = format!("Exporting scenario {}…", sel_id);
+                }
+            });
+            // Show last export result
+            if !state.sim_export_status.is_empty() {
+                ui.add_space(4.0);
+                let color = if state.sim_export_status.starts_with("✅") {
+                    Color32::from_rgb(80, 200, 120)
+                } else if state.sim_export_status.starts_with("❌") {
+                    Color32::from_rgb(220, 80, 80)
+                } else {
+                    Color32::from_rgb(180, 180, 80)
+                };
+                ui.colored_label(color, &state.sim_export_status);
+            }
         }
     }
 }

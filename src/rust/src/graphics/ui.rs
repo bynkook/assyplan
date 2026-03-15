@@ -227,6 +227,10 @@ pub struct UiState {
     pub sim_running: bool,
     /// Number of scenarios to generate
     pub sim_scenario_count: usize,
+    /// Flag: export debug files requested (set by UI button, consumed by app update loop)
+    pub sim_export_requested: bool,
+    /// Last export status message (shown in UI after export)
+    pub sim_export_status: String,
 }
 
 impl UiState {
@@ -274,6 +278,8 @@ impl UiState {
             sim_weights: (0.5, 0.3, 0.15),
             sim_running: false,
             sim_scenario_count: 100,
+            sim_export_requested: false,
+            sim_export_status: String::new(),
         }
     }
 
@@ -316,6 +322,8 @@ impl UiState {
         self.sim_current_step = 1;
         self.sim_play_timer = 0.0;
         self.sim_running = false;
+        self.sim_export_requested = false;
+        self.sim_export_status.clear();
     }
 
     /// Set step data from Python step table

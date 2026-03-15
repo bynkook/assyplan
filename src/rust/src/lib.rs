@@ -841,6 +841,136 @@ impl AssyPlanApp {
         );
     }
 
+    /// Export simulation debug files (all scenarios → simulation_debug/ folder).
+    /// Returns a status message for display in the UI.
+    fn export_simulation_debug(&self) -> String {
+        use std::fmt::Write as FmtWrite;
+        use std::fs;
+        use std::io::Write;
+
+        let scenarios = &self.ui_state.sim_scenarios;
+        if scenarios.is_empty() {
+            return "❌ No scenarios to export. Run simulation first.".to_string();
+        }
+
+        // Determine output directory: next to executable, subfolder "simulation_debug"
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let out_dir = exe_dir.join("simulation_debug");
+
+        if let Err(e) = fs::create_dir_all(&out_dir) {
+            return format!("❌ Failed to create output dir: {}", e);
+        }
+
+        let cfg = &self.ui_state.grid_config;
+
+        // ── 1. Summary text file ─────────────────────────────────────────
+        let mut summary = String::new();
+        let _ = writeln!(summary, "AssyPlan Simulation Debug Export");
+        let _ = writeln!(
+            summary,
+            "Generated: {} seconds since UNIX epoch",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        let _ = writeln!(summary, "");
+        let _ = writeln!(
+            summary,
+            "Grid: {}×{} (nx×ny), {} z-levels, dx={:.0}mm, dy={:.0}mm, dz={:.0}mm",
+            cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz
+        );
+        let _ = writeln!(
+            summary,
+            "Upper-floor threshold: {:.1}%",
+            self.ui_state.upper_floor_threshold * 100.0
+        );
+        let _ = writeln!(summary, "Scenarios: {}", scenarios.len());
+        let _ = writeln!(
+            summary,
+            "Weights: w1(member_count)={:.2}, w2(connectivity)={:.2}, w3(distance)={:.2}",
+            self.ui_state.sim_weights.0, self.ui_state.sim_weights.1, self.ui_state.sim_weights.2
+        );
+        let _ = writeln!(summary, "");
+        let _ = writeln!(
+            summary,
+            "{:<6} {:<8} {:<10} {:<12} {:<12} {:<20}",
+            "ID", "Steps", "Members", "Avg/Step", "Connectivity", "Termination"
+        );
+        let _ = writeln!(summary, "{}", "-".repeat(70));
+        for s in scenarios {
+            let _ = writeln!(
+                summary,
+                "{:<6} {:<8} {:<10} {:<12.2} {:<12.2} {:<20}",
+                s.id,
+                s.metrics.total_steps,
+                s.metrics.total_members_installed,
+                s.metrics.avg_members_per_step,
+                s.metrics.avg_connectivity,
+                format!("{}", s.metrics.termination_reason)
+            );
+        }
+
+        let summary_path = out_dir.join("simulation_summary.txt");
+        let mut summary_errors = 0usize;
+        if let Ok(mut f) = fs::File::create(&summary_path) {
+            if f.write_all(summary.as_bytes()).is_err() {
+                summary_errors += 1;
+            }
+        } else {
+            summary_errors += 1;
+        }
+
+        // ── 2. Per-scenario CSV files ────────────────────────────────────
+        let mut csv_errors = 0usize;
+        for scenario in scenarios {
+            let csv_path = out_dir.join(format!("scenario_{:04}_steps.csv", scenario.id));
+            let mut csv = String::new();
+            let _ = writeln!(csv, "step,workfront_id,floor,member_count,element_ids");
+            for (step_idx, step) in scenario.steps.iter().enumerate() {
+                let ids_str = step
+                    .element_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                let _ = writeln!(
+                    csv,
+                    "{},{},{},{},{}",
+                    step_idx + 1, // 1-indexed
+                    step.workfront_id,
+                    step.floor,
+                    step.element_ids.len(),
+                    ids_str
+                );
+            }
+            if let Ok(mut f) = fs::File::create(&csv_path) {
+                if f.write_all(csv.as_bytes()).is_err() {
+                    csv_errors += 1;
+                }
+            } else {
+                csv_errors += 1;
+            }
+        }
+
+        if summary_errors + csv_errors == 0 {
+            format!(
+                "✅ Exported {} scenario(s) + summary to: {}",
+                scenarios.len(),
+                out_dir.display()
+            )
+        } else {
+            format!(
+                "❌ Export completed with {} error(s). Output: {}",
+                summary_errors + csv_errors,
+                out_dir.display()
+            )
+        }
+    }
+
     /// Update floor column counts based on current_step
     /// Called when step changes to update Result tab metrics
     fn update_floor_counts_for_step(&mut self) {
@@ -1210,6 +1340,13 @@ impl eframe::App for AssyPlanApp {
             });
 
         // Central panel - View with tabs
+        // Handle pending export request (outside UI builder to avoid borrow conflict)
+        if self.ui_state.sim_export_requested {
+            self.ui_state.sim_export_requested = false;
+            let status = self.export_simulation_debug();
+            self.ui_state.sim_export_status = status;
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // Tabs
             ui.horizontal(|ui| {
