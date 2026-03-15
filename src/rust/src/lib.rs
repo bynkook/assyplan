@@ -1482,8 +1482,8 @@ impl eframe::App for AssyPlanApp {
                             }
                         }
 
-                        // Always draw axis cube
-                        graphics::axis_cube::paint_axis_cube(&painter, rect, &self.view_state);
+                        // Always draw axis cube on its own Foreground layer
+                        graphics::axis_cube::paint_axis_cube(ctx, rect, &self.view_state);
                     } else {
                         ui.centered_and_justified(|ui| {
                             ui.label("No data loaded.\nClick 'Open File' to load a CSV file.");

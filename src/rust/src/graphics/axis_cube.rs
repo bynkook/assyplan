@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke};
+use eframe::egui::{self, Color32, Id, LayerId, Order, Pos2, Rect, Shape, Stroke};
 
 use super::view_state::ViewState;
 
@@ -6,7 +6,7 @@ use super::view_state::ViewState;
 /// Prevents degenerate near-zero polygons from causing egui tessellator artifacts.
 const MIN_FACE_AREA: f32 = 0.5;
 
-pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &ViewState) {
+pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewState) {
     let size = egui::vec2(50.0, 50.0);
     let margin = 12.0;
     let rect = Rect::from_min_size(
@@ -14,11 +14,22 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         size,
     );
 
-    // Isolate rendering to prevent artifacts bleeding into the main 3D scene.
-    // clip_margin covers the axis labels drawn outside the box (up to ~14px tip + text).
-    let clip_margin = 28.0;
-    let clip_rect = rect.expand(clip_margin);
-    let painter = painter.with_clip_rect(clip_rect);
+    // Use a completely independent Foreground layer so the painter's clip_rect
+    // starts from content_rect (full screen), not from the viewport painter's clip_rect.
+    // This makes with_clip_rect(rect) actually work as a hard boundary.
+    //
+    // Background: ui.painter_at(viewport) creates a painter clipped to viewport.
+    // Calling painter.with_clip_rect(small_rect) does small_rect.intersect(viewport),
+    // which (when small_rect ⊂ viewport) equals small_rect — but only if small_rect is
+    // strictly inside the viewport. When expand() is used it may overflow and fail.
+    // A new layer_painter has clip_rect = content_rect (full screen), so
+    // with_clip_rect(rect) reliably clips to exactly rect. No bleeding.
+    let layer_id = LayerId::new(Order::Foreground, Id::new("axis_cube_overlay"));
+    let base_painter = ctx.layer_painter(layer_id);
+
+    // Clip the foreground painter to just the cube rect (no expand needed —
+    // faces and axis lines are all within this rect by construction).
+    let painter = base_painter.with_clip_rect(rect);
 
     painter.rect_filled(rect, 6.0, Color32::from_black_alpha(120));
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_gray(90)));
@@ -67,7 +78,7 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
             [5, 1, 2, 6],
             [1.0, 0.0, 0.0],
             Color32::from_rgb(220, 80, 80),
-        ), // +X (green)
+        ), // +X (red)
         (
             [0, 4, 7, 3],
             [-1.0, 0.0, 0.0],
@@ -125,9 +136,8 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
     });
 
     for (points, color, _, _) in draw_list {
-        // Fill only — no stroke. egui 0.27's convex_polygon stroke is not clipped
-        // by the painter's clip_rect, causing edges to bleed across the screen.
-        // The face border effect is achieved by drawing a slightly darker fill.
+        // Fill only — no stroke. Stroke on convex_polygon bleeds outside clip_rect
+        // in some egui backends. Face border effect achieved by slightly darker fill.
         painter.add(Shape::convex_polygon(
             points,
             color.gamma_multiply(0.75),
@@ -136,6 +146,8 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
     }
 
     // Axis lines (drawn on top of the faces)
+    // scale=16.0 and direction vectors have magnitude ≤ 1.1, so tip is at most
+    // center ± 17.6px — well within the 50x50 rect (25px radius from center).
     paint_axis_line(
         &painter,
         center,
