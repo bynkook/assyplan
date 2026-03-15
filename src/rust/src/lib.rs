@@ -628,12 +628,10 @@ impl AssyPlanApp {
                 .iter()
                 .any(|e| e.contains("Cycle detected"))
             {
-                let error_count = errors.len();
-                let mut status_msg = format!("Calculation failed: {} error(s)", error_count);
-                if !errors.is_empty() {
-                    status_msg.push_str(&format!("\nFirst error: {}", errors[0]));
-                }
-                self.ui_state.status_message = status_msg;
+                self.ui_state.status_message = format!(
+                    "⚠ Calculation failed: predecessor cycle detected.\n{}",
+                    errors.join("\n")
+                );
                 self.ui_state.validation_passed = false;
                 return;
             }
@@ -725,7 +723,11 @@ impl AssyPlanApp {
             node_count, element_count, max_step, workfront_count
         );
         if !errors.is_empty() {
-            status_msg.push_str(&format!(" | {} error(s)", errors.len()));
+            status_msg = format!(
+                "⚠ Calculation completed with {} error(s):\n{}",
+                errors.len(),
+                errors.join("\n")
+            );
         }
         if !warnings.is_empty() {
             status_msg.push_str(&format!(" | {} warning(s)", warnings.len()));
@@ -1017,7 +1019,24 @@ impl eframe::App for AssyPlanApp {
                 ui.separator();
 
                 ui.label(format!("Mode: {}", self.ui_state.mode));
-                ui.label(format!("Status: {}", self.ui_state.status_message));
+
+                // Status message - show errors in red, warnings in yellow
+                if self.ui_state.status_message.starts_with('⚠') {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 180, 50),
+                        &self.ui_state.status_message,
+                    );
+                } else if self.ui_state.status_message.starts_with("Error")
+                    || self.ui_state.status_message.starts_with("Calc")
+                        && self.ui_state.status_message.contains("failed")
+                {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        &self.ui_state.status_message,
+                    );
+                } else {
+                    ui.label(&self.ui_state.status_message);
+                }
 
                 if self.ui_state.has_data {
                     ui.label("Data loaded: Yes");

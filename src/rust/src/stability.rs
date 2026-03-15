@@ -936,6 +936,36 @@ pub fn generate_all_tables(
     // Calculate max step
     result.max_step = result.step_table.iter().map(|s| s.step).max().unwrap_or(0);
 
+    // Validate step table: check for oversized steps (> 5 members) or
+    // incomplete final assembly (step with members that never closed stably)
+    let max_members_per_step = 5;
+    for step in &result.step_table {
+        if step.element_ids.len() > max_members_per_step {
+            result.errors.push(format!(
+                "Step {} (workfront {}) has {} members (max {}). \
+                 Input data may be missing required structural members — \
+                 check that all predecessor elements are present.",
+                step.step,
+                step.workfront_id,
+                step.element_ids.len(),
+                max_members_per_step
+            ));
+        }
+    }
+
+    // Check if sequence_table has fewer entries than total elements
+    // (some elements were unreachable / dropped)
+    if result.sequence_table.len() < elements.len() {
+        let missing = elements.len() - result.sequence_table.len();
+        result.errors.push(format!(
+            "Sequence table has {} entries but {} elements were provided. \
+             {} element(s) could not be ordered — predecessor chain may be broken.",
+            result.sequence_table.len(),
+            elements.len(),
+            missing
+        ));
+    }
+
     result
 }
 
