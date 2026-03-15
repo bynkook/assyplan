@@ -560,7 +560,50 @@ while x < plot_rect.right() {
 }
 ```
 
-### upper_floor_threshold Metric vs Constraint
+### view_state: scroll zoom — response.hovered() 사용 금지
+`handle_input()`의 scroll 감지 조건으로 `response.hovered()`를 사용하면 Construction mode에서 zoom이 작동하지 않는다.
+
+**원인**: Construction mode에서 TopBottomPanel(nav bar)이 같은 프레임에 렌더링될 경우, egui 위젯 레이어 처리 과정에서 `response.hovered()`가 false를 반환할 수 있다. 이로 인해 마우스 포인터가 viewport 위에 있어도 scroll event가 무시된다.
+
+**올바른 패턴**:
+```rust
+// ❌ 잘못된 방법 — TopBottomPanel 존재 시 Construction mode에서 false 반환 가능
+if response.hovered() { ... }
+
+// ✅ 올바른 방법 — pointer 위치와 rect를 직접 비교
+let pointer_in_rect = ui
+    .input(|input| input.pointer.hover_pos())
+    .map(|pos| response.rect.contains(pos))
+    .unwrap_or(false);
+if pointer_in_rect { ... }
+```
+
+### Construction Sequence 모드 — step_data.base.calculate_transform() 필수
+Construction Sequence 모드에서 zoom/pan이 반영되지 않는 버그의 원인은 transform 갱신 누락이다.
+
+**원인**: Sequence 모드는 `render_data.calculate_transform()`을 호출하지만, 실제 렌더링은 `step_render_data.render_sequence()`가 담당하고 이 함수는 `step_data.base`의 transform을 참조한다. `step_data.base.calculate_transform()`이 호출되지 않으면 zoom/pan 변경이 화면에 반영되지 않는다.
+
+**올바른 패턴** (`lib.rs` Sequence 분기):
+```rust
+// ✅ Sequence 모드에서도 step_data.base transform 반드시 갱신
+if let Some(ref mut step_data) = self.step_render_data {
+    step_data.base.calculate_transform(rect, &self.view_state); // 필수
+    step_data.render_sequence(&painter, rect, &self.view_state, &visibility, current_sequence);
+}
+// Step 모드도 동일하게 step_data.base.calculate_transform() 호출
+```
+
+### grid bubble trimming — renderer.rs / step_renderer.rs 독립 구현 주의
+`renderer.rs`(Model view)와 `step_renderer.rs`(Construction view)는 grid line 렌더링 로직이 **별도로 구현**되어 있다. 한쪽에 수정이 가해져도 다른 쪽에는 자동으로 반영되지 않는다.
+
+bubble 원 내부로 grid line이 침범하지 않도록 두 파일 모두 trimming을 적용해야 한다:
+```rust
+// ✅ 올바른 패턴 (renderer.rs, step_renderer.rs 공통 적용)
+let dir = (p2 - p1).normalized();
+let p1_trimmed = p1 + dir * bubble_radius;
+painter.line_segment([p1_trimmed, p2], stroke); // p1이 아닌 p1_trimmed 사용
+self.draw_grid_bubble(painter, p1, ...);        // bubble 중심은 여전히 p1
+```
 - `upper_floor_threshold` controls Chart 3 threshold line visualization ONLY
 - Formula: `(cumulative installs at floor N+1) / (cumulative installs at floor N)`, denominator=0 → 0.0
 - Default value: **0.3 (30%)**

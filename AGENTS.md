@@ -152,13 +152,12 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 ## 6. 빌드 및 배포
 
 ### 빌드 명령
-```powershell
-# Rust 릴리즈 빌드
-cd src\rust
+```bash
+# Rust 릴리즈 빌드 (workdir: src/rust)
 cargo build --release
 
-# 결과물을 루트로 복사
-copy target\release\assyplan.exe ..\..\assyplan.exe
+# 결과물을 루트로 복사 (Git Bash — copy 아님, cp 사용)
+cp target/release/assyplan.exe ../../assyplan.exe
 ```
 
 ### Skills 문서 업데이트 규칙
@@ -200,6 +199,9 @@ copy target\release\assyplan.exe ..\..\assyplan.exe
 - **upper_floor_threshold**: Phase 2에서는 시각화 전용. 실제 시공 순서 제약은 Phase 3에서 구현.
 - **axis_cube 면 렌더링**: `Shape::convex_polygon` 사용 금지. egui의 feathering normal 계산 버그(issue #1226)로 특정 orbit 각도에서 face가 비정상적으로 크게 렌더링됨. 반드시 `Mesh::add_triangle`로 직접 삼각형 분할하여 그릴 것.
 - **axis_cube clip_rect**: `ui.painter_at(viewport).with_clip_rect(small_rect)`는 `small_rect.intersect(viewport)`로 작동하여 실제 격리가 안 됨. `ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("...")))` 로 독립 레이어 painter를 생성한 뒤 `with_clip_rect` 적용해야 정확히 동작.
+- **view_state scroll zoom**: `handle_input()`에서 scroll 감지 조건으로 `response.hovered()` 사용 금지. Construction mode에서 TopBottomPanel(nav bar)이 같은 프레임에 존재할 경우 `hovered()`가 false를 반환하여 scroll event가 무시됨. 반드시 `ui.input(|i| i.pointer.hover_pos()).map(|p| response.rect.contains(p))` 로 직접 비교할 것.
+- **Sequence 모드 transform**: Construction Sequence 모드에서 렌더링 직전 반드시 `step_data.base.calculate_transform(rect, &view_state)` 호출 필요. `render_data.calculate_transform()`만 호출하면 `step_render_data.base`의 transform이 갱신되지 않아 zoom/pan이 반영되지 않음.
+- **grid bubble trimming 일관성**: `renderer.rs`(Model view)와 `step_renderer.rs`(Construction view)는 grid line 렌더링 코드가 각각 독립 구현됨. 한쪽을 수정하면 다른 쪽도 반드시 동일하게 수정할 것. bubble 원 내부 침범 방지: `let p1_trimmed = p1 + (p2-p1).normalized() * bubble_radius` 후 `line_segment([p1_trimmed, p2], ...)`.
 
 ### Python
 - **charset_normalizer 인코딩 이름**: `"utf_8"`, `"euc_kr"` (언더스코어) — 대시(`"utf-8"`) 아님
