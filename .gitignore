@@ -76,6 +76,13 @@ desktop.ini
 *.bak
 *.bat
 
+# Screenshots / images (do not commit)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+
 # Windows artifacts
 nul
 
