@@ -10,6 +10,12 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         size,
     );
 
+    // Use a clip rect slightly larger than the cube rect to isolate rendering
+    // and prevent artifacts bleeding into the main 3D scene painter
+    let clip_margin = 20.0; // enough to include axis labels drawn outside the box
+    let clip_rect = rect.expand(clip_margin);
+    let painter = painter.with_clip_rect(clip_rect);
+
     painter.rect_filled(rect, 6.0, Color32::from_black_alpha(120));
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_gray(90)));
 
@@ -59,7 +65,7 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
     }
 
     paint_axis_line(
-        painter,
+        &painter,
         center,
         view_state.project_3d_to_2d_ortho([1.1, 0.0, 0.0]).0,
         16.0,
@@ -67,7 +73,7 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         "X",
     );
     paint_axis_line(
-        painter,
+        &painter,
         center,
         view_state.project_3d_to_2d_ortho([0.0, 1.1, 0.0]).0,
         16.0,
@@ -75,7 +81,7 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         "Y",
     );
     paint_axis_line(
-        painter,
+        &painter,
         center,
         view_state.project_3d_to_2d_ortho([0.0, 0.0, 1.1]).0,
         16.0,

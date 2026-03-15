@@ -507,15 +507,6 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                         axis_color,
                     );
                 }
-
-                // X-axis title: "Step →" at right end of x-axis
-                painter.text(
-                    egui::pos2(plot_rect.right() + 2.0, plot_rect.bottom() + 3.0),
-                    egui::Align2::LEFT_TOP,
-                    "Step →",
-                    font_id.clone(),
-                    egui::Color32::from_rgb(120, 120, 140),
-                );
             }
 
             ui.add_space(10.0);
@@ -690,15 +681,6 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                         axis_color,
                     );
                 }
-
-                // X-axis title: "Step →" at right end of x-axis
-                painter.text(
-                    egui::pos2(plot_rect.right() + 2.0, plot_rect.bottom() + 3.0),
-                    egui::Align2::LEFT_TOP,
-                    "Step →",
-                    font_id.clone(),
-                    egui::Color32::from_rgb(120, 120, 140),
-                );
             }
 
             ui.add_space(10.0);
@@ -924,15 +906,6 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                             axis_color,
                         );
                     }
-
-                    // X-axis title: "Step →" at right end of x-axis
-                    painter.text(
-                        egui::pos2(plot_rect.right() + 2.0, plot_rect.bottom() + 3.0),
-                        egui::Align2::LEFT_TOP,
-                        "Step →",
-                        font_id.clone(),
-                        egui::Color32::from_rgb(120, 120, 140),
-                    );
                 }
 
                 ui.add_space(10.0);
