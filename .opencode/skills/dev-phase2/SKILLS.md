@@ -298,6 +298,44 @@ ui.add(
 ui.label(format!("{:.0}%", state.upper_floor_threshold * 100.0));
 ```
 
+#### graphics/axis_cube.rs
+View Cube (orientation gizmo) — 3D 뷰포트 우상단에 카메라 방향을 표시하는 작은 큐브.
+
+**Rendering Pipeline**:
+1. Back-face culling: `dot(outward_normal, forward) <= 0.0` → skip (front-facing만 그림)
+2. Degenerate face skip: `polygon_area_2d(points) < MIN_FACE_AREA` → skip (edge-on face)
+3. Depth sort: **오름차순** avg_depth (작은 값 = 카메라에서 먼 면 → 먼저 그림)
+4. Face draw: `Mesh::add_triangle` 사용 — quad를 삼각형 2개로 분할
+
+**Key Functions**:
+- `paint_axis_cube(ctx, viewport, view_state)`: 전체 렌더링 진입점
+- `dot(a, b)`: inline 3D dot product helper (`[f32; 3]`)
+- `polygon_area_2d(points)`: edge-on face 감지용 Shoelace formula
+
+**Face Draw Pattern**:
+```rust
+let mut mesh = Mesh::default();
+for &p in &points {
+    mesh.colored_vertex(p, fill);
+}
+let n = points.len() as u32;
+for i in 1..(n - 1) {
+    mesh.add_triangle(0, i, i + 1);
+}
+painter.add(Shape::mesh(mesh));
+```
+
+**Clip Rect Isolation Pattern**:
+```rust
+// ❌ 잘못된 방법 — small_rect.intersect(viewport) 로 작동하여 격리 불완전
+let painter = ui.painter_at(viewport).with_clip_rect(small_rect);
+
+// ✅ 올바른 방법 — Foreground layer로 독립 painter 생성
+let painter = ctx
+    .layer_painter(LayerId::new(Order::Foreground, Id::new("axis_cube_overlay")))
+    .with_clip_rect(small_rect);
+```
+
 #### lib.rs (Extended)
 PyO3 bindings for step data.
 
@@ -482,6 +520,21 @@ fn on_step_change(&mut self, new_step: usize) {
 - Empty string, None, NaN all treated as "no predecessor"
 - These members become workfront starting points
 - Multiple workfronts can exist in a single model
+
+### axis_cube: Shape::convex_polygon 사용 금지
+`Shape::convex_polygon`은 내부적으로 `fill_closed_path`를 호출하여 anti-aliasing feathering을 위해 각 vertex의 normal을 계산한다. 3D→2D projected quad에서 특정 orbit 각도에 이 계산이 잘못되어, face가 화면을 덮을 정도로 비정상적으로 크게 렌더링되는 artifact가 발생한다 (egui issue #1226).
+
+반드시 `Mesh::add_triangle`으로 quad를 삼각형 2개로 직접 분할하여 그릴 것. `Mesh`는 feathering 없이 순수 삼각형만 그리므로 artifact가 없다.
+
+### axis_cube: clip_rect 독립 레이어
+`ui.painter_at(viewport).with_clip_rect(small_rect)`를 호출하면 실제로는 `small_rect.intersect(viewport)` 결과가 적용되어 viewport 범위를 벗어난 영역이 실제로 격리되지 않는다.
+
+독립적인 clip boundary가 필요한 경우:
+```rust
+ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("axis_cube_overlay")))
+    .with_clip_rect(rect)
+```
+`Order::Foreground` 독립 레이어 painter를 생성한 뒤 `with_clip_rect`를 적용해야 정확히 동작한다.
 
 ### Cache Consistency
 - Cache invalidation on ANY step_elements modification

@@ -198,6 +198,8 @@ copy target\release\assyplan.exe ..\..\assyplan.exe
 - **floor_colors 스코프**: 여러 Chart가 공유하는 색상 배열은 클로저 밖 함수 스코프에 정의
 - **step 인덱스**: `step_elements[s]`에서 s는 0-indexed이지만 UI/로직 상 step은 1-indexed. 접근 시 `step_elements[step - 1]` 또는 `step_elements.get(step)`으로 경계 체크 필수
 - **upper_floor_threshold**: Phase 2에서는 시각화 전용. 실제 시공 순서 제약은 Phase 3에서 구현.
+- **axis_cube 면 렌더링**: `Shape::convex_polygon` 사용 금지. egui의 feathering normal 계산 버그(issue #1226)로 특정 orbit 각도에서 face가 비정상적으로 크게 렌더링됨. 반드시 `Mesh::add_triangle`로 직접 삼각형 분할하여 그릴 것.
+- **axis_cube clip_rect**: `ui.painter_at(viewport).with_clip_rect(small_rect)`는 `small_rect.intersect(viewport)`로 작동하여 실제 격리가 안 됨. `ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("...")))` 로 독립 레이어 painter를 생성한 뒤 `with_clip_rect` 적용해야 정확히 동작.
 
 ### Python
 - **charset_normalizer 인코딩 이름**: `"utf_8"`, `"euc_kr"` (언더스코어) — 대시(`"utf-8"`) 아님
