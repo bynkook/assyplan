@@ -7,17 +7,20 @@ This module provides functions to:
 """
 
 import json
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 import pandas as pd
 
 from src.python.stability_validators import (
+    double_check_cumulative_stability,
     get_column_elements,
+    get_column_floor,
     get_girder_elements,
     validate_column_support,
     validate_girder_support,
     validate_minimum_assembly,
 )
+from src.python.metrics import check_floor_installation_constraint
 
 
 def _build_member_to_element_mapping(
@@ -80,6 +83,7 @@ def _get_element_by_id(
 def _is_structure_stable(
     elements_to_check: List[Tuple[int, int, int, str]],
     nodes: List[Tuple[int, float, float, float]],
+    all_elements: List[Tuple[int, int, int, str]],
     stable_elements: Set[int],
     is_first_step: bool,
 ) -> bool:
@@ -88,6 +92,7 @@ def _is_structure_stable(
     Args:
         elements_to_check: List of elements to check for stability.
         nodes: List of (node_id, x, y, z) tuples.
+        all_elements: Complete list of all elements (for looking up stable element details).
         stable_elements: Set of already stable element IDs.
         is_first_step: Whether this is the first step (requires minimum assembly).
 
@@ -110,14 +115,12 @@ def _is_structure_stable(
         elem_id, _, _, member_type = elem
 
         if member_type == "Column":
-            # Check column support
-            if not validate_column_support(elem, nodes, stable_elements):
+            # Check column support - needs access to all elements to find stable columns
+            if not validate_column_support(elem, nodes, all_elements, stable_elements):
                 return False
         elif member_type == "Girder":
-            # Check girder support
-            if not validate_girder_support(
-                elem, nodes, elements_to_check, stable_elements
-            ):
+            # Check girder support - needs access to all elements to find stable connections
+            if not validate_girder_support(elem, nodes, all_elements, stable_elements):
                 return False
 
     return True
@@ -218,6 +221,7 @@ def assign_steps(
             is_stable = _is_structure_stable(
                 current_elements,
                 nodes,
+                elements,  # Pass full elements list for stable element lookup
                 stable_elements,
                 is_first_step,
             )
@@ -252,6 +256,124 @@ def assign_steps(
                 result.append((workfront_id, current_step, m_id))
 
     return result
+
+
+def verify_step_table_stability(
+    step_table: List[Tuple[int, int, str]],
+    nodes: List[Tuple[int, float, float, float]],
+    elements: List[Tuple[int, int, int, str]],
+    floor_threshold: float = 80.0,
+) -> Dict[str, Any]:
+    """Verify cumulative stability of step table (double-check gate).
+
+    This function performs the "double check" verification described in
+    devplandoc.md:117-119. It validates that:
+    1. Each step results in cumulative structural stability
+    2. Floor-level installation constraints are satisfied
+
+    Args:
+        step_table: List of (workfront_id, step, member_id) tuples.
+        nodes: List of (node_id, x, y, z) tuples.
+        elements: List of (element_id, node_i_id, node_j_id, member_type) tuples.
+        floor_threshold: Required percentage of lower floor completion (default: 80%).
+
+    Returns:
+        Dictionary with verification results:
+            - "valid": bool - True if all steps pass verification
+            - "step_results": Dict[int, Dict] - Results per step
+            - "failed_steps": List[int] - Steps that failed verification
+            - "floor_violations": List[Dict] - Floor constraint violations
+    """
+    # Build member to element mapping
+    member_to_element = _build_member_to_element_mapping(elements)
+
+    # Group step_table by step
+    steps_by_number: Dict[int, List[Tuple[int, int, str]]] = {}
+    for wf_id, step, member_id in step_table:
+        if step not in steps_by_number:
+            steps_by_number[step] = []
+        steps_by_number[step].append((wf_id, step, member_id))
+
+    # Track verification state
+    verified_stable: Set[int] = set()
+    installed_element_ids: Set[int] = set()
+    step_results: Dict[int, Dict] = {}
+    failed_steps: List[int] = []
+    floor_violations: List[Dict] = []
+
+    # Process steps in order
+    for step_num in sorted(steps_by_number.keys()):
+        step_entries = steps_by_number[step_num]
+
+        # Get elements for this step
+        step_elements: List[Tuple[int, int, int, str]] = []
+        for _, _, member_id in step_entries:
+            elem_id = member_to_element.get(member_id)
+            if elem_id:
+                elem = _get_element_by_id(elem_id, elements)
+                if elem:
+                    step_elements.append(elem)
+                    installed_element_ids.add(elem_id)
+
+        # Get all installed elements (filter out None values explicitly)
+        installed_elements: List[Tuple[int, int, int, str]] = []
+        for eid in installed_element_ids:
+            elem = _get_element_by_id(eid, elements)
+            if elem is not None:
+                installed_elements.append(elem)
+
+        # Check floor constraints for columns in this step
+        for elem in step_elements:
+            elem_id, _, _, member_type = elem
+            if member_type == "Column":
+                try:
+                    floor = get_column_floor(elem, nodes)
+                    allowed, lower_pct = check_floor_installation_constraint(
+                        floor,
+                        installed_elements,
+                        elements,
+                        nodes,
+                        floor_threshold,
+                    )
+                    if not allowed:
+                        floor_violations.append(
+                            {
+                                "step": step_num,
+                                "element_id": elem_id,
+                                "floor": floor,
+                                "lower_floor_percentage": lower_pct,
+                                "required_threshold": floor_threshold,
+                            }
+                        )
+                except (KeyError, ValueError):
+                    pass  # Skip elements with invalid node references
+
+        # Perform double-check: cumulative stability verification
+        is_stable, verified_stable, failed_elems = double_check_cumulative_stability(
+            installed_elements,
+            nodes,
+            elements,
+            verified_stable,
+        )
+
+        step_results[step_num] = {
+            "stable": is_stable,
+            "elements_verified": len(verified_stable),
+            "failed_elements": failed_elems,
+        }
+
+        if not is_stable:
+            failed_steps.append(step_num)
+
+    # Overall validity
+    is_valid = len(failed_steps) == 0 and len(floor_violations) == 0
+
+    return {
+        "valid": is_valid,
+        "step_results": step_results,
+        "failed_steps": failed_steps,
+        "floor_violations": floor_violations,
+    }
 
 
 def create_step_table(

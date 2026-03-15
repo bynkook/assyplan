@@ -21,6 +21,10 @@ pub struct StepRenderData {
     pub max_step: usize,
     /// Cache of cumulative element indices per step for O(1) lookup
     cumulative_cache: HashMap<usize, Vec<usize>>,
+    /// Sequence order: element indices in topological/predecessor chain order
+    /// sequence_order[i] = element index (into base.elements) for sequence position i
+    /// Empty = use base.elements index order (fallback)
+    pub sequence_order: Vec<usize>,
 }
 
 impl StepRenderData {
@@ -32,7 +36,20 @@ impl StepRenderData {
             current_step: 1,
             max_step: 0,
             cumulative_cache: HashMap::new(),
+            sequence_order: Vec::new(),
         }
+    }
+
+    /// Set sequence order from construction sequence table
+    ///
+    /// # Arguments
+    /// * `sequence_order` - Element indices (into base.elements) in topological/predecessor order
+    ///
+    /// This defines the order in which elements appear in Sequence mode (1-by-1 playback).
+    /// The order is derived from the construction sequence table, which follows predecessor
+    /// chain dependencies — giving a mixed Column/Girder order that matches actual assembly order.
+    pub fn set_sequence_order(&mut self, sequence_order: Vec<usize>) {
+        self.sequence_order = sequence_order;
     }
 
     /// Set step data from Python step table
@@ -238,6 +255,108 @@ impl StepRenderData {
         // Render elements with step coloring
         if visibility.show_elements {
             self.render_step_elements(painter, rect, view_state);
+        }
+    }
+
+    /// Render with sequence-based display (elements 1 to N in original input order)
+    ///
+    /// - Elements 1 to (current_sequence-1): grey, semi-transparent
+    /// - Element current_sequence: original colors (red for Column, green for Girder)
+    /// - Grid and nodes: render based on visibility settings
+    ///
+    /// # Arguments
+    /// * `painter` - Egui painter for rendering
+    /// * `rect` - Clipping rectangle
+    /// * `view_state` - Current view state for projection
+    /// * `visibility` - Visibility settings for grid, nodes, elements
+    /// * `current_sequence` - Current sequence number (1-indexed, 1 to max_sequence)
+    pub fn render_sequence(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        view_state: &ViewState,
+        visibility: &VisibilitySettings,
+        current_sequence: usize,
+    ) {
+        // Render grid and nodes based on visibility settings
+        if visibility.show_grid {
+            self.render_grid_inline(painter, rect, view_state);
+        }
+        if visibility.show_nodes {
+            self.render_nodes_inline(painter, rect, view_state);
+        }
+
+        // Render elements up to current_sequence
+        if visibility.show_elements {
+            self.render_sequence_elements(painter, rect, view_state, current_sequence);
+        }
+    }
+
+    /// Render elements in sequence order (construction sequence / predecessor chain order)
+    ///
+    /// Uses `sequence_order` (topological order from predecessor chain) if available,
+    /// falling back to raw element index order. Sequence order gives a mixed Column/Girder
+    /// ordering that matches actual construction assembly sequence.
+    fn render_sequence_elements(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        view_state: &ViewState,
+        current_sequence: usize,
+    ) {
+        if self.base.elements.is_empty() || current_sequence == 0 {
+            return;
+        }
+
+        // Use sequence_order if populated (topological order), else fallback to index order
+        let total = if !self.sequence_order.is_empty() {
+            self.sequence_order.len()
+        } else {
+            self.base.elements.len()
+        };
+
+        // current_sequence is 1-indexed; render positions 0 to (current_sequence-1)
+        let max_pos = current_sequence.min(total);
+
+        for pos in 0..max_pos {
+            // Resolve element index: use sequence_order if available
+            let elem_idx = if !self.sequence_order.is_empty() {
+                self.sequence_order[pos]
+            } else {
+                pos
+            };
+
+            if elem_idx >= self.base.elements.len() {
+                continue;
+            }
+
+            let element = &self.base.elements[elem_idx];
+
+            // Determine color: current element (last in this render) is highlighted, others grey
+            let is_current = pos == max_pos - 1;
+            let color = if is_current {
+                if element.member_type == "Column" {
+                    Color32::from_rgb(200, 50, 50) // Red for columns
+                } else {
+                    Color32::from_rgb(50, 150, 50) // Green for girders
+                }
+            } else {
+                Color32::from_gray(150)
+            };
+
+            // Find the start and end nodes
+            let node_i = self.base.nodes.iter().find(|n| n.id == element.node_i_id);
+            let node_j = self.base.nodes.iter().find(|n| n.id == element.node_j_id);
+
+            if let (Some(ni), Some(nj)) = (node_i, node_j) {
+                let p1 = self.base.project_to_2d(ni.x, ni.y, ni.z, view_state);
+                let p2 = self.base.project_to_2d(nj.x, nj.y, nj.z, view_state);
+
+                if rect.contains(p1) || rect.contains(p2) {
+                    let stroke_width = if is_current { 2.0 } else { 1.5 };
+                    painter.line_segment([p1, p2], Stroke::new(stroke_width, color));
+                }
+            }
         }
     }
 

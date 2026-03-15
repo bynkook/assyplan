@@ -2,6 +2,36 @@
 
 use eframe::egui::{self, Widget};
 
+/// View mode for the graphics display
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DisplayMode {
+    /// Show all elements (full model)
+    Model,
+    /// Show elements step-by-step (construction sequence)
+    Construction,
+}
+
+impl Default for DisplayMode {
+    fn default() -> Self {
+        DisplayMode::Model
+    }
+}
+
+/// Construction view mode - Sequence (individual) vs Step (stability groups)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConstructionViewMode {
+    /// Show elements one by one in installation order (1, 2, 3, ... 259)
+    Sequence,
+    /// Show elements grouped by stability step (Step 1, Step 2, ...)
+    Step,
+}
+
+impl Default for ConstructionViewMode {
+    fn default() -> Self {
+        ConstructionViewMode::Sequence
+    }
+}
+
 /// UI State for managing application state
 pub struct UiState {
     /// Whether to show ID labels on nodes
@@ -34,6 +64,34 @@ pub struct UiState {
     pub show_nodes: bool,
     /// Visibility: show elements
     pub show_elements: bool,
+    /// Display mode: Model (full) or Construction (step-by-step)
+    pub display_mode: DisplayMode,
+    /// Whether step data has been calculated
+    pub has_step_data: bool,
+    /// Construction view mode: Sequence (individual) or Step (groups)
+    pub construction_view_mode: ConstructionViewMode,
+    /// Current sequence index (1-indexed, for Sequence mode)
+    pub current_sequence: usize,
+    /// Maximum sequence number (total elements)
+    pub max_sequence: usize,
+    // ============================================================================
+    // Construction Metrics (populated after table generation)
+    // ============================================================================
+    /// Total element count
+    pub total_elements: usize,
+    /// Total column count
+    pub total_columns: usize,
+    /// Total girder count
+    pub total_girders: usize,
+    /// Number of workfronts
+    pub workfront_count: usize,
+    /// Floor column counts: (floor_level, total_columns, installed_columns)
+    pub floor_column_data: Vec<(i32, usize, usize)>,
+    /// Whether recalculation is needed (after load or reset)
+    pub needs_recalc: bool,
+    /// Elements installed at each step: step -> Vec<(element_id, member_type, floor)>
+    /// Used to calculate step-based metrics
+    pub step_elements: Vec<Vec<(i32, String, i32)>>,
 }
 
 impl UiState {
@@ -55,6 +113,19 @@ impl UiState {
             show_grid: true,
             show_nodes: true,
             show_elements: true,
+            display_mode: DisplayMode::Model,
+            has_step_data: false,
+            construction_view_mode: ConstructionViewMode::Sequence,
+            current_sequence: 1,
+            max_sequence: 0,
+            // Metrics - initialized empty
+            total_elements: 0,
+            total_columns: 0,
+            total_girders: 0,
+            workfront_count: 0,
+            floor_column_data: Vec::new(),
+            needs_recalc: false,
+            step_elements: Vec::new(),
         }
     }
 
@@ -75,6 +146,19 @@ impl UiState {
         self.show_grid = true;
         self.show_nodes = true;
         self.show_elements = true;
+        self.display_mode = DisplayMode::Model;
+        self.has_step_data = false;
+        self.construction_view_mode = ConstructionViewMode::Sequence;
+        self.current_sequence = 1;
+        self.max_sequence = 0;
+        // Reset metrics
+        self.total_elements = 0;
+        self.total_columns = 0;
+        self.total_girders = 0;
+        self.workfront_count = 0;
+        self.floor_column_data.clear();
+        self.needs_recalc = false;
+        self.step_elements.clear();
     }
 
     /// Set step data from Python step table
@@ -101,16 +185,19 @@ pub fn render_header(ui: &mut egui::Ui, state: &mut UiState) {
             // For now, we'll use a simple approach
         }
 
-        // Recalc button - triggers validation and rendering
+        // Recalc button - triggers construction calculation
+        // Highlighted when needs_recalc is true (after load or reset)
         let recalc_enabled = state.has_data;
-        if ui
-            .add_enabled(recalc_enabled, egui::Button::new("🔄 Recalc"))
-            .clicked()
-        {
-            state.status_message = "Validating...".to_string();
-            // Validation logic would be triggered here
-            state.validation_passed = true;
-            state.status_message = "Rendering complete".to_string();
+        let recalc_button = if state.needs_recalc && recalc_enabled {
+            // Highlighted button - orange/yellow to draw attention
+            egui::Button::new("🔄 Recalc").fill(egui::Color32::from_rgb(255, 180, 50))
+        } else {
+            egui::Button::new("🔄 Recalc")
+        };
+
+        if ui.add_enabled(recalc_enabled, recalc_button).clicked() {
+            // Signal that recalc was requested - actual calculation happens in lib.rs
+            state.status_message = "Calculating construction sequence...".to_string();
         }
 
         // Reset button - clears state
@@ -273,22 +360,168 @@ pub fn render_result_tab(ui: &mut egui::Ui, state: &UiState) {
     ui.heading("Result");
     ui.separator();
 
-    ui.vertical(|ui| {
-        ui.label(format!(
-            "Validation Status: {}",
-            if state.validation_passed {
-                "PASSED"
-            } else {
-                "NOT VALIDATED"
-            }
-        ));
+    if !state.has_data {
+        ui.label("No data loaded. Please open a file first.");
+        return;
+    }
 
-        if state.has_data {
-            ui.label("Data has been processed successfully.");
+    // Show warning if recalculation needed
+    if state.needs_recalc {
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 180, 50),
+                "⚠ Construction sequence not calculated. Press Recalc button.",
+            );
+        });
+        ui.add_space(10.0);
+        ui.separator();
+    }
+
+    // Validation Status
+    ui.horizontal(|ui| {
+        ui.label("Validation Status:");
+        if state.validation_passed {
+            ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "✓ PASSED");
+        } else if state.needs_recalc {
+            ui.colored_label(egui::Color32::from_rgb(200, 200, 100), "⏳ PENDING");
         } else {
-            ui.label("No data loaded. Please open a file and run recalc.");
+            ui.colored_label(egui::Color32::from_rgb(200, 100, 100), "✗ FAILED");
         }
     });
+
+    ui.add_space(10.0);
+    ui.separator();
+
+    // ========================================================================
+    // Construction Summary
+    // ========================================================================
+    ui.heading("Construction Summary");
+    ui.add_space(5.0);
+
+    // Summary grid
+    egui::Grid::new("summary_grid")
+        .num_columns(2)
+        .spacing([20.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Total Elements:");
+            ui.label(format!("{}", state.total_elements));
+            ui.end_row();
+
+            ui.label("Columns:");
+            ui.label(format!("{}", state.total_columns));
+            ui.end_row();
+
+            ui.label("Girders:");
+            ui.label(format!("{}", state.total_girders));
+            ui.end_row();
+
+            ui.label("Workfronts:");
+            ui.label(format!("{}", state.workfront_count));
+            ui.end_row();
+
+            ui.label("Total Steps:");
+            ui.label(format!("{}", state.max_step));
+            ui.end_row();
+        });
+
+    ui.add_space(10.0);
+
+    // Overall progress bar
+    let progress = if state.max_step > 0 {
+        state.current_step as f32 / state.max_step as f32
+    } else {
+        0.0
+    };
+    ui.label(format!(
+        "Current Step: {} / {}",
+        state.current_step, state.max_step
+    ));
+    ui.add(
+        egui::ProgressBar::new(progress)
+            .text(format!("{:.0}%", progress * 100.0))
+            .animate(false),
+    );
+
+    ui.add_space(15.0);
+    ui.separator();
+
+    // ========================================================================
+    // Floor Column Installation Rates
+    // ========================================================================
+    ui.heading("Floor Column Installation");
+    ui.add_space(5.0);
+
+    if state.floor_column_data.is_empty() {
+        ui.label("No floor data available.");
+    } else {
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .show(ui, |ui| {
+                egui::Grid::new("floor_grid")
+                    .num_columns(3)
+                    .spacing([15.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        // Header
+                        ui.strong("Floor");
+                        ui.strong("Columns");
+                        ui.strong("Progress");
+                        ui.end_row();
+
+                        // Data rows
+                        for (floor, total, installed) in &state.floor_column_data {
+                            let rate = if *total > 0 {
+                                *installed as f32 / *total as f32
+                            } else {
+                                0.0
+                            };
+
+                            ui.label(format!("F{}", floor));
+                            ui.label(format!("{} / {}", installed, total));
+                            ui.add(
+                                egui::ProgressBar::new(rate)
+                                    .text(format!("{:.0}%", rate * 100.0))
+                                    .desired_width(100.0),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
+    ui.add_space(15.0);
+    ui.separator();
+
+    // ========================================================================
+    // Element Type Distribution
+    // ========================================================================
+    ui.heading("Element Distribution");
+    ui.add_space(5.0);
+
+    if state.total_elements > 0 {
+        let column_ratio = state.total_columns as f32 / state.total_elements as f32;
+        let girder_ratio = state.total_girders as f32 / state.total_elements as f32;
+
+        ui.horizontal(|ui| {
+            ui.label("Columns:");
+            ui.add(
+                egui::ProgressBar::new(column_ratio)
+                    .text(format!("{:.1}%", column_ratio * 100.0))
+                    .fill(egui::Color32::from_rgb(100, 150, 200))
+                    .desired_width(150.0),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Girders:");
+            ui.add(
+                egui::ProgressBar::new(girder_ratio)
+                    .text(format!("{:.1}%", girder_ratio * 100.0))
+                    .fill(egui::Color32::from_rgb(200, 150, 100))
+                    .desired_width(150.0),
+            );
+        });
+    }
 }
 
 /// Main UI rendering function that creates the full layout
@@ -336,6 +569,8 @@ mod tests {
         assert_eq!(state.current_step, 1);
         assert_eq!(state.max_step, 0);
         assert_eq!(state.step_input, "1");
+        assert_eq!(state.display_mode, DisplayMode::Model);
+        assert!(!state.has_step_data);
     }
 
     #[test]
@@ -349,6 +584,8 @@ mod tests {
         state.current_step = 5;
         state.max_step = 10;
         state.step_input = "5".to_string();
+        state.display_mode = DisplayMode::Construction;
+        state.has_step_data = true;
 
         state.reset();
 
@@ -360,6 +597,8 @@ mod tests {
         assert_eq!(state.current_step, 1);
         assert_eq!(state.max_step, 0);
         assert_eq!(state.step_input, "1");
+        assert_eq!(state.display_mode, DisplayMode::Model);
+        assert!(!state.has_step_data);
     }
 
     #[test]

@@ -8,7 +8,7 @@ def create_node_table(df: pd.DataFrame) -> List[Tuple[int, float, float, float]]
     """Create node table from DataFrame.
 
     Extracts unique node coordinates from node_i and node_j columns,
-    sorts by x → y → z (ascending), and assigns IDs starting from 1.
+    sorts by z → x → y (ascending), and assigns IDs starting from 1.
 
     Args:
         df: DataFrame with node_i_x/y/z and node_j_x/y/z columns
@@ -27,8 +27,8 @@ def create_node_table(df: pd.DataFrame) -> List[Tuple[int, float, float, float]]
         coords.add((row["node_i_x"], row["node_i_y"], row["node_i_z"]))
         coords.add((row["node_j_x"], row["node_j_y"], row["node_j_z"]))
 
-    # Sort by x → y → z (ascending)
-    sorted_coords = sorted(coords, key=lambda c: (c[0], c[1], c[2]))
+    # Sort by z → x → y (ascending)
+    sorted_coords = sorted(coords, key=lambda c: (c[2], c[0], c[1]))
 
     # Assign IDs starting from 1 (NOT 0)
     return [(i + 1, x, y, z) for i, (x, y, z) in enumerate(sorted_coords)]

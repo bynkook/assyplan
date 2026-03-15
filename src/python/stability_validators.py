@@ -185,6 +185,7 @@ def validate_minimum_assembly(
 def validate_column_support(
     column_element: Tuple[int, int, int, str],
     nodes: List[Tuple[int, float, float, float]],
+    elements: List[Tuple[int, int, int, str]],
     stable_elements: Set[int],
 ) -> bool:
     """Check if a column's node_i is properly supported.
@@ -196,6 +197,8 @@ def validate_column_support(
     Args:
         column_element: Tuple of (element_id, node_i_id, node_j_id, "Column").
         nodes: List of (node_id, x, y, z) tuples.
+        elements: List of (element_id, node_i_id, node_j_id, member_type) tuples.
+            Used to find stable columns connected to this column.
         stable_elements: Set of element IDs that have passed stability validation.
 
     Returns:
@@ -215,20 +218,13 @@ def validate_column_support(
         return True
 
     # If not at ground, check if connected to stable column's node_j
-    # Find elements connected to node_i
-    connected_elements = get_elements_at_node(
-        ni_id, elements=[]
-    )  # Will search manually
-
-    # Build element lookup for stable columns
-    stable_columns = []
-    all_elements = []  # Need full elements list
-
-    for elem in all_elements:
-        if elem[0] in stable_elements and elem[3] == "Column":
-            stable_columns.append(elem)
+    # Build lookup of stable columns
+    stable_columns = [
+        elem for elem in elements if elem[0] in stable_elements and elem[3] == "Column"
+    ]
 
     # Check if any stable column has its node_j at same x,y as our node_i
+    # and is directly below (its node_j connects to our node_i)
     for col in stable_columns:
         _, col_ni, col_nj, _ = col
         col_nj_coords = get_node_coords(col_nj, nodes)
@@ -238,8 +234,9 @@ def validate_column_support(
             abs(col_nj_coords[0] - ni_coords[0]) < 0.001
             and abs(col_nj_coords[1] - ni_coords[1]) < 0.001
         ):
-            # Check if column is below (lower z)
-            if col_nj_coords[2] < ni_z:
+            # Check if the stable column's top node is at the same position as our bottom node
+            # This means they share a node (vertically stacked columns)
+            if abs(col_nj_coords[2] - ni_z) < 0.001:
                 return True
 
     return False
@@ -342,3 +339,137 @@ def validate_no_ground_girder(
                 )
 
     return True
+
+
+def double_check_cumulative_stability(
+    installed_elements: List[Tuple[int, int, int, str]],
+    nodes: List[Tuple[int, float, float, float]],
+    all_elements: List[Tuple[int, int, int, str]],
+    verified_stable: Set[int],
+) -> Tuple[bool, Set[int], List[int]]:
+    """Verify cumulative stability of all installed elements.
+
+    This is the "double check" gate that verifies the entire model's
+    stability after each step. Elements that have already passed
+    stability verification are skipped to improve performance.
+
+    Reference: devplandoc.md:117-119
+
+    Args:
+        installed_elements: List of currently installed element tuples
+            (element_id, node_i_id, node_j_id, member_type).
+        nodes: List of (node_id, x, y, z) tuples.
+        all_elements: Complete list of all elements in the model.
+        verified_stable: Set of element IDs that have already passed
+            stability verification (will be skipped).
+
+    Returns:
+        Tuple of:
+            - bool: True if all installed elements are stable
+            - Set[int]: Updated set of verified stable element IDs
+            - List[int]: List of element IDs that failed verification
+    """
+    if not installed_elements:
+        return True, verified_stable, []
+
+    # Build set of installed element IDs
+    installed_ids = {elem[0] for elem in installed_elements}
+
+    # Elements to verify = installed - already verified
+    to_verify_ids = installed_ids - verified_stable
+
+    # Get elements that need verification
+    elements_to_verify = [
+        elem for elem in installed_elements if elem[0] in to_verify_ids
+    ]
+
+    # All installed elements are considered stable for support checking
+    stable_elements = installed_ids.copy()
+
+    failed_elements: List[int] = []
+    newly_verified: Set[int] = set()
+
+    for elem in elements_to_verify:
+        elem_id, _, _, member_type = elem
+
+        is_stable = False
+        if member_type == "Column":
+            is_stable = validate_column_support(
+                elem, nodes, all_elements, stable_elements
+            )
+        elif member_type == "Girder":
+            is_stable = validate_girder_support(
+                elem, nodes, all_elements, stable_elements
+            )
+
+        if is_stable:
+            newly_verified.add(elem_id)
+        else:
+            failed_elements.append(elem_id)
+
+    # Update verified stable set
+    updated_verified = verified_stable | newly_verified
+
+    # All elements pass if no failures
+    all_stable = len(failed_elements) == 0
+
+    return all_stable, updated_verified, failed_elements
+
+
+def get_floor_level(
+    node_id: int,
+    nodes: List[Tuple[int, float, float, float]],
+) -> int:
+    """Get the floor level for a node based on its z-coordinate.
+
+    Floor levels are determined by unique z-coordinates:
+    - Floor 1: z = 0 (ground level where first columns are installed)
+    - Floor 2: First z > 0 (top of first-floor columns)
+    - etc.
+
+    Args:
+        node_id: The ID of the node.
+        nodes: List of (node_id, x, y, z) tuples.
+
+    Returns:
+        Floor level as integer (1-indexed).
+
+    Raises:
+        KeyError: If node_id is not found.
+    """
+    # Get all unique z values sorted
+    z_values = sorted(set(z for _, _, _, z in nodes))
+
+    # Get z for this node
+    node_z = get_node_coords(node_id, nodes)[2]
+
+    # Floor is 1-indexed position in sorted z values
+    for i, z in enumerate(z_values):
+        if abs(z - node_z) < 0.001:
+            return i + 1
+
+    raise KeyError(f"Node {node_id} z-coordinate not found in floor levels")
+
+
+def get_column_floor(
+    column_element: Tuple[int, int, int, str],
+    nodes: List[Tuple[int, float, float, float]],
+) -> int:
+    """Get the floor level where a column starts (node_i).
+
+    For columns, node_i is the bottom node, so this returns
+    the floor level where the column is installed from.
+
+    Args:
+        column_element: Tuple of (element_id, node_i_id, node_j_id, "Column").
+        nodes: List of (node_id, x, y, z) tuples.
+
+    Returns:
+        Floor level as integer (1-indexed).
+    """
+    _, ni_id, _, member_type = column_element
+
+    if member_type != "Column":
+        raise ValueError("Element is not a Column")
+
+    return get_floor_level(ni_id, nodes)
