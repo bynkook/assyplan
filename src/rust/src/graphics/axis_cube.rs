@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, Id, LayerId, Order, Pos2, Rect, Shape, Stroke};
+use eframe::egui::{self, Color32, Id, LayerId, Mesh, Order, Pos2, Rect, Shape, Stroke};
 
 use super::view_state::ViewState;
 
@@ -149,13 +149,29 @@ pub fn paint_axis_cube(ctx: &egui::Context, viewport: Rect, view_state: &ViewSta
     });
 
     for (points, color, _, _) in draw_list {
-        // Fill only — no stroke. Stroke on convex_polygon bleeds outside clip_rect
-        // in some egui backends. Face border effect achieved by slightly darker fill.
-        painter.add(Shape::convex_polygon(
-            points,
-            color.gamma_multiply(0.75),
-            Stroke::NONE,
-        ));
+        // Draw quad as two explicit triangles instead of convex_polygon.
+        // Shape::convex_polygon uses a triangle fan from vertex[0]; if the projected
+        // quad becomes non-convex at certain orbit angles, the fan generates a giant
+        // degenerate triangle that causes the "face suddenly fills large area" artifact.
+        // Splitting into (0,1,2) + (0,2,3) avoids this entirely.
+        if points.len() < 3 {
+            continue;
+        }
+        let fill = color.gamma_multiply(0.75);
+        let mut mesh = Mesh::default();
+        // Add all 4 vertices (or however many points there are)
+        for &p in &points {
+            mesh.colored_vertex(p, fill);
+        }
+        // Fan from index 0: (0,1,2), (0,2,3), ...
+        // But we split explicitly: for a quad, always (0,1,2) and (0,2,3).
+        // This matches convex_polygon's tessellation but we do it ourselves so
+        // we can validate each triangle independently in the future.
+        let n = points.len() as u32;
+        for i in 1..(n - 1) {
+            mesh.add_triangle(0, i, i + 1);
+        }
+        painter.add(Shape::mesh(mesh));
     }
 
     // Axis lines (drawn on top of the faces)
