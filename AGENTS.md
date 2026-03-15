@@ -254,3 +254,27 @@ fn build_z_level_map(nodes: &[StabilityNode]) -> HashMap<i64, i32> { ... }
 1. 단계 완료 또는 주요 기능 추가 시 해당 단계 SKILLS.md 즉시 업데이트
 2. 포함 내용: 기술 스택, 모듈 아키텍처, 핵심 함수 시그니처, 데이터 흐름, Gotcha
 3. 새 AI 에이전트가 SKILLS.md만 읽어도 해당 단계 코드를 이해하고 기여할 수 있는 수준으로 작성
+
+---
+
+## 11. Git 커밋 원칙
+
+### 커밋 워크플로우 (반드시 준수)
+
+1. **`git status` 먼저 확인**: 변경된 파일 전체 목록을 먼저 파악한다.
+2. **제외 파일은 `.gitignore` 처리**: 커밋 불필요한 파일/폴더(빌드 아티팩트, 임시 파일 등)는 `.gitignore`에 추가한다.
+3. **나머지 전체 커밋**: `git add -A` 또는 `git add .`로 남은 변경사항 전체를 커밋한다.
+
+### 금지 사항
+
+- ❌ `git status` 확인 없이 커밋하지 않는다.
+- ❌ 임의로 파일을 골라 일부만 커밋하지 않는다 (`git add file1 file2` 방식으로 선별 금지).
+- ❌ 커밋에서 제외할 파일을 단순히 스테이징에서 빼는 방식으로 처리하지 않는다 — 반드시 `.gitignore`에 추가한다.
+
+### .gitignore 추가 대상 기준
+
+- 빌드 결과물: `target/`, `*.exe`, `*.pyd`, `*.dll`
+- Python 캐시: `__pycache__/`, `.venv/`
+- maturin 빌드 산출물: `src/python/assyplan/`, `src/graphics/`
+- 출력/생성 파일: `output/`, `*.csv` (단, 테스트 입력 데이터는 예외)
+- OS/임시 파일: `nul`, `UsersBgKingAppDataLocalTempegui-*/`, `*.tmp`
