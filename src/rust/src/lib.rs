@@ -838,7 +838,7 @@ impl eframe::App for AssyPlanApp {
                     graphics::DisplayMode::Model,
                     "Model",
                 );
-                let construction_enabled = self.ui_state.has_step_data;
+                let construction_enabled = self.ui_state.has_data;
                 if ui
                     .add_enabled(
                         construction_enabled,
@@ -883,28 +883,36 @@ impl eframe::App for AssyPlanApp {
 
         // Construction navigation bar - only shown in Construction mode with data
         if self.ui_state.display_mode == graphics::DisplayMode::Construction
-            && (self.ui_state.has_step_data || self.ui_state.max_sequence > 0)
+            && self.ui_state.has_data
         {
             egui::TopBottomPanel::top("construction_nav").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     // Dropdown menu for Sequence/Step selection
                     let old_mode = self.ui_state.construction_view_mode;
+                    let has_steps = self.ui_state.has_step_data;
                     egui::ComboBox::from_id_source("construction_view_mode")
                         .selected_text(match self.ui_state.construction_view_mode {
                             graphics::ConstructionViewMode::Sequence => "Sequence",
                             graphics::ConstructionViewMode::Step => "Step",
                         })
-                        .show_ui(ui, |ui: &mut egui::Ui| {
+                        .show_ui(ui, |ui| {
                             ui.selectable_value(
                                 &mut self.ui_state.construction_view_mode,
                                 graphics::ConstructionViewMode::Sequence,
                                 "Sequence",
                             );
-                            ui.selectable_value(
-                                &mut self.ui_state.construction_view_mode,
-                                graphics::ConstructionViewMode::Step,
-                                "Step",
+                            let step_btn = ui.add_enabled(
+                                has_steps,
+                                egui::SelectableLabel::new(
+                                    self.ui_state.construction_view_mode
+                                        == graphics::ConstructionViewMode::Step,
+                                    "Step",
+                                ),
                             );
+                            if step_btn.clicked() && has_steps {
+                                self.ui_state.construction_view_mode =
+                                    graphics::ConstructionViewMode::Step;
+                            }
                         });
 
                     // Reset to 1 when mode changes
@@ -1031,6 +1039,7 @@ impl eframe::App for AssyPlanApp {
                     // Show step info if available
                     if self.ui_state.has_step_data {
                         ui.separator();
+                        ui.label(format!("Sequences: {}", self.ui_state.max_sequence));
                         ui.label(format!("Steps: {}", self.ui_state.max_step));
                         ui.label(format!(
                             "Display: {}",
@@ -1039,6 +1048,10 @@ impl eframe::App for AssyPlanApp {
                                 graphics::DisplayMode::Construction => "Construction",
                             }
                         ));
+                    } else if self.ui_state.max_sequence > 0 {
+                        ui.separator();
+                        ui.label(format!("Sequences: {}", self.ui_state.max_sequence));
+                        ui.label("Steps: (Recalc needed)");
                     }
                 } else {
                     ui.label("Data loaded: No");
