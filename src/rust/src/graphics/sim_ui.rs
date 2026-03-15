@@ -1,13 +1,15 @@
 //! Simulation UI module — Grid settings panel and Workfront selector
 //!
-//! Two entry points used from lib.rs:
+//! Entry points used from lib.rs:
 //!   1. `render_sim_settings(ui, state)` — called from Settings tab when mode == Simulation
-//!   2. `render_sim_view(ui, ctx, state)` — called from View tab when mode == Simulation
-//!      Draws the Grid x-y plan and handles workfront intersection clicks.
+//!   2. `render_sim_view(ui, state)` — called from View tab (2-D grid plan, workfront clicks)
+//!   3. `render_sim_result(ui, state)` — called from Result tab when mode == Simulation
+//!
+//! Note: 3-D member rendering is inlined directly in lib.rs View tab code.
 
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Stroke, Ui, Vec2};
 
-use crate::graphics::ui::{GridConfig, SimWorkfront, UiState};
+use crate::graphics::ui::{SimWorkfront, UiState};
 
 // ============================================================================
 // Settings tab (Grid config + algorithm weights + workfront list)
@@ -652,6 +654,9 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
             // ── XY Plot: Members-per-step ──────────────────────────────────
             render_members_per_step_plot(ui, scenario);
 
+            // ── Scenario comparison chart ──────────────────────────────────
+            render_scenario_comparison_chart(ui, state);
+
             ui.add_space(10.0);
             ui.separator();
 
@@ -875,5 +880,198 @@ fn render_members_per_step_plot(ui: &mut Ui, scenario: &crate::graphics::ui::Sim
         "target 1.8~2.4",
         FontId::proportional(8.0),
         Color32::from_gray(160),
+    );
+}
+
+// ============================================================================
+// Scenario comparison chart (top-N multi-line cumulative members vs step)
+// ============================================================================
+
+/// Draw a multi-line XY plot comparing the top-N scenarios by cumulative
+/// members installed vs construction step.
+///
+/// Called at the bottom of `render_sim_result` (after the single-scenario plot).
+pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
+    use eframe::egui::pos2;
+
+    use crate::graphics::ui::SimScenario;
+
+    let scenarios = &state.sim_scenarios;
+    if scenarios.len() < 2 {
+        return; // comparison only meaningful with ≥ 2 scenarios
+    }
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.heading("Scenario Comparison (Top 10)");
+    ui.add_space(4.0);
+
+    // ── Build sorted top-N list ───────────────────────────────────────────
+    let top_n = 10usize;
+    let mut sorted_refs: Vec<&SimScenario> = scenarios.iter().collect();
+    sorted_refs.sort_by(|a, b| {
+        b.metrics
+            .total_members_installed
+            .cmp(&a.metrics.total_members_installed)
+    });
+    sorted_refs.truncate(top_n);
+
+    // Max values for axis scaling
+    let max_steps = sorted_refs
+        .iter()
+        .map(|s| s.steps.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let max_members = sorted_refs
+        .iter()
+        .map(|s| s.metrics.total_members_installed)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    // Cumulative series: cum_data[i] = Vec<(step_1indexed_f32, cum_members_f32)>
+    let cum_data: Vec<Vec<(f32, f32)>> = sorted_refs
+        .iter()
+        .map(|s| {
+            let mut cum: usize = 0;
+            s.steps
+                .iter()
+                .enumerate()
+                .map(|(i, step)| {
+                    cum += step.element_ids.len();
+                    ((i + 1) as f32, cum as f32)
+                })
+                .collect()
+        })
+        .collect();
+
+    // ── Layout ────────────────────────────────────────────────────────────
+    let plot_w = (ui.available_width()).max(200.0);
+    let plot_h = 160.0f32;
+    let margin_l = 48.0f32; // space for y-axis labels
+    let margin_b = 20.0f32; // space for x-axis label
+    let margin_t = 8.0f32;
+    let legend_w = 60.0f32; // space for scenario legend on right
+
+    let total_rect = ui
+        .allocate_space(Vec2::new(plot_w, plot_h + margin_b + margin_t + 4.0))
+        .1;
+    let painter = ui.painter_at(total_rect);
+    painter.rect_filled(total_rect, 2.0, Color32::from_gray(22));
+
+    let plot_rect = Rect::from_min_max(
+        pos2(total_rect.left() + margin_l, total_rect.top() + margin_t),
+        pos2(
+            total_rect.right() - legend_w - 4.0,
+            total_rect.bottom() - margin_b,
+        ),
+    );
+
+    // Axis lines
+    let axis_color = Color32::from_gray(120);
+    painter.line_segment(
+        [plot_rect.left_bottom(), plot_rect.left_top()],
+        Stroke::new(1.0, axis_color),
+    );
+    painter.line_segment(
+        [plot_rect.left_bottom(), plot_rect.right_bottom()],
+        Stroke::new(1.0, axis_color),
+    );
+
+    // ── Y-axis tick labels (0, 50%, 100%) ────────────────────────────────
+    let font_id = FontId::proportional(9.0);
+    for frac in [0.0f32, 0.5, 1.0] {
+        let val = frac * max_members as f32;
+        let sy = plot_rect.bottom() - frac * plot_rect.height();
+        // Dashed grid line
+        let dash = 5.0f32;
+        let gap = 4.0f32;
+        let mut x = plot_rect.left();
+        while x < plot_rect.right() {
+            let x_end = (x + dash).min(plot_rect.right());
+            painter.line_segment(
+                [pos2(x, sy), pos2(x_end, sy)],
+                Stroke::new(0.4, Color32::from_gray(45)),
+            );
+            x += dash + gap;
+        }
+        // Label
+        painter.text(
+            pos2(plot_rect.left() - 4.0, sy),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0}", val),
+            font_id.clone(),
+            Color32::from_gray(130),
+        );
+    }
+
+    // ── Data → screen coordinate helper ───────────────────────────────────
+    let to_screen = |step: f32, members: f32| -> Pos2 {
+        let x =
+            plot_rect.left() + (step - 1.0) / (max_steps as f32 - 1.0).max(1.0) * plot_rect.width();
+        let y = plot_rect.bottom() - (members / max_members as f32) * plot_rect.height();
+        pos2(x, y)
+    };
+
+    // ── Per-scenario line colors ──────────────────────────────────────────
+    let line_colors: [Color32; 10] = [
+        Color32::from_rgb(100, 200, 255), // sky blue
+        Color32::from_rgb(100, 255, 150), // mint green
+        Color32::from_rgb(255, 200, 80),  // amber
+        Color32::from_rgb(255, 110, 190), // pink
+        Color32::from_rgb(180, 130, 255), // lavender
+        Color32::from_rgb(255, 255, 100), // yellow
+        Color32::from_rgb(255, 100, 100), // red
+        Color32::from_rgb(80, 240, 220),  // teal
+        Color32::from_rgb(200, 180, 255), // lilac
+        Color32::from_rgb(255, 160, 80),  // orange
+    ];
+
+    // ── Draw lines ────────────────────────────────────────────────────────
+    for (rank, (scenario, series)) in sorted_refs.iter().zip(cum_data.iter()).enumerate() {
+        let color = line_colors[rank % line_colors.len()];
+        if series.len() >= 2 {
+            let points: Vec<Pos2> = series.iter().map(|&(s, m)| to_screen(s, m)).collect();
+            painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+        } else if series.len() == 1 {
+            let p = to_screen(series[0].0, series[0].1);
+            painter.circle_filled(p, 2.0, color);
+        }
+
+        // Legend swatch on the right
+        let lx = plot_rect.right() + 6.0;
+        let ly = total_rect.top() + margin_t + rank as f32 * 14.0;
+        if ly + 10.0 < total_rect.bottom() {
+            painter.line_segment(
+                [pos2(lx, ly + 4.0), pos2(lx + 12.0, ly + 4.0)],
+                Stroke::new(1.5, color),
+            );
+            painter.text(
+                pos2(lx + 14.0, ly + 4.0),
+                egui::Align2::LEFT_CENTER,
+                format!("#{}", scenario.id),
+                font_id.clone(),
+                color,
+            );
+        }
+    }
+
+    // ── Axis labels ───────────────────────────────────────────────────────
+    painter.text(
+        pos2(plot_rect.center().x, total_rect.bottom() - 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        "Step",
+        font_id.clone(),
+        Color32::from_gray(130),
+    );
+
+    // Y-axis label (rotated text not available in egui; place abbreviated label at top)
+    painter.text(
+        pos2(total_rect.left() + 2.0, plot_rect.top()),
+        egui::Align2::LEFT_TOP,
+        "Members",
+        font_id,
+        Color32::from_gray(130),
     );
 }

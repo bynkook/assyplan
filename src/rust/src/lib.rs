@@ -191,6 +191,8 @@ pub struct AssyPlanApp {
     stability_nodes: Vec<stability::StabilityNode>,
     stability_elements: Vec<stability::StabilityElement>,
     stability_element_data: Vec<(String, Option<String>)>,
+    // Simulation grid — stored after run_simulation() so View tab can render 3D
+    sim_grid: Option<sim_grid::SimGrid>,
 }
 
 impl Default for AssyPlanApp {
@@ -204,6 +206,7 @@ impl Default for AssyPlanApp {
             stability_nodes: Vec::new(),
             stability_elements: Vec::new(),
             stability_element_data: Vec::new(),
+            sim_grid: None,
         }
     }
 }
@@ -810,6 +813,9 @@ impl AssyPlanApp {
         let scenarios =
             sim_engine::run_all_scenarios(count, &grid, &workfronts, weights, threshold);
 
+        // Store grid so the View tab can render a 3D view of installed elements
+        self.sim_grid = Some(grid.clone());
+
         // Select best scenario: most total members installed (highest completion)
         let best_idx = scenarios
             .iter()
@@ -1012,6 +1018,8 @@ impl AssyPlanApp {
         self.stability_nodes.clear();
         self.stability_elements.clear();
         self.stability_element_data.clear();
+        // Clear simulation grid
+        self.sim_grid = None;
     }
 }
 
@@ -1429,6 +1437,248 @@ impl eframe::App for AssyPlanApp {
                 "View" => {
                     // Simulation mode has its own view (grid plan), independent of render_data
                     if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
+                        // When a grid + selected scenario exist: split view
+                        // - bottom panel: 3D render of installed elements (orbit/zoom via view_state)
+                        // - remaining area: 2D grid plan with workfront click handling
+                        let has_3d = self.sim_grid.is_some()
+                            && self.ui_state.sim_selected_scenario.is_some();
+
+                        if has_3d {
+                            // Bottom panel: 3D view (resizable, default 300px)
+                            egui::TopBottomPanel::bottom("sim_3d_panel")
+                                .resizable(true)
+                                .default_height(300.0)
+                                .min_height(80.0)
+                                .show_inside(ui, |ui| {
+                                    // Handle orbit/zoom/pan input first (needs &mut ViewState)
+                                    let rect_3d = ui.available_rect_before_wrap();
+                                    let resp = ui.allocate_rect(
+                                        rect_3d,
+                                        egui::Sense::click_and_drag(),
+                                    );
+                                    let pointer_in_rect = ui
+                                        .input(|i| i.pointer.hover_pos())
+                                        .map(|p| rect_3d.contains(p))
+                                        .unwrap_or(false);
+                                    if pointer_in_rect || resp.dragged() {
+                                        if self.view_state.handle_input(&resp, ui) {
+                                            ctx.request_repaint();
+                                        }
+                                    }
+                                    // Restore full rect for 3D rendering
+                                    let resp2 = ui.allocate_rect(
+                                        rect_3d,
+                                        egui::Sense::hover(),
+                                    );
+                                    if let Some(ref grid) = self.sim_grid {
+                                        // Render using a painter at the full 3D panel rect
+                                        let painter = ui.painter_at(rect_3d);
+                                        use crate::graphics::renderer::{Element, Node, RenderData};
+                                        use std::collections::HashSet;
+
+                                        let installed_ids: HashSet<i32> = self
+                                            .ui_state
+                                            .sim_selected_scenario
+                                            .and_then(|idx| {
+                                                self.ui_state.sim_scenarios.get(idx)
+                                            })
+                                            .map(|scenario| {
+                                                let steps_to_show = self
+                                                    .ui_state
+                                                    .sim_current_step
+                                                    .min(scenario.steps.len());
+                                                scenario.steps[..steps_to_show]
+                                                    .iter()
+                                                    .flat_map(|s| s.element_ids.iter().copied())
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+
+                                        painter.rect_filled(
+                                            rect_3d,
+                                            0.0,
+                                            egui::Color32::from_gray(18),
+                                        );
+
+                                        let mut render_data = RenderData::new();
+                                        for n in &grid.nodes {
+                                            render_data.add_node(Node {
+                                                id: n.id,
+                                                x: n.x,
+                                                y: n.y,
+                                                z: n.z,
+                                            });
+                                        }
+                                        for e in &grid.elements {
+                                            render_data.add_element(Element {
+                                                id: e.id,
+                                                node_i_id: e.node_i_id,
+                                                node_j_id: e.node_j_id,
+                                                member_type: e.member_type.clone(),
+                                            });
+                                        }
+                                        render_data
+                                            .calculate_transform(rect_3d, &self.view_state);
+
+                                        let node_map: std::collections::HashMap<
+                                            i32,
+                                            (f64, f64, f64),
+                                        > = grid
+                                            .nodes
+                                            .iter()
+                                            .map(|n| (n.id, (n.x, n.y, n.z)))
+                                            .collect();
+
+                                        // Ghost (uninstalled)
+                                        let ghost = egui::Color32::from_gray(38);
+                                        for e in &grid.elements {
+                                            if installed_ids.contains(&e.id) {
+                                                continue;
+                                            }
+                                            if let (
+                                                Some(&(xi, yi, zi)),
+                                                Some(&(xj, yj, zj)),
+                                            ) = (
+                                                node_map.get(&e.node_i_id),
+                                                node_map.get(&e.node_j_id),
+                                            ) {
+                                                let p1 = render_data.project_to_2d(
+                                                    xi,
+                                                    yi,
+                                                    zi,
+                                                    &self.view_state,
+                                                );
+                                                let p2 = render_data.project_to_2d(
+                                                    xj,
+                                                    yj,
+                                                    zj,
+                                                    &self.view_state,
+                                                );
+                                                painter.line_segment(
+                                                    [p1, p2],
+                                                    egui::Stroke::new(0.5, ghost),
+                                                );
+                                            }
+                                        }
+
+                                        // Installed
+                                        let col_color =
+                                            egui::Color32::from_rgb(220, 80, 60);
+                                        let gdr_color =
+                                            egui::Color32::from_rgb(60, 190, 90);
+                                        for e in &grid.elements {
+                                            if !installed_ids.contains(&e.id) {
+                                                continue;
+                                            }
+                                            if let (
+                                                Some(&(xi, yi, zi)),
+                                                Some(&(xj, yj, zj)),
+                                            ) = (
+                                                node_map.get(&e.node_i_id),
+                                                node_map.get(&e.node_j_id),
+                                            ) {
+                                                let p1 = render_data.project_to_2d(
+                                                    xi,
+                                                    yi,
+                                                    zi,
+                                                    &self.view_state,
+                                                );
+                                                let p2 = render_data.project_to_2d(
+                                                    xj,
+                                                    yj,
+                                                    zj,
+                                                    &self.view_state,
+                                                );
+                                                let color = if e.member_type == "Column" {
+                                                    col_color
+                                                } else {
+                                                    gdr_color
+                                                };
+                                                painter.line_segment(
+                                                    [p1, p2],
+                                                    egui::Stroke::new(2.0, color),
+                                                );
+                                            }
+                                        }
+
+                                        // Nodes
+                                        let node_dot =
+                                            egui::Color32::from_gray(70);
+                                        for n in &grid.nodes {
+                                            let p = render_data.project_to_2d(
+                                                n.x,
+                                                n.y,
+                                                n.z,
+                                                &self.view_state,
+                                            );
+                                            if rect_3d.contains(p) {
+                                                painter.circle_filled(p, 1.5, node_dot);
+                                            }
+                                        }
+
+                                        // Info overlay
+                                        let step_total = self
+                                            .ui_state
+                                            .sim_selected_scenario
+                                            .and_then(|i| {
+                                                self.ui_state.sim_scenarios.get(i)
+                                            })
+                                            .map(|s| s.steps.len())
+                                            .unwrap_or(0);
+                                        let overlay = format!(
+                                            "3D View — Step {}/{} — {} member(s) installed",
+                                            self.ui_state
+                                                .sim_current_step
+                                                .min(step_total.max(1)),
+                                            step_total,
+                                            installed_ids.len()
+                                        );
+                                        painter.text(
+                                            rect_3d.left_top()
+                                                + egui::vec2(8.0, 8.0),
+                                            egui::Align2::LEFT_TOP,
+                                            overlay,
+                                            egui::FontId::proportional(11.0),
+                                            egui::Color32::from_rgb(120, 200, 255),
+                                        );
+
+                                        // Legend
+                                        let lx = rect_3d.left() + 8.0;
+                                        let ly = rect_3d.bottom() - 36.0;
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(lx, ly + 4.0),
+                                                egui::pos2(lx + 16.0, ly + 4.0),
+                                            ],
+                                            egui::Stroke::new(2.0, col_color),
+                                        );
+                                        painter.text(
+                                            egui::pos2(lx + 18.0, ly + 4.0),
+                                            egui::Align2::LEFT_CENTER,
+                                            "Column",
+                                            egui::FontId::proportional(9.0),
+                                            egui::Color32::from_gray(180),
+                                        );
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(lx, ly + 18.0),
+                                                egui::pos2(lx + 16.0, ly + 18.0),
+                                            ],
+                                            egui::Stroke::new(2.0, gdr_color),
+                                        );
+                                        painter.text(
+                                            egui::pos2(lx + 18.0, ly + 18.0),
+                                            egui::Align2::LEFT_CENTER,
+                                            "Girder",
+                                            egui::FontId::proportional(9.0),
+                                            egui::Color32::from_gray(180),
+                                        );
+                                        let _ = resp2;
+                                    }
+                                });
+                        }
+
+                        // 2D grid plan (remaining area, handles workfront clicks)
                         if graphics::sim_ui::render_sim_view(ui, &mut self.ui_state) {
                             ctx.request_repaint();
                         }
@@ -1904,6 +2154,7 @@ fn render_data(data: &PyRenderData) -> PyResult<()> {
                 stability_nodes: Vec::new(),
                 stability_elements: Vec::new(),
                 stability_element_data: Vec::new(),
+                sim_grid: None,
             }) as Box<dyn eframe::App>
         }),
     )
