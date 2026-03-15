@@ -524,63 +524,76 @@ impl AssyPlanApp {
                 let node_count = render_data.nodes.len();
                 let element_count = render_data.elements.len();
 
-                // Store render_data (without step calculation yet)
-                self.render_data = Some(render_data);
-                self.step_render_data = None; // Will be created on Recalc
-
                 // Handle validation results
                 let error_count = errors.len();
                 let warning_count = warnings.len();
 
-                // Update UI state - file loaded but construction not calculated
-                self.ui_state.has_data = true;
+                // Store render_data only if validation passed — no graphics on error
+                if error_count == 0 {
+                    self.render_data = Some(render_data);
+                } else {
+                    self.render_data = None;
+                }
+                self.step_render_data = None; // Will be created on Recalc
+
+                // Update UI state
                 self.ui_state.validation_passed = error_count == 0;
-                self.ui_state.has_step_data = false; // Not calculated yet
+                self.ui_state.has_step_data = false;
                 self.ui_state.max_step = 0;
                 self.ui_state.current_step = 1;
                 self.ui_state.step_input = "1".to_string();
-                self.ui_state.needs_recalc = true; // Highlight Recalc button
 
-                // Basic metrics (available immediately)
-                let column_count = self
-                    .stability_elements
-                    .iter()
-                    .filter(|e| e.member_type == "Column")
-                    .count();
-                let girder_count = self
-                    .stability_elements
-                    .iter()
-                    .filter(|e| e.member_type == "Girder")
-                    .count();
-                self.ui_state.total_elements = element_count;
-                self.ui_state.total_columns = column_count;
-                self.ui_state.total_girders = girder_count;
-                self.ui_state.workfront_count = 0; // Will be set on Recalc
-                self.ui_state.max_sequence = element_count; // Total elements for Sequence mode
-                self.ui_state.current_sequence = 1;
-
-                // Get floor column data (available immediately)
-                let floor_data = stability::get_floor_column_data(
-                    &self.stability_elements,
-                    &self.stability_nodes,
-                );
-                self.ui_state.floor_column_data = floor_data
-                    .into_iter()
-                    .map(|(floor, total)| (floor, total, 0)) // 0 installed until Recalc
-                    .collect();
-
-                // Build status message - prompt user to press Recalc
-                let mut status_msg = format!(
-                    "Loaded: {} nodes, {} elements. Press Recalc to calculate construction sequence.",
-                    node_count, element_count
-                );
                 if error_count > 0 {
-                    status_msg.push_str(&format!(" | {} error(s)", error_count));
+                    // Validation failed — no data, no recalc available, show errors
+                    self.ui_state.has_data = false;
+                    self.ui_state.needs_recalc = false;
+                    self.ui_state.status_message = format!(
+                        "⚠ Load failed: {} error(s)\n{}",
+                        error_count,
+                        errors.join("\n")
+                    );
+                } else {
+                    // Validation passed — data ready, prompt Recalc
+                    self.ui_state.has_data = true;
+                    self.ui_state.needs_recalc = true; // Highlight Recalc button
+
+                    // Basic metrics (available immediately)
+                    let column_count = self
+                        .stability_elements
+                        .iter()
+                        .filter(|e| e.member_type == "Column")
+                        .count();
+                    let girder_count = self
+                        .stability_elements
+                        .iter()
+                        .filter(|e| e.member_type == "Girder")
+                        .count();
+                    self.ui_state.total_elements = element_count;
+                    self.ui_state.total_columns = column_count;
+                    self.ui_state.total_girders = girder_count;
+                    self.ui_state.workfront_count = 0; // Will be set on Recalc
+                    self.ui_state.max_sequence = element_count;
+                    self.ui_state.current_sequence = 1;
+
+                    // Get floor column data (available immediately)
+                    let floor_data = stability::get_floor_column_data(
+                        &self.stability_elements,
+                        &self.stability_nodes,
+                    );
+                    self.ui_state.floor_column_data = floor_data
+                        .into_iter()
+                        .map(|(floor, total)| (floor, total, 0))
+                        .collect();
+
+                    let mut status_msg = format!(
+                        "Loaded: {} nodes, {} elements. Press Recalc to calculate construction sequence.",
+                        node_count, element_count
+                    );
+                    if warning_count > 0 {
+                        status_msg.push_str(&format!(" | {} warning(s)", warning_count));
+                    }
+                    self.ui_state.status_message = status_msg;
                 }
-                if warning_count > 0 {
-                    status_msg.push_str(&format!(" | {} warning(s)", warning_count));
-                }
-                self.ui_state.status_message = status_msg;
 
                 // Reset view state for zoom-to-fit on load
                 self.view_state = graphics::ViewState::new();
@@ -633,6 +646,8 @@ impl AssyPlanApp {
                     errors.join("\n")
                 );
                 self.ui_state.validation_passed = false;
+                self.ui_state.has_step_data = false;
+                self.step_render_data = None;
                 return;
             }
         }
@@ -689,13 +704,21 @@ impl AssyPlanApp {
         }
 
         // Update UI state with step info
-        self.ui_state.has_step_data = max_step > 0;
-        self.ui_state.max_step = max_step;
-        self.ui_state.current_step = 1;
-        self.ui_state.step_input = "1".to_string();
-        self.ui_state.workfront_count = workfront_count;
         self.ui_state.needs_recalc = false; // Calculation complete
         self.ui_state.validation_passed = errors.is_empty();
+        self.ui_state.workfront_count = workfront_count;
+        self.ui_state.current_step = 1;
+        self.ui_state.step_input = "1".to_string();
+
+        if !errors.is_empty() {
+            // Errors present — block Construction view, clear step data
+            self.ui_state.has_step_data = false;
+            self.ui_state.max_step = 0;
+            self.step_render_data = None;
+        } else {
+            self.ui_state.has_step_data = max_step > 0;
+            self.ui_state.max_step = max_step;
+        }
 
         // Build step elements map for UI metrics
         self.ui_state.step_elements = stability::build_step_elements_map(
@@ -1239,7 +1262,23 @@ impl eframe::App for AssyPlanApp {
                                 }
                             }
                             graphics::DisplayMode::Construction => {
-                                // Construction view - show based on construction_view_mode
+                                // Construction view - only render if step data is ready
+                                if !self.ui_state.has_step_data {
+                                    let msg = if self.ui_state.needs_recalc {
+                                        "Press Recalc to calculate construction sequence.".to_string()
+                                    } else if !self.ui_state.validation_passed {
+                                        "⚠ Construction sequence has errors.\nCheck Status or Result tab.".to_string()
+                                    } else {
+                                        "No construction data.".to_string()
+                                    };
+                                    painter.text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        msg,
+                                        egui::FontId::proportional(16.0),
+                                        egui::Color32::from_rgb(200, 200, 100),
+                                    );
+                                } else {
                                 match self.ui_state.construction_view_mode {
                                     graphics::ConstructionViewMode::Sequence => {
                                         // Sequence mode: render elements 1 to current_sequence
@@ -1439,6 +1478,7 @@ impl eframe::App for AssyPlanApp {
                                         }
                                     }
                                 }
+                                } // end else has_step_data
                             }
                         }
 

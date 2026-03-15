@@ -552,9 +552,9 @@ pub fn build_construction_sequence(
         return Err(cycle_members);
     }
 
-    // Build sequence table sorted by step
+    // Build sequence table sorted by step, then by element index for deterministic order
     let mut indexed_steps: Vec<(usize, i32)> = step_assignments.into_iter().collect();
-    indexed_steps.sort_by_key(|(_, step)| *step);
+    indexed_steps.sort_by_key(|(idx, step)| (*step, *idx));
 
     for (order, (idx, _step)) in indexed_steps.iter().enumerate() {
         let element = &elements[*idx];
