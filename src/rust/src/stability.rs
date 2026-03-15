@@ -1495,7 +1495,7 @@ mod tests {
 
         let result = validate_minimum_assembly(&nodes, &elements);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("3 columns"));
+        assert!(result.unwrap_err().contains("3+"));
     }
 
     #[test]
