@@ -435,8 +435,12 @@ impl StepRenderData {
                 .base
                 .project_to_2d(x, max_y + extend_dist, min_z, view_state);
 
-            // Draw grid line
-            painter.line_segment([p1, p2], stroke);
+            // Trim line start so it doesn't intrude into the bubble circle
+            let dir = (p2 - p1).normalized();
+            let p1_trimmed = p1 + dir * bubble_radius;
+
+            // Draw grid line (starting from trimmed point to avoid bubble overlap)
+            painter.line_segment([p1_trimmed, p2], stroke);
 
             // Draw numbered bubble marker at extended end
             self.draw_grid_bubble(
@@ -460,8 +464,12 @@ impl StepRenderData {
                 .base
                 .project_to_2d(max_x + extend_dist, y, min_z, view_state);
 
-            // Draw grid line
-            painter.line_segment([p1, p2], stroke);
+            // Trim line start so it doesn't intrude into the bubble circle
+            let dir = (p2 - p1).normalized();
+            let p1_trimmed = p1 + dir * bubble_radius;
+
+            // Draw grid line (starting from trimmed point to avoid bubble overlap)
+            painter.line_segment([p1_trimmed, p2], stroke);
 
             // Draw lettered bubble marker at extended end
             let label = Self::index_to_letter(idx);

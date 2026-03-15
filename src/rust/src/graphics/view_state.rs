@@ -64,7 +64,15 @@ impl ViewState {
         }
 
         // Zoom: scroll wheel zooms in/out
-        if response.hovered() {
+        // Use pointer position check against response.rect for reliable hover detection.
+        // response.hovered() can return false in Construction mode when a TopBottomPanel
+        // (nav bar with slider) is rendered in the same frame, causing scroll to be missed.
+        let pointer_in_rect = ui
+            .input(|input| input.pointer.hover_pos())
+            .map(|pos| response.rect.contains(pos))
+            .unwrap_or(false);
+
+        if pointer_in_rect {
             let scroll_delta = ui.input(|input| input.raw_scroll_delta.y);
 
             // Normalize scroll: Windows gives ~120 per notch
