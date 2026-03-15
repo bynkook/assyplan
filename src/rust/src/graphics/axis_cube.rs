@@ -90,18 +90,21 @@ pub fn paint_axis_cube(painter: &egui::Painter, viewport: Rect, view_state: &Vie
         ), // -Y (dark green)
     ];
 
-    // Camera forward vector: the direction the camera is looking.
-    // A face is front-facing when dot(outward_normal, forward) > 0
-    // (the face's outward normal points toward the camera).
+    // camera_basis() returns (right, up, forward) where forward points FROM
+    // the camera INTO the scene. A face is visible when its outward normal
+    // points TOWARD the camera, i.e. opposite to forward.
+    // So the visibility condition is: dot(normal, forward) < 0
+    // equivalently: dot(normal, -forward) > CULL_THRESHOLD
     let (_right, _up, forward) = view_state.camera_basis();
+    let view_dir = [-forward[0], -forward[1], -forward[2]]; // points toward camera
 
     // Build draw list: cull back-faces, skip degenerate projections, compute depth
     let mut draw_list: Vec<(Vec<Pos2>, Color32, f32, usize)> = faces
         .iter()
         .enumerate()
         .filter_map(|(face_idx, (indices, normal, color))| {
-            // Back-face culling
-            let dot = dot3(*normal, forward);
+            // Back-face culling: skip faces whose normal points away from the camera
+            let dot = dot3(*normal, view_dir);
             if dot <= CULL_THRESHOLD {
                 return None;
             }
