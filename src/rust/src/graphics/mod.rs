@@ -2,6 +2,7 @@
 
 pub mod axis_cube;
 pub mod renderer;
+pub mod sim_ui;
 pub mod step_renderer;
 pub mod ui;
 pub mod view_state;

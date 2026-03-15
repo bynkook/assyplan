@@ -216,6 +216,8 @@ fn generate_next_step(current_structure: &Structure, workfronts: &[Workfront]) -
 
 Monte-Carlo + 강력 Pruning + Weighted Sampling + Incremental Greedy-ish
 
+어떤 특정 층(floor) 의 부재 설치 위치를 탐색한다.
+
 1. Monte-Carlo (Randomized Scenario Sampling)
    - 역할 : 100~200개의 서로 다른 실현 가능한 조립 순서를 빠르게 샘플링
      - rayon 스레드 풀 또는 Python multiprocessing으로 완전 병렬 실행
@@ -275,6 +277,7 @@ Monte-Carlo + 강력 Pruning + Weighted Sampling + Incremental Greedy-ish
 
 #### 시뮬레이션 모드(Simulation Mode) 의 환경설정 및 제약
 
+- 시뮬레이션 모드를 시작하면 환경설정에서 설정한 Grid Plane 을 표시한 x-y plan view 가 표시되고 사용자는 교차점을 선택 가능해진다.
 - 상층부 기둥 설치율 제약 : threshold 기본 0.3 (강제 적용)
 - **추가 제약** : 하나의 Step에서 독립안정구조(5개 단위)를 생성할 수 있는 경우라도,  
   **기존 구조에 연결 가능한 증분 후보가 1개 이상 존재하면 반드시 증분 후보를 우선** 선택하도록 강제
@@ -331,7 +334,13 @@ workfront :
 
 - 어떤 시공 작업조의 주된 작업 위치를 설정하는 것으로, 1층부터 N층까지 수직으로 존재한다고 가정한다.
 
-- 사용자는 csv 데이터로 정의하거나 시뮬레이션 모드의 grid x-y plan 평면 그래픽에서 교차점을 선택하여 설정할 수 있다.
+- 특정 workfront 위치(좌표)는 평면 위치이고 모든 층에 존재할 수 있으므로 작업은 어느 1개 층에서 발생 할 수 있다. 즉, 다수의 층에서 동시에 작업 가능한게 아니라 어느 1개 층에서만 그 sequence 에 부재 생성이 가능하다.
+
+- 초기 설정 workfront 위치 갯수 = 초기 부재 설치위치 검색 갯수.  construction sequence 가 진행될 수록(부재 누적 설치갯수가 증가할 수록) 부재 설치 가능 위치는 계속 감소할 것이다. 따라서 위치 탐색수도 계속 감소해야 효율적이다.
+
+- 사용자는 개발모드에서 csv 데이터로 workfront 정의
+
+- 시뮬레이션 모드에서는 사용자가 grid x-y plan 평면 그래픽에서 교차점을 선택하여 설정할 수 있다.
 
 - **개발모드** 의 workfront 는 사용자 입력데이터에서 *선행부재* 데이터가 없는 부재의 위치가 새로운 workfront 이다.
 

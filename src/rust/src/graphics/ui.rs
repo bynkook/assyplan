@@ -2,6 +2,109 @@
 
 use eframe::egui::{self};
 
+// ============================================================================
+// Simulation Mode Data Types (Phase 3)
+// ============================================================================
+
+/// Grid configuration for simulation mode
+#[derive(Clone, Debug)]
+pub struct GridConfig {
+    /// Number of grid lines in x direction (columns)
+    pub nx: usize,
+    /// Number of grid lines in y direction (rows)
+    pub ny: usize,
+    /// Number of floor levels (z levels, z=0 is ground)
+    pub nz: usize,
+    /// Floor height interval (constant, in same units as coordinates)
+    pub dz: f64,
+    /// X grid spacing
+    pub dx: f64,
+    /// Y grid spacing
+    pub dy: f64,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self {
+            nx: 4,
+            ny: 4,
+            nz: 3,
+            dz: 4000.0,
+            dx: 6000.0,
+            dy: 6000.0,
+        }
+    }
+}
+
+/// A workfront starting position (grid intersection, 0-indexed)
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimWorkfront {
+    /// 1-indexed workfront ID
+    pub id: i32,
+    /// Grid x index (0-indexed, 0..nx-1)
+    pub grid_x: usize,
+    /// Grid y index (0-indexed, 0..ny-1)
+    pub grid_y: usize,
+}
+
+/// Early termination reason for a simulation scenario
+#[derive(Clone, Debug, PartialEq)]
+pub enum TerminationReason {
+    Completed,
+    UpperFloorViolation,
+    NoProgress,
+    IndependentOveruse,
+    NoCandidates,
+    MaxIterations,
+}
+
+impl std::fmt::Display for TerminationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TerminationReason::Completed => write!(f, "Completed"),
+            TerminationReason::UpperFloorViolation => write!(f, "Upper Floor Violation"),
+            TerminationReason::NoProgress => write!(f, "No Progress"),
+            TerminationReason::IndependentOveruse => write!(f, "Independent Overuse"),
+            TerminationReason::NoCandidates => write!(f, "No Candidates"),
+            TerminationReason::MaxIterations => write!(f, "Max Iterations"),
+        }
+    }
+}
+
+/// Metrics for a single simulation scenario
+#[derive(Clone, Debug)]
+pub struct ScenarioMetrics {
+    pub avg_members_per_step: f64,
+    pub avg_connectivity: f64,
+    pub total_steps: usize,
+    pub total_members_installed: usize,
+    pub termination_reason: TerminationReason,
+}
+
+/// A single step in a simulation scenario
+#[derive(Clone, Debug)]
+pub struct SimStep {
+    /// Workfront ID that performed this step
+    pub workfront_id: i32,
+    /// Element IDs installed in this step (1-indexed)
+    pub element_ids: Vec<i32>,
+    /// Floor level of this step
+    pub floor: i32,
+}
+
+/// A complete simulation scenario (one sequence of steps)
+#[derive(Clone, Debug)]
+pub struct SimScenario {
+    /// Scenario ID (1-indexed)
+    pub id: usize,
+    /// Random seed used
+    pub seed: u64,
+    /// All steps in this scenario
+    pub steps: Vec<SimStep>,
+    /// Scenario metrics
+    pub metrics: ScenarioMetrics,
+}
+
 /// View mode for the graphics display
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DisplayMode {
@@ -9,6 +112,8 @@ pub enum DisplayMode {
     Model,
     /// Show elements step-by-step (construction sequence)
     Construction,
+    /// Simulation mode - auto-generate construction sequences
+    Simulation,
 }
 
 impl Default for DisplayMode {
@@ -96,6 +201,32 @@ pub struct UiState {
     /// Floor N columns cannot start until floor N-1 reaches this rate.
     /// Used for metric visualization only (simulation constraint applied in Phase 2).
     pub upper_floor_threshold: f64,
+
+    // ============================================================================
+    // Simulation Mode State (Phase 3)
+    // ============================================================================
+    /// Grid configuration for simulation mode
+    pub grid_config: GridConfig,
+    /// Selected workfront positions (grid indices, 0-based)
+    pub sim_workfronts: Vec<SimWorkfront>,
+    /// Generated simulation scenarios
+    pub sim_scenarios: Vec<SimScenario>,
+    /// Currently selected scenario index (0-based, None if none selected)
+    pub sim_selected_scenario: Option<usize>,
+    /// Whether simulation is currently playing back
+    pub sim_playing: bool,
+    /// Playback speed multiplier (1, 2, 4)
+    pub sim_speed: u32,
+    /// Current playback step in the selected scenario (1-indexed)
+    pub sim_current_step: usize,
+    /// Timer accumulator for auto-playback (seconds)
+    pub sim_play_timer: f64,
+    /// Algorithm weights (w1=부재수, w2=연결성, w3=거리)
+    pub sim_weights: (f64, f64, f64),
+    /// Whether simulation is currently running (calculating)
+    pub sim_running: bool,
+    /// Number of scenarios to generate
+    pub sim_scenario_count: usize,
 }
 
 impl UiState {
@@ -131,6 +262,18 @@ impl UiState {
             needs_recalc: false,
             step_elements: Vec::new(),
             upper_floor_threshold: 0.3,
+            // Simulation Mode (Phase 3)
+            grid_config: GridConfig::default(),
+            sim_workfronts: Vec::new(),
+            sim_scenarios: Vec::new(),
+            sim_selected_scenario: None,
+            sim_playing: false,
+            sim_speed: 1,
+            sim_current_step: 1,
+            sim_play_timer: 0.0,
+            sim_weights: (0.5, 0.3, 0.15),
+            sim_running: false,
+            sim_scenario_count: 100,
         }
     }
 
@@ -164,6 +307,15 @@ impl UiState {
         self.floor_column_data.clear();
         self.needs_recalc = false;
         self.step_elements.clear();
+        // Reset simulation state
+        self.sim_workfronts.clear();
+        self.sim_scenarios.clear();
+        self.sim_selected_scenario = None;
+        self.sim_playing = false;
+        self.sim_speed = 1;
+        self.sim_current_step = 1;
+        self.sim_play_timer = 0.0;
+        self.sim_running = false;
     }
 
     /// Set step data from Python step table

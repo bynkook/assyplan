@@ -10,3 +10,4 @@ crate-type = ["cdylib", "rlib"]
 eframe = "0.27"
 pyo3 = { version = "0.21", features = ["extension-module"] }
 rfd = "0.14"
+rayon = "1"

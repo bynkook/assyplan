@@ -1,4 +1,6 @@
 pub mod graphics;
+pub mod sim_engine;
+pub mod sim_grid;
 pub mod stability;
 
 use eframe::egui;
@@ -613,7 +615,20 @@ impl AssyPlanApp {
     /// Recalculate construction sequence and generate all tables
     /// This is the heavy computation that was previously done on file load
     fn recalculate(&mut self) {
-        if !self.ui_state.has_data || self.stability_elements.is_empty() {
+        if !self.ui_state.has_data
+            && self.ui_state.display_mode != graphics::DisplayMode::Simulation
+        {
+            self.ui_state.status_message = "No data loaded. Please open a file first.".to_string();
+            return;
+        }
+
+        // ── Simulation Mode branch ────────────────────────────────────────────
+        if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
+            self.run_simulation();
+            return;
+        }
+
+        if self.stability_elements.is_empty() {
             self.ui_state.status_message = "No data loaded. Please open a file first.".to_string();
             return;
         }
@@ -764,6 +779,68 @@ impl AssyPlanApp {
         }
     }
 
+    /// Run the Simulation Mode: generate N scenarios with Monte-Carlo engine.
+    fn run_simulation(&mut self) {
+        let cfg = self.ui_state.grid_config.clone();
+        let workfronts = self.ui_state.sim_workfronts.clone();
+        let weights = self.ui_state.sim_weights;
+        let threshold = self.ui_state.upper_floor_threshold;
+        let count = self.ui_state.sim_scenario_count;
+
+        // Ensure at least one workfront
+        let workfronts = if workfronts.is_empty() {
+            // Default: corner (0,0)
+            vec![graphics::ui::SimWorkfront {
+                id: 1,
+                grid_x: 0,
+                grid_y: 0,
+            }]
+        } else {
+            workfronts
+        };
+
+        self.ui_state.sim_running = true;
+        self.ui_state.status_message = format!(
+            "Running simulation: {} scenarios ({}×{} grid, {} floors)...",
+            count, cfg.nx, cfg.ny, cfg.nz
+        );
+
+        let grid = sim_grid::SimGrid::new(cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz);
+
+        let scenarios =
+            sim_engine::run_all_scenarios(count, &grid, &workfronts, weights, threshold);
+
+        // Select best scenario: most total members installed (highest completion)
+        let best_idx = scenarios
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, s)| s.metrics.total_members_installed)
+            .map(|(i, _)| i);
+
+        let scenario_count = scenarios.len();
+        let total_elements = grid.elements.len();
+        let best_info = best_idx
+            .and_then(|i| scenarios.get(i))
+            .map(|s| {
+                format!(
+                    " | Best: scenario {} ({}/{} members, {} steps)",
+                    s.id, s.metrics.total_members_installed, total_elements, s.metrics.total_steps
+                )
+            })
+            .unwrap_or_default();
+
+        self.ui_state.sim_scenarios = scenarios;
+        self.ui_state.sim_selected_scenario = best_idx;
+        self.ui_state.sim_running = false;
+        self.ui_state.sim_current_step = 1;
+        self.ui_state.needs_recalc = false;
+
+        self.ui_state.status_message = format!(
+            "Simulation complete: {} scenarios generated{}",
+            scenario_count, best_info
+        );
+    }
+
     /// Update floor column counts based on current_step
     /// Called when step changes to update Result tab metrics
     fn update_floor_counts_for_step(&mut self) {
@@ -853,7 +930,25 @@ impl eframe::App for AssyPlanApp {
                     "Development".to_string(),
                     "Development",
                 );
-                ui.add_enabled(false, egui::Label::new("Simulation"));
+                if ui
+                    .radio(self.ui_state.mode == "Simulation", "Simulation")
+                    .clicked()
+                {
+                    self.ui_state.mode = "Simulation".to_string();
+                    self.ui_state.display_mode = graphics::DisplayMode::Simulation;
+                    self.ui_state.current_tab = "Settings".to_string();
+                }
+                // Sync mode string back when display_mode changes away from Simulation
+                if self.ui_state.mode == "Simulation"
+                    && self.ui_state.display_mode != graphics::DisplayMode::Simulation
+                {
+                    self.ui_state.mode = "Development".to_string();
+                }
+                if self.ui_state.mode == "Development"
+                    && self.ui_state.display_mode == graphics::DisplayMode::Simulation
+                {
+                    self.ui_state.display_mode = graphics::DisplayMode::Model;
+                }
 
                 ui.separator();
 
@@ -1095,6 +1190,7 @@ impl eframe::App for AssyPlanApp {
                             match self.ui_state.display_mode {
                                 graphics::DisplayMode::Model => "Model",
                                 graphics::DisplayMode::Construction => "Construction",
+                                graphics::DisplayMode::Simulation => "Simulation",
                             }
                         ));
                     } else if self.ui_state.max_sequence > 0 {
@@ -1162,8 +1258,44 @@ impl eframe::App for AssyPlanApp {
                             self.ui_state.show_id_labels = false;
                         }
                     }
+
+                    // ── Simulation Mode Settings ──────────────────────────
+                    if self.ui_state.mode == "Simulation" {
+                        ui.separator();
+                        let _grid_changed =
+                            graphics::sim_ui::render_sim_settings(ui, &mut self.ui_state);
+                    }
+
+                    // ── Development Mode: Construction Constraints ────────
+                    if self.ui_state.mode != "Simulation" {
+                        ui.separator();
+                        ui.heading("Construction Constraints");
+                        ui.add_space(4.0);
+                        ui.label("Upper-Floor Column Rate Threshold:");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.ui_state.upper_floor_threshold,
+                                    0.0..=1.0,
+                                )
+                                .text("")
+                                .fixed_decimals(2)
+                                .clamp_to_range(true),
+                            );
+                            ui.label(format!(
+                                "{:.0}%",
+                                self.ui_state.upper_floor_threshold * 100.0
+                            ));
+                        });
+                    }
                 }
                 "View" => {
+                    // Simulation mode has its own view (grid plan), independent of render_data
+                    if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
+                        if graphics::sim_ui::render_sim_view(ui, &mut self.ui_state) {
+                            ctx.request_repaint();
+                        }
+                    } else {
                     // Render viewport based on display mode
                     let has_render_data = self.render_data.is_some();
                     #[allow(unused_variables)]
@@ -1486,6 +1618,12 @@ impl eframe::App for AssyPlanApp {
                                 }
                                 } // end else has_step_data
                             }
+                            graphics::DisplayMode::Simulation => {
+                                // Simulation mode view — grid plan + workfront selector
+                                if graphics::sim_ui::render_sim_view(ui, &mut self.ui_state) {
+                                    ctx.request_repaint();
+                                }
+                            }
                         }
 
                         // Always draw axis cube on its own Foreground layer
@@ -1495,10 +1633,15 @@ impl eframe::App for AssyPlanApp {
                             ui.label("No data loaded.\nClick 'Open File' to load a CSV file.");
                         });
                     }
+                    } // end else (non-Simulation display_mode)
                 }
                 "Result" => {
-                    // Use full Result tab UI with metrics, progress bars, floor data
-                    graphics::render_result_tab(ui, &self.ui_state);
+                    if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
+                        graphics::sim_ui::render_sim_result(ui, &mut self.ui_state);
+                    } else {
+                        // Use full Result tab UI with metrics, progress bars, floor data
+                        graphics::render_result_tab(ui, &self.ui_state);
+                    }
                 }
                 _ => {}
             }

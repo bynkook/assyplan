@@ -1,0 +1,821 @@
+//! Simulation UI module — Grid settings panel and Workfront selector
+//!
+//! Two entry points used from lib.rs:
+//!   1. `render_sim_settings(ui, state)` — called from Settings tab when mode == Simulation
+//!   2. `render_sim_view(ui, ctx, state)` — called from View tab when mode == Simulation
+//!      Draws the Grid x-y plan and handles workfront intersection clicks.
+
+use eframe::egui::{self, Color32, FontId, Pos2, Rect, Stroke, Ui, Vec2};
+
+use crate::graphics::ui::{GridConfig, SimWorkfront, UiState};
+
+// ============================================================================
+// Settings tab (Grid config + algorithm weights + workfront list)
+// ============================================================================
+
+/// Render the Simulation settings panel.
+/// Called from the "Settings" tab in lib.rs when mode == Simulation.
+/// Returns true if the grid config changed (needs new pool rebuild).
+pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
+    let mut changed = false;
+
+    ui.heading("Simulation — Grid Configuration");
+    ui.separator();
+
+    egui::Grid::new("sim_grid_config")
+        .num_columns(2)
+        .spacing([20.0, 6.0])
+        .show(ui, |ui| {
+            // nx
+            ui.label("X Grid Lines:");
+            let prev_nx = state.grid_config.nx;
+            ui.add(
+                egui::Slider::new(&mut state.grid_config.nx, 2..=20)
+                    .text("")
+                    .clamp_to_range(true),
+            );
+            if state.grid_config.nx != prev_nx {
+                changed = true;
+            }
+            ui.end_row();
+
+            // ny
+            ui.label("Y Grid Lines:");
+            let prev_ny = state.grid_config.ny;
+            ui.add(
+                egui::Slider::new(&mut state.grid_config.ny, 2..=20)
+                    .text("")
+                    .clamp_to_range(true),
+            );
+            if state.grid_config.ny != prev_ny {
+                changed = true;
+            }
+            ui.end_row();
+
+            // nz (floor levels including ground)
+            ui.label("Z Levels (incl. ground):");
+            let prev_nz = state.grid_config.nz;
+            ui.add(
+                egui::Slider::new(&mut state.grid_config.nz, 2..=15)
+                    .text("")
+                    .clamp_to_range(true),
+            );
+            if state.grid_config.nz != prev_nz {
+                changed = true;
+            }
+            ui.end_row();
+
+            // dx
+            ui.label("X Spacing (mm):");
+            let prev_dx = state.grid_config.dx;
+            ui.add(
+                egui::Slider::new(&mut state.grid_config.dx, 1000.0..=20000.0)
+                    .text("")
+                    .fixed_decimals(0)
+                    .clamp_to_range(true),
+            );
+            if (state.grid_config.dx - prev_dx).abs() > 1e-6 {
+                changed = true;
+            }
+            ui.end_row();
+
+            // dy
+            ui.label("Y Spacing (mm):");
+            let prev_dy = state.grid_config.dy;
+            ui.add(
+                egui::Slider::new(&mut state.grid_config.dy, 1000.0..=20000.0)
+                    .text("")
+                    .fixed_decimals(0)
+                    .clamp_to_range(true),
+            );
+            if (state.grid_config.dy - prev_dy).abs() > 1e-6 {
+                changed = true;
+            }
+            ui.end_row();
+
+            // dz
+            ui.label("Z Interval / Floor height (mm):");
+            let prev_dz = state.grid_config.dz;
+            ui.add(
+                egui::Slider::new(&mut state.grid_config.dz, 1000.0..=10000.0)
+                    .text("")
+                    .fixed_decimals(0)
+                    .clamp_to_range(true),
+            );
+            if (state.grid_config.dz - prev_dz).abs() > 1e-6 {
+                changed = true;
+            }
+            ui.end_row();
+        });
+
+    // Show pool stats
+    ui.add_space(6.0);
+    let nx = state.grid_config.nx;
+    let ny = state.grid_config.ny;
+    let nz = state.grid_config.nz;
+    let est_nodes = nx * ny * nz;
+    let est_cols = nx * ny * (nz - 1);
+    let floors = nz - 1;
+    let est_gdr_x = (nx - 1) * ny * floors;
+    let est_gdr_y = nx * (ny - 1) * floors;
+    let est_elements = est_cols + est_gdr_x + est_gdr_y;
+    ui.label(
+        egui::RichText::new(format!(
+            "Pool estimate: {} nodes, {} elements  ({} columns + {} girders)",
+            est_nodes,
+            est_elements,
+            est_cols,
+            est_gdr_x + est_gdr_y
+        ))
+        .color(Color32::from_rgb(160, 220, 160)),
+    );
+
+    ui.add_space(12.0);
+    ui.separator();
+
+    // ── Upper-floor threshold ─────────────────────────────────────────────
+    ui.heading("Construction Constraints");
+    ui.add_space(4.0);
+    ui.label("Upper-Floor Column Rate Threshold:");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Slider::new(&mut state.upper_floor_threshold, 0.0..=1.0)
+                .text("")
+                .fixed_decimals(2)
+                .clamp_to_range(true),
+        );
+        ui.label(format!("{:.0}%", state.upper_floor_threshold * 100.0));
+    });
+
+    ui.add_space(12.0);
+    ui.separator();
+
+    // ── Algorithm weights ─────────────────────────────────────────────────
+    ui.heading("Algorithm Weights");
+    ui.add_space(4.0);
+    let (ref mut w1, ref mut w2, ref mut w3) = state.sim_weights;
+    egui::Grid::new("sim_weights_grid")
+        .num_columns(2)
+        .spacing([20.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("w1 — Min. members (0.5):");
+            ui.add(
+                egui::Slider::new(w1, 0.0..=1.0)
+                    .text("")
+                    .fixed_decimals(2)
+                    .clamp_to_range(true),
+            );
+            ui.end_row();
+
+            ui.label("w2 — Connectivity (0.3):");
+            ui.add(
+                egui::Slider::new(w2, 0.0..=1.0)
+                    .text("")
+                    .fixed_decimals(2)
+                    .clamp_to_range(true),
+            );
+            ui.end_row();
+
+            ui.label("w3 — Distance (0.15):");
+            ui.add(
+                egui::Slider::new(w3, 0.0..=1.0)
+                    .text("")
+                    .fixed_decimals(2)
+                    .clamp_to_range(true),
+            );
+            ui.end_row();
+        });
+
+    ui.add_space(12.0);
+    ui.separator();
+
+    // ── Scenario count ────────────────────────────────────────────────────
+    ui.heading("Scenarios");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Number of scenarios:");
+        ui.add(
+            egui::Slider::new(&mut state.sim_scenario_count, 1..=200)
+                .text("")
+                .clamp_to_range(true),
+        );
+    });
+
+    ui.add_space(12.0);
+    ui.separator();
+
+    // ── Workfront list ────────────────────────────────────────────────────
+    ui.heading("Workfronts");
+    ui.add_space(4.0);
+    if state.sim_workfronts.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(200, 180, 80),
+            "No workfronts set. Switch to View tab and click grid intersections.",
+        );
+    } else {
+        egui::ScrollArea::vertical()
+            .id_source("wf_list_scroll")
+            .max_height(120.0)
+            .show(ui, |ui| {
+                let mut to_remove: Option<usize> = None;
+                for (i, wf) in state.sim_workfronts.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "WF {} — Grid ({}, {})",
+                            wf.id, wf.grid_x, wf.grid_y
+                        ));
+                        if ui.small_button("✕").clicked() {
+                            to_remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(idx) = to_remove {
+                    state.sim_workfronts.remove(idx);
+                    // Re-assign IDs (1-indexed, sequential)
+                    for (i, wf) in state.sim_workfronts.iter_mut().enumerate() {
+                        wf.id = (i + 1) as i32;
+                    }
+                }
+            });
+    }
+
+    if changed {
+        // Grid changed → clear workfronts (they might be out of range) and scenarios
+        state.sim_workfronts.clear();
+        state.sim_scenarios.clear();
+        state.sim_selected_scenario = None;
+    }
+
+    changed
+}
+
+// ============================================================================
+// View tab — Grid plan view + Workfront intersection selector
+// ============================================================================
+
+/// Pixel margin around the grid drawing area
+const GRID_MARGIN: f32 = 40.0;
+
+/// Radius of workfront marker circle (px)
+const WF_MARKER_RADIUS: f32 = 8.0;
+
+/// Radius of hit-test for click detection (px)
+const HIT_RADIUS: f32 = 12.0;
+
+/// Render the simulation view in the View tab.
+/// Draws the x-y grid plan and handles intersection clicks to add/remove workfronts.
+///
+/// Returns true if a workfront was added or removed (needs repaint).
+pub fn render_sim_view(ui: &mut Ui, state: &mut UiState) -> bool {
+    let mut changed = false;
+
+    ui.label("Click grid intersections to set Workfronts. Click again to remove.");
+    ui.add_space(4.0);
+
+    let available = ui.available_rect_before_wrap();
+
+    // Allocate the full available rect as an interactive response
+    let response = ui.allocate_rect(available, egui::Sense::click());
+    let painter = ui.painter_at(available);
+
+    // Background
+    painter.rect_filled(available, 0.0, Color32::from_gray(18));
+
+    let cfg = &state.grid_config;
+    let nx = cfg.nx;
+    let ny = cfg.ny;
+
+    // ── Compute grid cell size to fit within available area ───────────────
+    let draw_w = available.width() - 2.0 * GRID_MARGIN;
+    let draw_h = available.height() - 2.0 * GRID_MARGIN;
+
+    if draw_w < 10.0 || draw_h < 10.0 || nx < 2 || ny < 2 {
+        painter.text(
+            available.center(),
+            egui::Align2::CENTER_CENTER,
+            "Grid too small to display",
+            FontId::proportional(14.0),
+            Color32::from_gray(150),
+        );
+        return false;
+    }
+
+    let cell_w = draw_w / (nx - 1) as f32;
+    let cell_h = draw_h / (ny - 1) as f32;
+    let origin = Pos2::new(
+        available.left() + GRID_MARGIN,
+        available.top() + GRID_MARGIN,
+    );
+
+    // ── Helper: grid index → screen pos ──────────────────────────────────
+    let grid_to_screen = |xi: usize, yi: usize| -> Pos2 {
+        Pos2::new(origin.x + xi as f32 * cell_w, origin.y + yi as f32 * cell_h)
+    };
+
+    // ── Draw grid lines ───────────────────────────────────────────────────
+    let grid_stroke = Stroke::new(1.0, Color32::from_gray(70));
+    for xi in 0..nx {
+        let top = grid_to_screen(xi, 0);
+        let bot = grid_to_screen(xi, ny - 1);
+        painter.line_segment([top, bot], grid_stroke);
+    }
+    for yi in 0..ny {
+        let left = grid_to_screen(0, yi);
+        let right = grid_to_screen(nx - 1, yi);
+        painter.line_segment([left, right], grid_stroke);
+    }
+
+    // ── Draw X-axis labels (grid x indices, 0..nx-1) ─────────────────────
+    let label_font = FontId::proportional(10.0);
+    let label_color = Color32::from_gray(160);
+    for xi in 0..nx {
+        let p = grid_to_screen(xi, 0);
+        painter.text(
+            Pos2::new(p.x, p.y - 14.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("X{}", xi),
+            label_font.clone(),
+            label_color,
+        );
+    }
+    for yi in 0..ny {
+        let p = grid_to_screen(0, yi);
+        painter.text(
+            Pos2::new(p.x - 14.0, p.y),
+            egui::Align2::RIGHT_CENTER,
+            format!("Y{}", yi),
+            label_font.clone(),
+            label_color,
+        );
+    }
+
+    // ── Draw existing workfront markers ───────────────────────────────────
+    let wf_colors = [
+        Color32::from_rgb(100, 200, 255),
+        Color32::from_rgb(100, 255, 150),
+        Color32::from_rgb(255, 200, 100),
+        Color32::from_rgb(255, 120, 200),
+        Color32::from_rgb(180, 130, 255),
+        Color32::from_rgb(255, 255, 100),
+    ];
+    for wf in &state.sim_workfronts {
+        if wf.grid_x < nx && wf.grid_y < ny {
+            let p = grid_to_screen(wf.grid_x, wf.grid_y);
+            let color = wf_colors[(wf.id as usize - 1) % wf_colors.len()];
+            painter.circle_filled(p, WF_MARKER_RADIUS, color);
+            painter.circle_stroke(p, WF_MARKER_RADIUS, Stroke::new(1.5, Color32::WHITE));
+            painter.text(
+                Pos2::new(p.x, p.y - WF_MARKER_RADIUS - 4.0),
+                egui::Align2::CENTER_BOTTOM,
+                format!("WF{}", wf.id),
+                FontId::proportional(9.0),
+                color,
+            );
+        }
+    }
+
+    // ── Draw intersection dots for unoccupied positions ───────────────────
+    for xi in 0..nx {
+        for yi in 0..ny {
+            let occupied = state
+                .sim_workfronts
+                .iter()
+                .any(|wf| wf.grid_x == xi && wf.grid_y == yi);
+            if !occupied {
+                let p = grid_to_screen(xi, yi);
+                painter.circle_filled(p, 3.0, Color32::from_gray(120));
+            }
+        }
+    }
+
+    // ── Handle click ──────────────────────────────────────────────────────
+    if response.clicked() {
+        if let Some(click_pos) = response.interact_pointer_pos() {
+            // Find nearest grid intersection within HIT_RADIUS
+            let mut best: Option<(usize, usize, f32)> = None;
+            for xi in 0..nx {
+                for yi in 0..ny {
+                    let p = grid_to_screen(xi, yi);
+                    let dist = ((p.x - click_pos.x).powi(2) + (p.y - click_pos.y).powi(2)).sqrt();
+                    if dist <= HIT_RADIUS {
+                        if best.as_ref().map_or(true, |(_, _, d)| dist < *d) {
+                            best = Some((xi, yi, dist));
+                        }
+                    }
+                }
+            }
+
+            if let Some((xi, yi, _)) = best {
+                // Toggle: if already set → remove, else → add
+                if let Some(pos) = state
+                    .sim_workfronts
+                    .iter()
+                    .position(|wf| wf.grid_x == xi && wf.grid_y == yi)
+                {
+                    state.sim_workfronts.remove(pos);
+                    // Re-assign IDs
+                    for (i, wf) in state.sim_workfronts.iter_mut().enumerate() {
+                        wf.id = (i + 1) as i32;
+                    }
+                } else {
+                    let new_id = state.sim_workfronts.len() as i32 + 1; // 1-indexed
+                    state.sim_workfronts.push(SimWorkfront {
+                        id: new_id,
+                        grid_x: xi,
+                        grid_y: yi,
+                    });
+                }
+                changed = true;
+            }
+        }
+    }
+
+    // ── Info overlay ──────────────────────────────────────────────────────
+    let info_rect = Rect::from_min_size(
+        Pos2::new(available.left() + 4.0, available.bottom() - 22.0),
+        egui::Vec2::new(available.width() - 8.0, 18.0),
+    );
+    painter.text(
+        info_rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        format!(
+            "Grid {}×{}  |  {} floors  |  {} workfront(s)",
+            nx,
+            ny,
+            cfg.nz.saturating_sub(1),
+            state.sim_workfronts.len()
+        ),
+        FontId::proportional(10.0),
+        Color32::from_gray(140),
+    );
+
+    changed
+}
+
+// ============================================================================
+// Scenario result panel (Result tab, Simulation mode)
+// ============================================================================
+
+/// Render the simulation result tab.
+/// Shows scenario list, playback controls, selected scenario metrics.
+pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
+    ui.heading("Simulation Results");
+    ui.separator();
+
+    if state.sim_running {
+        ui.colored_label(Color32::from_rgb(100, 200, 255), "⏳ Simulation running…");
+        return;
+    }
+
+    if state.sim_scenarios.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(200, 180, 80),
+            "No scenarios generated yet. Configure Grid, set Workfronts, then press Recalc.",
+        );
+        return;
+    }
+
+    // ── Scenario list ──────────────────────────────────────────────────────
+    ui.heading("Scenarios");
+    ui.add_space(4.0);
+
+    egui::ScrollArea::vertical()
+        .id_source("scenario_list_scroll")
+        .max_height(160.0)
+        .show(ui, |ui| {
+            egui::Grid::new("scenario_grid")
+                .num_columns(5)
+                .spacing([12.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("#");
+                    ui.strong("Steps");
+                    ui.strong("Members");
+                    ui.strong("Avg/Step");
+                    ui.strong("Termination");
+                    ui.end_row();
+
+                    for scenario in &state.sim_scenarios {
+                        let selected = state
+                            .sim_selected_scenario
+                            .map_or(false, |s| s == scenario.id - 1);
+                        let row_color = if selected {
+                            Color32::from_rgb(50, 80, 120)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        // Highlight row background with a colored label on the ID
+                        let id_label = egui::RichText::new(format!("{}", scenario.id))
+                            .color(if selected {
+                                Color32::from_rgb(100, 200, 255)
+                            } else {
+                                Color32::from_gray(200)
+                            })
+                            .strong();
+                        let _ = row_color; // used implicitly via RichText
+
+                        if ui.label(id_label).clicked()
+                            || ui
+                                .selectable_label(
+                                    selected,
+                                    format!("{}", scenario.metrics.total_steps),
+                                )
+                                .clicked()
+                        {
+                            state.sim_selected_scenario = Some(scenario.id - 1);
+                            state.sim_current_step = 1;
+                            state.sim_playing = false;
+                        }
+                        ui.label(format!("{}", scenario.metrics.total_members_installed));
+                        ui.label(format!("{:.2}", scenario.metrics.avg_members_per_step));
+                        ui.label(format!("{}", scenario.metrics.termination_reason));
+                        ui.end_row();
+                    }
+                });
+        });
+
+    ui.add_space(10.0);
+    ui.separator();
+
+    // ── Playback controls ──────────────────────────────────────────────────
+    if let Some(sel_idx) = state.sim_selected_scenario {
+        if let Some(scenario) = state.sim_scenarios.get(sel_idx) {
+            let max_step = scenario.steps.len();
+
+            ui.heading(format!("Scenario {} — Playback", scenario.id));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                // Prev step
+                if ui
+                    .add_enabled(state.sim_current_step > 1, egui::Button::new("◀"))
+                    .clicked()
+                {
+                    state.sim_current_step = state.sim_current_step.saturating_sub(1).max(1);
+                    state.sim_playing = false;
+                }
+
+                // Play / Pause
+                if state.sim_playing {
+                    if ui.button("⏸ Pause").clicked() {
+                        state.sim_playing = false;
+                    }
+                } else if ui
+                    .add_enabled(
+                        max_step > 0 && state.sim_current_step < max_step,
+                        egui::Button::new("▶ Play"),
+                    )
+                    .clicked()
+                {
+                    state.sim_playing = true;
+                }
+
+                // Next step
+                if ui
+                    .add_enabled(state.sim_current_step < max_step, egui::Button::new("▶"))
+                    .clicked()
+                {
+                    state.sim_current_step = (state.sim_current_step + 1).min(max_step);
+                    state.sim_playing = false;
+                }
+
+                // Speed selector
+                ui.separator();
+                ui.label("Speed:");
+                ui.selectable_value(&mut state.sim_speed, 1, "1×");
+                ui.selectable_value(&mut state.sim_speed, 2, "2×");
+                ui.selectable_value(&mut state.sim_speed, 4, "4×");
+            });
+
+            // Seek bar (slider)
+            if max_step > 0 {
+                ui.add(
+                    egui::Slider::new(&mut state.sim_current_step, 1..=max_step)
+                        .text("Step")
+                        .clamp_to_range(true),
+                );
+            }
+
+            // Step info
+            let step_display = state.sim_current_step.min(max_step).max(1);
+            if let Some(step) = scenario.steps.get(step_display - 1) {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Step {} / {}", step_display, max_step));
+                    ui.separator();
+                    ui.label(format!("WF {}", step.workfront_id));
+                    ui.separator();
+                    ui.label(format!("Floor {}", step.floor));
+                    ui.separator();
+                    ui.label(format!(
+                        "{} member(s): {:?}",
+                        step.element_ids.len(),
+                        step.element_ids
+                    ));
+                });
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+
+            // ── Metrics summary ────────────────────────────────────────────
+            ui.heading("Metrics");
+            ui.add_space(4.0);
+            egui::Grid::new("sim_metrics_grid")
+                .num_columns(2)
+                .spacing([20.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Total Steps:");
+                    ui.label(format!("{}", scenario.metrics.total_steps));
+                    ui.end_row();
+
+                    ui.label("Members Installed:");
+                    ui.label(format!("{}", scenario.metrics.total_members_installed));
+                    ui.end_row();
+
+                    ui.label("Avg Members/Step:");
+                    ui.label(format!("{:.2}", scenario.metrics.avg_members_per_step));
+                    ui.end_row();
+
+                    ui.label("Avg Connectivity:");
+                    ui.label(format!("{:.2}", scenario.metrics.avg_connectivity));
+                    ui.end_row();
+
+                    ui.label("Termination:");
+                    ui.label(format!("{}", scenario.metrics.termination_reason));
+                    ui.end_row();
+                });
+
+            ui.add_space(10.0);
+            ui.separator();
+
+            // ── XY Plot: Members-per-step ──────────────────────────────────
+            render_members_per_step_plot(ui, scenario);
+        }
+    }
+}
+
+/// Draw a line chart of members-installed per step for a given scenario.
+/// X = step index (1-indexed), Y = member count at that step.
+/// Shows a target band (1.8~2.4) and a mean line.
+fn render_members_per_step_plot(ui: &mut Ui, scenario: &crate::graphics::ui::SimScenario) {
+    use eframe::egui::pos2;
+
+    let steps = &scenario.steps;
+    if steps.is_empty() {
+        return;
+    }
+
+    ui.heading("Members per Step");
+    ui.add_space(4.0);
+
+    // Desired plot dimensions
+    let plot_w = (ui.available_width()).max(200.0);
+    let plot_h = 140.0f32;
+    let margin = egui::vec2(42.0, 18.0); // left/bottom margin for axis labels
+
+    let total_rect = ui
+        .allocate_space(Vec2::new(plot_w, plot_h + margin.y + 8.0))
+        .1;
+    let painter = ui.painter_at(total_rect);
+
+    // Plot area (inside margins)
+    let plot_rect = Rect::from_min_size(
+        pos2(total_rect.left() + margin.x, total_rect.top()),
+        Vec2::new(plot_w - margin.x - 4.0, plot_h),
+    );
+
+    // Background
+    painter.rect_filled(plot_rect, 2.0, Color32::from_gray(22));
+    painter.rect_stroke(plot_rect, 2.0, Stroke::new(1.0, Color32::from_gray(60)));
+
+    let n = steps.len();
+    let counts: Vec<usize> = steps.iter().map(|s| s.element_ids.len()).collect();
+    let max_count = counts.iter().copied().max().unwrap_or(1).max(1);
+    let y_max = (max_count as f32 * 1.25).max(5.0);
+
+    // Helper: data coords → screen coords
+    let to_screen = |step_i: f32, count: f32| -> Pos2 {
+        let x = plot_rect.left() + (step_i / (n as f32).max(1.0)) * plot_rect.width();
+        let y = plot_rect.bottom() - (count / y_max) * plot_rect.height();
+        pos2(x, y)
+    };
+
+    // ── Target band (1.8 ~ 2.4) ───────────────────────────────────────────
+    let y_band_lo = plot_rect.bottom() - (1.8 / y_max) * plot_rect.height();
+    let y_band_hi = plot_rect.bottom() - (2.4 / y_max) * plot_rect.height();
+    let band_rect = Rect::from_min_max(
+        pos2(plot_rect.left(), y_band_hi),
+        pos2(plot_rect.right(), y_band_lo),
+    );
+    painter.rect_filled(
+        band_rect,
+        0.0,
+        Color32::from_rgba_unmultiplied(80, 200, 80, 28),
+    );
+
+    // ── Y-axis grid lines & labels (0, y_max/2, y_max) ───────────────────
+    let y_ticks = [0.0f32, y_max * 0.5, y_max];
+    for &yv in &y_ticks {
+        let sy = plot_rect.bottom() - (yv / y_max) * plot_rect.height();
+        // grid line (dashed)
+        let dash = 5.0f32;
+        let gap = 4.0f32;
+        let mut x = plot_rect.left();
+        while x < plot_rect.right() {
+            let x_end = (x + dash).min(plot_rect.right());
+            painter.line_segment(
+                [pos2(x, sy), pos2(x_end, sy)],
+                Stroke::new(0.5, Color32::from_gray(50)),
+            );
+            x += dash + gap;
+        }
+        // label
+        painter.text(
+            pos2(plot_rect.left() - 4.0, sy),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0}", yv),
+            FontId::proportional(9.0),
+            Color32::from_gray(140),
+        );
+    }
+
+    // ── Data line ─────────────────────────────────────────────────────────
+    let line_color = Color32::from_rgb(100, 180, 255);
+    let mut points: Vec<Pos2> = Vec::with_capacity(n);
+    for (i, &count) in counts.iter().enumerate() {
+        // Center of each step's x interval
+        let xi = (i as f32 + 0.5) / n as f32 * n as f32;
+        points.push(to_screen(xi, count as f32));
+    }
+
+    for w in points.windows(2) {
+        painter.line_segment([w[0], w[1]], Stroke::new(1.5, line_color));
+    }
+    // Dots at each step
+    for &p in &points {
+        painter.circle_filled(p, 2.5, line_color);
+    }
+
+    // ── Mean line (red dashed) ────────────────────────────────────────────
+    let mean = scenario.metrics.avg_members_per_step as f32;
+    let y_mean = plot_rect.bottom() - (mean / y_max) * plot_rect.height();
+    let dash = 6.0f32;
+    let gap = 4.0f32;
+    let mut x = plot_rect.left();
+    while x < plot_rect.right() {
+        let x_end = (x + dash).min(plot_rect.right());
+        painter.line_segment(
+            [pos2(x, y_mean), pos2(x_end, y_mean)],
+            Stroke::new(1.5, Color32::from_rgb(255, 100, 100)),
+        );
+        x += dash + gap;
+    }
+    painter.text(
+        pos2(plot_rect.right() + 2.0, y_mean),
+        egui::Align2::LEFT_CENTER,
+        format!("avg {:.1}", mean),
+        FontId::proportional(9.0),
+        Color32::from_rgb(255, 120, 120),
+    );
+
+    // ── X-axis label ──────────────────────────────────────────────────────
+    painter.text(
+        pos2(plot_rect.center_top().x, total_rect.bottom() - 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        "Step",
+        FontId::proportional(9.0),
+        Color32::from_gray(140),
+    );
+
+    // ── Legend ────────────────────────────────────────────────────────────
+    let legend_x = plot_rect.right() - 90.0;
+    let legend_y = plot_rect.top() + 6.0;
+    painter.line_segment(
+        [
+            pos2(legend_x, legend_y + 4.0),
+            pos2(legend_x + 14.0, legend_y + 4.0),
+        ],
+        Stroke::new(1.5, line_color),
+    );
+    painter.text(
+        pos2(legend_x + 16.0, legend_y + 4.0),
+        egui::Align2::LEFT_CENTER,
+        "members/step",
+        FontId::proportional(8.0),
+        Color32::from_gray(180),
+    );
+    let legend_y2 = legend_y + 14.0;
+    painter.rect_filled(
+        Rect::from_min_size(pos2(legend_x, legend_y2), Vec2::new(14.0, 6.0)),
+        0.0,
+        Color32::from_rgba_unmultiplied(80, 200, 80, 60),
+    );
+    painter.text(
+        pos2(legend_x + 16.0, legend_y2 + 3.0),
+        egui::Align2::LEFT_CENTER,
+        "target 1.8~2.4",
+        FontId::proportional(8.0),
+        Color32::from_gray(160),
+    );
+}
