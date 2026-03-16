@@ -1,51 +1,66 @@
 //! Simulation Engine for AssyPlan Phase 3
 //!
-//! Monte-Carlo + Pruning + Weighted Sampling
-//!
-//! Per-step selection unit: ONE element at a time (not bundles).
-//!
-//! Special case — first step (bootstrap):
-//!   Nothing is installed yet → must form minimum assembly (3 cols + 2 girders)
-//!   anchored at the workfront position.  This is the only multi-element step.
-//!
-//! Normal steps (after bootstrap):
-//!   1. Collect candidate single elements reachable from the frontier:
-//!      - Uninstalled columns adjacent (±1 grid step) to any installed node, on lowest unstarted floor
-//!      - Uninstalled girders whose ≥1 endpoint is an upper node of a frontier column
-//!      - If none found at current floor → search next floor up
-//!   2. Filter by structural stability (validate_column_support / validate_girder_support)
-//!   3. Filter by upper-floor constraint
-//!   4. Score each element: w1 × connectivity + w2 × (1/distance) + w3 × is_lowest_floor_bonus
-//!   5. Weighted random sample → install 1 element → update frontier
-//!
-//! Early termination:
-//!   1. Upper-floor constraint blocks everything 3 consecutive times
-//!   2. No valid single candidate found 10 consecutive times
-//!   3. No progress (< 3 members in last 300 iterations)
-//!   4. Max iteration guard
+//! Sequence and step are separate concepts:
+//! - sequence: individual member installation order
+//! - step: pattern-based stability unit that may contain multiple sequences
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
-use crate::graphics::ui::{ScenarioMetrics, SimScenario, SimStep, SimWorkfront, TerminationReason};
+use crate::graphics::ui::{
+    ScenarioMetrics, SimScenario, SimSequence, SimStep, SimWorkfront, TerminationReason,
+};
 use crate::sim_grid::SimGrid;
-use crate::stability::{has_minimum_assembly, validate_column_support, validate_girder_support};
+use crate::stability::{
+    has_minimum_assembly, validate_column_support, validate_girder_support, StabilityElement,
+};
 
-// ============================================================================
-// SingleCandidate — one element at a time
-// ============================================================================
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternType {
+    Col,
+    Girder,
+    ColCol,
+    ColGirder,
+    GirderGirder,
+    ColColGirder,
+    ColGirderCol,
+    ColGirderGirder,
+    ColColGirderGirder,
+    ColColGirderColGirder,
+    Bootstrap,
+}
 
-/// A single-element candidate for one simulation step.
+impl PatternType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Col => "Col",
+            Self::Girder => "Girder",
+            Self::ColCol => "ColCol",
+            Self::ColGirder => "ColGirder",
+            Self::GirderGirder => "GirderGirder",
+            Self::ColColGirder => "ColColGirder",
+            Self::ColGirderCol => "ColGirderCol",
+            Self::ColGirderGirder => "ColGirderGirder",
+            Self::ColColGirderGirder => "ColColGirderGirder",
+            Self::ColColGirderColGirder => "ColColGirderColGirder",
+            Self::Bootstrap => "Bootstrap",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PatternChoice {
+    element_ids: Vec<i32>,
+    pattern: PatternType,
+}
+
+/// A single-element candidate for seed selection.
 #[derive(Clone, Debug)]
 pub struct SingleCandidate {
-    /// The one element to install
     pub element_id: i32,
-    /// Number of shared nodes with already-installed structure
     pub connectivity: usize,
-    /// Manhattan grid distance from nearest frontier node
     pub frontier_dist: f64,
-    /// Whether this element is on the lowest unstarted floor
     pub is_lowest_floor: bool,
 }
 
@@ -59,10 +74,7 @@ impl SingleCandidate {
     }
 }
 
-// ============================================================================
-// Legacy Candidate kept for bootstrap only (first step: 3col+2gdr bundle)
-// ============================================================================
-
+/// Bootstrap candidate only (first step: 3 columns + 2 girders bundle).
 #[derive(Clone, Debug)]
 pub struct Candidate {
     pub element_ids: Vec<i32>,
@@ -83,17 +95,12 @@ impl Candidate {
     }
 }
 
-// ============================================================================
-// Grid helpers
-// ============================================================================
-
-/// Extract the grid dz (floor height) from a SimGrid.
 fn grid_dz(grid: &SimGrid) -> f64 {
     let mut z_vals: Vec<i64> = grid
         .nodes
         .iter()
         .map(|n| (n.z * 1000.0).round() as i64)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
     z_vals.sort();
@@ -104,20 +111,34 @@ fn grid_dz(grid: &SimGrid) -> f64 {
     }
 }
 
-/// Build a reverse map: node_id → (xi, yi, zi)
-fn build_node_pos(grid: &SimGrid) -> std::collections::HashMap<i32, (usize, usize, usize)> {
+fn build_node_pos(grid: &SimGrid) -> HashMap<i32, (usize, usize, usize)> {
     grid.node_index
         .iter()
         .map(|(&pos, &id)| (id, pos))
         .collect()
 }
 
-/// Manhattan distance in grid steps between two nodes.
-fn node_grid_dist(
-    nid_a: i32,
-    nid_b: i32,
-    node_pos: &std::collections::HashMap<i32, (usize, usize, usize)>,
-) -> f64 {
+fn get_element(grid: &SimGrid, element_id: i32) -> Option<&StabilityElement> {
+    grid.elements.iter().find(|e| e.id == element_id)
+}
+
+fn is_column(grid: &SimGrid, element_id: i32) -> bool {
+    get_element(grid, element_id)
+        .map(|e| e.member_type == "Column")
+        .unwrap_or(false)
+}
+
+fn other_node(element: &StabilityElement, node_id: i32) -> Option<i32> {
+    if element.node_i_id == node_id {
+        Some(element.node_j_id)
+    } else if element.node_j_id == node_id {
+        Some(element.node_i_id)
+    } else {
+        None
+    }
+}
+
+fn node_grid_dist(nid_a: i32, nid_b: i32, node_pos: &HashMap<i32, (usize, usize, usize)>) -> f64 {
     match (node_pos.get(&nid_a), node_pos.get(&nid_b)) {
         (Some(&(ax, ay, _)), Some(&(bx, by, _))) => {
             ((ax as i32 - bx as i32).abs() + (ay as i32 - by as i32).abs()) as f64
@@ -126,16 +147,14 @@ fn node_grid_dist(
     }
 }
 
-/// Minimum Manhattan grid distance from an element's nodes to any installed node.
 fn element_frontier_dist(
     element_id: i32,
     grid: &SimGrid,
     installed_nodes: &HashSet<i32>,
-    node_pos: &std::collections::HashMap<i32, (usize, usize, usize)>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> f64 {
-    let elem = match grid.elements.iter().find(|e| e.id == element_id) {
-        Some(e) => e,
-        None => return f64::MAX,
+    let Some(elem) = get_element(grid, element_id) else {
+        return f64::MAX;
     };
     if installed_nodes.is_empty() {
         return 0.0;
@@ -143,7 +162,7 @@ fn element_frontier_dist(
     let cand_nodes = [elem.node_i_id, elem.node_j_id];
     let mut min_d = f64::MAX;
     for &cn in &cand_nodes {
-        for &fn_id in installed_nodes.iter() {
+        for &fn_id in installed_nodes {
             let d = node_grid_dist(cn, fn_id, node_pos);
             if d < min_d {
                 min_d = d;
@@ -157,11 +176,9 @@ fn element_frontier_dist(
     }
 }
 
-/// Count how many of the element's nodes are already installed.
 fn element_connectivity(element_id: i32, grid: &SimGrid, installed_nodes: &HashSet<i32>) -> usize {
-    let elem = match grid.elements.iter().find(|e| e.id == element_id) {
-        Some(e) => e,
-        None => return 0,
+    let Some(elem) = get_element(grid, element_id) else {
+        return 0;
     };
     let mut count = 0;
     if installed_nodes.contains(&elem.node_i_id) {
@@ -173,7 +190,6 @@ fn element_connectivity(element_id: i32, grid: &SimGrid, installed_nodes: &HashS
     count
 }
 
-/// Count shared nodes for a multi-element set (used only in bootstrap).
 fn count_shared_nodes(
     element_ids: &[i32],
     grid: &SimGrid,
@@ -182,9 +198,7 @@ fn count_shared_nodes(
     let cand_nodes: HashSet<i32> = element_ids
         .iter()
         .flat_map(|eid| {
-            grid.elements
-                .iter()
-                .find(|e| e.id == *eid)
+            get_element(grid, *eid)
                 .map(|e| vec![e.node_i_id, e.node_j_id])
                 .unwrap_or_default()
         })
@@ -192,32 +206,24 @@ fn count_shared_nodes(
     cand_nodes.intersection(installed_nodes).count()
 }
 
-// ============================================================================
-// Stability checks
-// ============================================================================
-
-/// Check stability for a single element against the current installed set.
 fn check_single_stability(element_id: i32, grid: &SimGrid, installed_ids: &HashSet<i32>) -> bool {
-    let elem = match grid.elements.iter().find(|e| e.id == element_id) {
-        Some(e) => e,
-        None => return false,
+    let Some(elem) = get_element(grid, element_id) else {
+        return false;
     };
     if elem.member_type == "Column" {
         validate_column_support(elem, &grid.nodes, &grid.elements, installed_ids)
     } else {
-        // Girder: both ends must connect to already-installed elements
         validate_girder_support(elem, &grid.nodes, &grid.elements, installed_ids)
     }
 }
 
-/// Check stability for a multi-element bundle (bootstrap only).
 fn check_bundle_stability(
     element_ids: &[i32],
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
 ) -> bool {
     let mut combined: HashSet<i32> = installed_ids.clone();
-    combined.extend(element_ids.iter().cloned());
+    combined.extend(element_ids.iter().copied());
 
     if installed_ids.is_empty() {
         let combined_elems: Vec<_> = grid
@@ -228,10 +234,10 @@ fn check_bundle_stability(
             .collect();
         return has_minimum_assembly(&grid.nodes, &combined_elems);
     }
+
     for eid in element_ids {
-        let elem = match grid.elements.iter().find(|e| e.id == *eid) {
-            Some(e) => e,
-            None => return false,
+        let Some(elem) = get_element(grid, *eid) else {
+            return false;
         };
         let ok = if elem.member_type == "Column" {
             validate_column_support(elem, &grid.nodes, &grid.elements, installed_ids)
@@ -245,20 +251,6 @@ fn check_bundle_stability(
     true
 }
 
-/// Check upper-floor constraint for a set of element IDs.
-///
-/// Spec (devplandoc.md §311):
-///   For floor N (1-indexed), the ratio
-///     (cumulative N+1 installed columns + new N+1 columns in this step)
-///       / (cumulative N installed columns)
-///   must NOT exceed `threshold`.
-///
-/// **Key rule**: If floor N is 100% complete (all columns installed), the
-/// constraint is lifted entirely — floor N+1 becomes the main work target.
-///
-/// Floor 1 columns are always allowed (no lower floor to compare against).
-/// Girders never trigger this constraint (columns-only ratio).
-/// If denominator (floor N installed) == 0 → ratio = 0.0 → always below threshold.
 fn check_upper_floor_constraint(
     element_ids: &[i32],
     grid: &SimGrid,
@@ -267,9 +259,7 @@ fn check_upper_floor_constraint(
 ) -> bool {
     let dz = grid_dz(grid);
 
-    // Count total columns per floor (needed for 100%-complete check)
-    let mut total_per_floor: std::collections::HashMap<i32, usize> =
-        std::collections::HashMap::new();
+    let mut total_per_floor: HashMap<i32, usize> = HashMap::new();
     for elem in grid.elements.iter().filter(|e| e.member_type == "Column") {
         if let Some((_, _, z)) = grid.node_coords(elem.node_i_id) {
             let floor = (z / dz).round() as i32 + 1;
@@ -277,11 +267,9 @@ fn check_upper_floor_constraint(
         }
     }
 
-    // Count installed columns per floor (already installed, not including this step)
-    let mut installed_per_floor: std::collections::HashMap<i32, usize> =
-        std::collections::HashMap::new();
+    let mut installed_per_floor: HashMap<i32, usize> = HashMap::new();
     for eid in installed_ids {
-        if let Some(elem) = grid.elements.iter().find(|e| e.id == *eid) {
+        if let Some(elem) = get_element(grid, *eid) {
             if elem.member_type == "Column" {
                 if let Some((_, _, z)) = grid.node_coords(elem.node_i_id) {
                     let floor = (z / dz).round() as i32 + 1;
@@ -291,22 +279,19 @@ fn check_upper_floor_constraint(
         }
     }
 
-    // For each NEW column in this step, check if adding it would violate the ratio
     for eid in element_ids {
-        let elem = match grid.elements.iter().find(|e| e.id == *eid) {
-            Some(e) => e,
-            None => continue,
+        let Some(elem) = get_element(grid, *eid) else {
+            continue;
         };
         if elem.member_type != "Column" {
-            continue; // girders don't affect the ratio
+            continue;
         }
-        let (_, _, z) = match grid.node_coords(elem.node_i_id) {
-            Some(c) => c,
-            None => continue,
+
+        let Some((_, _, z)) = grid.node_coords(elem.node_i_id) else {
+            continue;
         };
         let floor = (z / dz).round() as i32 + 1;
 
-        // Floor 1 is always allowed (no lower floor)
         if floor <= 1 {
             continue;
         }
@@ -315,46 +300,29 @@ fn check_upper_floor_constraint(
         let installed_lower = *installed_per_floor.get(&lower_floor).unwrap_or(&0);
         let total_lower = *total_per_floor.get(&lower_floor).unwrap_or(&0);
 
-        // If lower floor has 0 installed, ratio = 0.0 → allowed
         if installed_lower == 0 {
             continue;
         }
-
-        // KEY RULE: If lower floor is 100% complete, constraint is lifted entirely.
-        // Upper floor becomes the main work target — no ratio limit applies.
         if total_lower > 0 && installed_lower >= total_lower {
             continue;
         }
 
-        // installed_upper includes already installed + this new column
         let installed_upper = *installed_per_floor.get(&floor).unwrap_or(&0) + 1;
         let ratio = installed_upper as f64 / installed_lower as f64;
-
         if ratio > threshold {
             return false;
         }
     }
+
     true
 }
 
-// ============================================================================
-// Candidate generation
-// ============================================================================
-
-/// Determine the lowest zi floor where any uninstalled element still exists.
-///
-/// Checks columns first (by their node_i zi), then girders (by their node_i zi,
-/// which equals floor_zi+1 for girders sitting on top of that floor).
-/// This prevents the frontier from jumping to higher floors when lower-floor
-/// elements still remain, and correctly handles the end-game where only
-/// girders remain after all columns are installed.
 fn min_unstarted_floor(
     _wf: &SimWorkfront,
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
-    node_pos: &std::collections::HashMap<i32, (usize, usize, usize)>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> usize {
-    // Phase 1: find lowest zi where uninstalled columns still exist
     for zi in 0..(grid.nz.saturating_sub(1)) {
         let has_uninstalled_col = grid.elements.iter().any(|e| {
             e.member_type == "Column"
@@ -366,21 +334,15 @@ fn min_unstarted_floor(
         }
     }
 
-    // Phase 2: all columns installed — find lowest zi_girder-1 where girders remain.
-    // Girders have node_i at zi = floor_zi + 1 (ceiling of the floor below).
-    // We return (zi_girder - 1) so that the caller's "search_zi+1 == zi_girder" logic works.
     let mut min_girder_floor_zi: Option<usize> = None;
-    for elem in grid.elements.iter() {
+    for elem in &grid.elements {
         if elem.member_type != "Girder" || installed_ids.contains(&elem.id) {
             continue;
         }
         if let Some(&(_, _, zi_g)) = node_pos.get(&elem.node_i_id) {
-            // zi_g is the node_i zi of this girder.
-            // Girder belongs to "floor zi_g-1" (0-indexed).
-            // We want to return that floor zi so the caller's upper_zi = search_zi+1 = zi_g.
             let floor_zi = zi_g.saturating_sub(1);
             min_girder_floor_zi = Some(match min_girder_floor_zi {
-                None => floor_zi,
+                Option::None => floor_zi,
                 Some(prev) => prev.min(floor_zi),
             });
         }
@@ -388,23 +350,15 @@ fn min_unstarted_floor(
     min_girder_floor_zi.unwrap_or(grid.nz.saturating_sub(1))
 }
 
-/// Collect single-element candidates reachable from the frontier.
-///
-/// Returns uninstalled columns and girders adjacent to installed nodes,
-/// starting from the lowest unstarted floor.  If nothing found at that
-/// floor, expands to the next floor up.
-///
-/// Candidate count is O(frontier_size × 5) — typically < 30.
 fn collect_single_candidates(
     wf: &SimWorkfront,
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
     installed_nodes: &HashSet<i32>,
-    node_pos: &std::collections::HashMap<i32, (usize, usize, usize)>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> Vec<SingleCandidate> {
     let zi_target = min_unstarted_floor(wf, grid, installed_ids, node_pos);
 
-    // Try zi_target first; if empty, try zi_target+1
     for attempt in 0..2usize {
         let search_zi = zi_target + attempt;
         if search_zi >= grid.nz.saturating_sub(1) {
@@ -415,13 +369,10 @@ fn collect_single_candidates(
         let mut seen: HashSet<i32> = HashSet::new();
         let is_lowest = search_zi == 0;
 
-        // ── Columns: adjacent (±1) to any installed node at search_zi or search_zi+1 ──
-        for &nid in installed_nodes.iter() {
-            let &(xi, yi, zi) = match node_pos.get(&nid) {
-                Some(p) => p,
-                None => continue,
+        for &nid in installed_nodes {
+            let Some(&(xi, yi, zi)) = node_pos.get(&nid) else {
+                continue;
             };
-            // Only expand from nodes at the floor we care about
             if zi != search_zi && zi != search_zi + 1 {
                 continue;
             }
@@ -448,19 +399,15 @@ fn collect_single_candidates(
             }
         }
 
-        // ── Girders: any girder at (search_zi+1) with ≥1 endpoint that is
-        //   the upper node of a candidate column OR an already-installed column ──
         let upper_zi = search_zi + 1;
-
-        // Build set of upper nodes: candidate cols + installed cols at search_zi
         let mut upper_nodes: HashSet<i32> = HashSet::new();
         for sc in &result {
-            if let Some(e) = grid.elements.iter().find(|e| e.id == sc.element_id) {
+            if let Some(e) = get_element(grid, sc.element_id) {
                 upper_nodes.insert(e.node_j_id);
             }
         }
-        for &eid in installed_ids.iter() {
-            if let Some(e) = grid.elements.iter().find(|e| e.id == eid) {
+        for &eid in installed_ids {
+            if let Some(e) = get_element(grid, eid) {
                 if e.member_type == "Column" {
                     if let Some(&(_, _, zi)) = node_pos.get(&e.node_i_id) {
                         if zi == search_zi {
@@ -488,7 +435,7 @@ fn collect_single_candidates(
                     element_id: gdr.id,
                     connectivity: conn,
                     frontier_dist: dist,
-                    is_lowest_floor: false, // girders are at ceiling of floor, not "lowest"
+                    is_lowest_floor: false,
                 });
             }
         }
@@ -496,83 +443,61 @@ fn collect_single_candidates(
         if !result.is_empty() {
             return result;
         }
-        // attempt == 0 and nothing found → try next floor
     }
 
-    // ── Fallback: frontier-based search found nothing on any floor.
-    //   Gather ALL uninstalled elements on the lowest unstarted floor regardless
-    //   of adjacency.  This handles isolated pockets (e.g. far corners of a large
-    //   grid) and also the end-game where only girders remain after all columns
-    //   are installed.
-    {
-        let zi_target = min_unstarted_floor(wf, grid, installed_ids, node_pos);
+    let zi_target = min_unstarted_floor(wf, grid, installed_ids, node_pos);
+    for zi in zi_target..=(grid.nz.saturating_sub(1)) {
+        let mut result: Vec<SingleCandidate> = Vec::new();
+        let mut seen: HashSet<i32> = HashSet::new();
 
-        // Try from zi_target upward, collect any uninstalled element on that level.
-        // For columns: zi of node_i == zi.  For girders: zi of node_i == zi+1
-        // (girders sit at the ceiling of the floor below, i.e. upper_zi = zi+1).
-        for zi in zi_target..=(grid.nz.saturating_sub(1)) {
-            let mut result: Vec<SingleCandidate> = Vec::new();
-            let mut seen: HashSet<i32> = HashSet::new();
-
-            for elem in grid.elements.iter() {
-                if installed_ids.contains(&elem.id) {
-                    continue;
-                }
-                let elem_zi = node_pos.get(&elem.node_i_id).map(|p| p.2).unwrap_or(9999);
-
-                let on_this_floor = if elem.member_type == "Column" {
-                    elem_zi == zi
-                } else {
-                    // Girder: node_i zi == zi+1 means it sits on top of floor zi
-                    elem_zi == zi + 1
-                };
-                if !on_this_floor {
-                    continue;
-                }
-                if seen.insert(elem.id) {
-                    let conn = element_connectivity(elem.id, grid, installed_nodes);
-                    let dist = element_frontier_dist(elem.id, grid, installed_nodes, node_pos);
-                    result.push(SingleCandidate {
-                        element_id: elem.id,
-                        connectivity: conn,
-                        frontier_dist: dist,
-                        is_lowest_floor: zi == 0,
-                    });
-                }
+        for elem in &grid.elements {
+            if installed_ids.contains(&elem.id) {
+                continue;
             }
-
-            if !result.is_empty() {
-                return result;
+            let elem_zi = node_pos.get(&elem.node_i_id).map(|p| p.2).unwrap_or(9999);
+            let on_this_floor = if elem.member_type == "Column" {
+                elem_zi == zi
+            } else {
+                elem_zi == zi + 1
+            };
+            if !on_this_floor {
+                continue;
             }
+            if seen.insert(elem.id) {
+                let conn = element_connectivity(elem.id, grid, installed_nodes);
+                let dist = element_frontier_dist(elem.id, grid, installed_nodes, node_pos);
+                result.push(SingleCandidate {
+                    element_id: elem.id,
+                    connectivity: conn,
+                    frontier_dist: dist,
+                    is_lowest_floor: zi == 0,
+                });
+            }
+        }
+
+        if !result.is_empty() {
+            return result;
         }
     }
 
     Vec::new()
 }
 
-/// Generate bootstrap candidate (first step only): 3 columns + 2 girders
-/// anchored at the workfront position (wf.grid_x, wf.grid_y), floor zi=0.
-///
-/// Searches a 3×3 patch around the workfront, then expands if needed.
-/// Returns valid bundles where the 2 girders are both fully connected to the
-/// selected column j-nodes AND form a 90-degree pair (satisfying has_minimum_assembly).
 fn generate_bootstrap_candidates(
     wf: &SimWorkfront,
     grid: &SimGrid,
-    node_pos: &std::collections::HashMap<i32, (usize, usize, usize)>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> Vec<Candidate> {
     let anchor_zi = 0usize;
     let upper_zi = 1usize;
 
-    // Build column j-node map: col_id → j_node_id
-    let col_jnode: std::collections::HashMap<i32, i32> = grid
+    let col_jnode: HashMap<i32, i32> = grid
         .elements
         .iter()
         .filter(|e| e.member_type == "Column")
         .map(|e| (e.id, e.node_j_id))
         .collect();
 
-    // Build girder map: gdr_id → (node_i, node_j), only zi=upper_zi
     let all_floor1_gdrs: Vec<(i32, i32, i32)> = grid
         .elements
         .iter()
@@ -583,10 +508,8 @@ fn generate_bootstrap_candidates(
         .map(|e| (e.id, e.node_i_id, e.node_j_id))
         .collect();
 
-    // Try expanding patch radius until we get at least one valid bundle
     let mut candidates: Vec<Candidate> = Vec::new();
     for patch in 1i32..=(grid.nx.max(grid.ny) as i32) {
-        // Collect columns in patch
         let mut patch_cols: Vec<i32> = Vec::new();
         let mut seen_c: HashSet<i32> = HashSet::new();
         for dxi in -patch..=patch {
@@ -609,28 +532,24 @@ fn generate_bootstrap_candidates(
             continue;
         }
 
-        // Generate 3-col combinations; for each, find valid 90-degree girder pairs
         'outer: for ci in 0..patch_cols.len() {
             for cj in (ci + 1)..patch_cols.len() {
                 for ck in (cj + 1)..patch_cols.len() {
                     let c_ids = [patch_cols[ci], patch_cols[cj], patch_cols[ck]];
-                    // j-node set for these 3 columns
                     let jnodes: HashSet<i32> = c_ids
                         .iter()
                         .filter_map(|&cid| col_jnode.get(&cid).copied())
                         .collect();
                     if jnodes.len() < 3 {
-                        continue; // degenerate
+                        continue;
                     }
 
-                    // Girders fully within jnodes (both ends in jnodes)
                     let valid_gdrs: Vec<i32> = all_floor1_gdrs
                         .iter()
                         .filter(|&&(_, ni, nj)| jnodes.contains(&ni) && jnodes.contains(&nj))
                         .map(|&(gid, _, _)| gid)
                         .collect();
 
-                    // Find 90-degree girder pairs (use grid index positions — integer, no float signum issues)
                     for gi in 0..valid_gdrs.len() {
                         for gj in (gi + 1)..valid_gdrs.len() {
                             let gid_a = valid_gdrs[gi];
@@ -639,7 +558,6 @@ fn generate_bootstrap_candidates(
                                 all_floor1_gdrs.iter().find(|&&(id, _, _)| id == gid_a),
                                 all_floor1_gdrs.iter().find(|&&(id, _, _)| id == gid_b),
                             ) {
-                                // Use grid positions (xi,yi) to determine direction — avoids float signum issues
                                 let gpos = |nid: i32| -> (i32, i32) {
                                     node_pos
                                         .get(&nid)
@@ -654,10 +572,10 @@ fn generate_bootstrap_candidates(
                                 let db = ((bx2 - bx1).signum(), (by2 - by1).signum());
                                 let dot = da.0 * db.0 + da.1 * db.1;
                                 if dot == 0 {
-                                    // 90-degree pair — valid bundle
-                                    let ids = vec![c_ids[0], c_ids[1], c_ids[2], gid_a, gid_b];
                                     candidates.push(Candidate {
-                                        element_ids: ids,
+                                        element_ids: vec![
+                                            c_ids[0], c_ids[1], c_ids[2], gid_a, gid_b,
+                                        ],
                                         member_count: 5,
                                         connectivity: 0.0,
                                         frontier_dist: 0.0,
@@ -676,15 +594,393 @@ fn generate_bootstrap_candidates(
         }
 
         if !candidates.is_empty() {
-            break; // found valid candidates at this patch radius
+            break;
         }
     }
     candidates
 }
 
-// ============================================================================
-// Weighted random choice
-// ============================================================================
+fn push_pattern_if_valid(
+    choices: &mut Vec<PatternChoice>,
+    seen: &mut HashSet<String>,
+    element_ids: Vec<i32>,
+    pattern: PatternType,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+    threshold: f64,
+) {
+    if contains_forbidden_pattern(&element_ids, grid) {
+        return;
+    }
+    if element_ids.iter().any(|eid| installed_ids.contains(eid)) {
+        return;
+    }
+    let mut unique = HashSet::new();
+    if !element_ids.iter().all(|eid| unique.insert(*eid)) {
+        return;
+    }
+    if !check_bundle_stability(&element_ids, grid, installed_ids) {
+        return;
+    }
+    if !check_upper_floor_constraint(&element_ids, grid, installed_ids, threshold) {
+        return;
+    }
+
+    let key = element_ids
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("-");
+    if seen.insert(key) {
+        choices.push(PatternChoice {
+            element_ids,
+            pattern,
+        });
+    }
+}
+
+fn contains_forbidden_pattern(element_ids: &[i32], grid: &SimGrid) -> bool {
+    let types: Vec<&str> = element_ids
+        .iter()
+        .filter_map(|eid| get_element(grid, *eid).map(|e| e.member_type.as_str()))
+        .collect();
+
+    matches!(
+        types.as_slice(),
+        ["Column", "Column", "Column"] | ["Column", "Column", "Column", "Girder"]
+    )
+}
+
+fn element_floor(element_id: i32, grid: &SimGrid, dz: f64) -> Option<i32> {
+    let elem = get_element(grid, element_id)?;
+    if elem.member_type == "Column" {
+        let (_, _, z) = grid.node_coords(elem.node_i_id)?;
+        Some((z / dz).round() as i32 + 1)
+    } else {
+        let (_, _, z) = grid.node_coords(elem.node_i_id)?;
+        Some(((z / dz).round() as i32).max(1))
+    }
+}
+
+fn uninstalled_adjacent_columns(
+    column_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+) -> Vec<i32> {
+    let floor_zi = get_element(grid, column_id)
+        .and_then(|e| node_pos.get(&e.node_i_id).map(|pos| pos.2))
+        .unwrap_or(0);
+    let mut result: Vec<i32> = grid
+        .adjacent_columns(column_id, floor_zi)
+        .into_iter()
+        .filter(|eid| !installed_ids.contains(eid))
+        .collect();
+    result.sort();
+    result.dedup();
+    result
+}
+
+fn uninstalled_girders_touching_node(
+    node_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+) -> Vec<i32> {
+    let mut result: Vec<i32> = grid
+        .elements
+        .iter()
+        .filter(|e| e.member_type == "Girder")
+        .filter(|e| !installed_ids.contains(&e.id))
+        .filter(|e| e.node_i_id == node_id || e.node_j_id == node_id)
+        .map(|e| e.id)
+        .collect();
+    result.sort();
+    result.dedup();
+    result
+}
+
+fn uninstalled_columns_ending_at_node(
+    node_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+) -> Vec<i32> {
+    let mut result: Vec<i32> = grid
+        .elements
+        .iter()
+        .filter(|e| e.member_type == "Column")
+        .filter(|e| !installed_ids.contains(&e.id))
+        .filter(|e| e.node_j_id == node_id)
+        .map(|e| e.id)
+        .collect();
+    result.sort();
+    result.dedup();
+    result
+}
+
+fn bundle_score(
+    element_ids: &[i32],
+    grid: &SimGrid,
+    installed_nodes: &HashSet<i32>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    w1: f64,
+    w2: f64,
+) -> f64 {
+    let connectivity_sum: usize = element_ids
+        .iter()
+        .map(|eid| element_connectivity(*eid, grid, installed_nodes))
+        .sum();
+    let frontier_dist = element_ids
+        .iter()
+        .map(|eid| element_frontier_dist(*eid, grid, installed_nodes, node_pos))
+        .fold(f64::MAX, f64::min);
+    let dist_score = if frontier_dist.is_finite() {
+        w2 * (1.0 / (frontier_dist + 1.0))
+    } else {
+        0.0
+    };
+    let size_bonus = element_ids.len() as f64 * 0.75;
+    w1 * connectivity_sum as f64 + dist_score + size_bonus
+}
+
+fn try_build_pattern(
+    seed_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+    installed_nodes: &HashSet<i32>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    threshold: f64,
+    w1: f64,
+    w2: f64,
+    rng: &mut u64,
+) -> (Vec<i32>, String) {
+    let Some(seed) = get_element(grid, seed_id) else {
+        return (Vec::new(), PatternType::Col.as_str().to_string());
+    };
+
+    let mut choices: Vec<PatternChoice> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    if seed.member_type == "Girder" {
+        push_pattern_if_valid(
+            &mut choices,
+            &mut seen,
+            vec![seed_id],
+            PatternType::Girder,
+            grid,
+            installed_ids,
+            threshold,
+        );
+
+        let mut second_girders =
+            uninstalled_girders_touching_node(seed.node_i_id, grid, installed_ids);
+        second_girders.extend(uninstalled_girders_touching_node(
+            seed.node_j_id,
+            grid,
+            installed_ids,
+        ));
+        second_girders.sort();
+        second_girders.dedup();
+
+        for g2 in second_girders {
+            if g2 == seed_id {
+                continue;
+            }
+            push_pattern_if_valid(
+                &mut choices,
+                &mut seen,
+                vec![seed_id, g2],
+                PatternType::GirderGirder,
+                grid,
+                installed_ids,
+                threshold,
+            );
+        }
+    } else {
+        push_pattern_if_valid(
+            &mut choices,
+            &mut seen,
+            vec![seed_id],
+            PatternType::Col,
+            grid,
+            installed_ids,
+            threshold,
+        );
+
+        let seed_upper = seed.node_j_id;
+
+        for col2 in uninstalled_adjacent_columns(seed_id, grid, installed_ids, node_pos) {
+            push_pattern_if_valid(
+                &mut choices,
+                &mut seen,
+                vec![seed_id, col2],
+                PatternType::ColCol,
+                grid,
+                installed_ids,
+                threshold,
+            );
+
+            if let Some(col2_elem) = get_element(grid, col2) {
+                if let Some(g1) = grid.girder_between(seed_upper, col2_elem.node_j_id) {
+                    if !installed_ids.contains(&g1) {
+                        push_pattern_if_valid(
+                            &mut choices,
+                            &mut seen,
+                            vec![seed_id, col2, g1],
+                            PatternType::ColColGirder,
+                            grid,
+                            installed_ids,
+                            threshold,
+                        );
+
+                        let mut second_girders =
+                            uninstalled_girders_touching_node(seed_upper, grid, installed_ids);
+                        second_girders.extend(uninstalled_girders_touching_node(
+                            col2_elem.node_j_id,
+                            grid,
+                            installed_ids,
+                        ));
+                        second_girders.sort();
+                        second_girders.dedup();
+
+                        for g2 in second_girders {
+                            if g2 == g1 {
+                                continue;
+                            }
+                            push_pattern_if_valid(
+                                &mut choices,
+                                &mut seen,
+                                vec![seed_id, col2, g1, g2],
+                                PatternType::ColColGirderGirder,
+                                grid,
+                                installed_ids,
+                                threshold,
+                            );
+                        }
+
+                        let mut col3_candidates =
+                            uninstalled_adjacent_columns(seed_id, grid, installed_ids, node_pos);
+                        col3_candidates.extend(uninstalled_adjacent_columns(
+                            col2,
+                            grid,
+                            installed_ids,
+                            node_pos,
+                        ));
+                        col3_candidates.sort();
+                        col3_candidates.dedup();
+
+                        for col3 in col3_candidates {
+                            if col3 == seed_id || col3 == col2 {
+                                continue;
+                            }
+                            if let Some(col3_elem) = get_element(grid, col3) {
+                                for maybe_g2 in [
+                                    grid.girder_between(seed_upper, col3_elem.node_j_id),
+                                    grid.girder_between(col2_elem.node_j_id, col3_elem.node_j_id),
+                                ] {
+                                    if let Some(g2) = maybe_g2 {
+                                        if g2 == g1 || installed_ids.contains(&g2) {
+                                            continue;
+                                        }
+                                        push_pattern_if_valid(
+                                            &mut choices,
+                                            &mut seen,
+                                            vec![seed_id, col2, g1, col3, g2],
+                                            PatternType::ColColGirderColGirder,
+                                            grid,
+                                            installed_ids,
+                                            threshold,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for g1 in uninstalled_girders_touching_node(seed_upper, grid, installed_ids) {
+            push_pattern_if_valid(
+                &mut choices,
+                &mut seen,
+                vec![seed_id, g1],
+                PatternType::ColGirder,
+                grid,
+                installed_ids,
+                threshold,
+            );
+
+            if let Some(g1_elem) = get_element(grid, g1) {
+                if let Some(g1_other_node) = other_node(g1_elem, seed_upper) {
+                    for col2 in
+                        uninstalled_columns_ending_at_node(g1_other_node, grid, installed_ids)
+                    {
+                        push_pattern_if_valid(
+                            &mut choices,
+                            &mut seen,
+                            vec![seed_id, g1, col2],
+                            PatternType::ColGirderCol,
+                            grid,
+                            installed_ids,
+                            threshold,
+                        );
+                    }
+
+                    let mut second_girders =
+                        uninstalled_girders_touching_node(seed_upper, grid, installed_ids);
+                    second_girders.extend(uninstalled_girders_touching_node(
+                        g1_other_node,
+                        grid,
+                        installed_ids,
+                    ));
+                    second_girders.sort();
+                    second_girders.dedup();
+                    for g2 in second_girders {
+                        if g2 == g1 {
+                            continue;
+                        }
+                        push_pattern_if_valid(
+                            &mut choices,
+                            &mut seen,
+                            vec![seed_id, g1, g2],
+                            PatternType::ColGirderGirder,
+                            grid,
+                            installed_ids,
+                            threshold,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if choices.is_empty() {
+        return if seed.member_type == "Girder" {
+            (vec![seed_id], PatternType::Girder.as_str().to_string())
+        } else {
+            (vec![seed_id], PatternType::Col.as_str().to_string())
+        };
+    }
+
+    let max_len = choices
+        .iter()
+        .map(|c| c.element_ids.len())
+        .max()
+        .unwrap_or(1);
+    let longest: Vec<&PatternChoice> = choices
+        .iter()
+        .filter(|choice| choice.element_ids.len() == max_len)
+        .collect();
+    let scores: Vec<f64> = longest
+        .iter()
+        .map(|choice| bundle_score(&choice.element_ids, grid, installed_nodes, node_pos, w1, w2))
+        .collect();
+    let chosen = longest[weighted_random_choice(&scores, rng)];
+    (
+        chosen.element_ids.clone(),
+        chosen.pattern.as_str().to_string(),
+    )
+}
 
 /// Simple linear-scan weighted random choice using a pre-seeded LCG.
 pub fn weighted_random_choice(scores: &[f64], rng_state: &mut u64) -> usize {
@@ -707,11 +1003,14 @@ pub fn weighted_random_choice(scores: &[f64], rng_state: &mut u64) -> usize {
     scores.len() - 1
 }
 
-// ============================================================================
-// Single scenario runner
-// ============================================================================
+fn last_sequence_number(steps: &[SimStep]) -> usize {
+    steps
+        .last()
+        .and_then(|step| step.sequences.last())
+        .map(|seq: &SimSequence| seq.sequence_number)
+        .unwrap_or(0)
+}
 
-/// Run one simulation scenario. Returns a SimScenario.
 pub fn run_scenario(
     scenario_id: usize,
     grid: &SimGrid,
@@ -720,7 +1019,7 @@ pub fn run_scenario(
     weights: (f64, f64, f64),
     threshold: f64,
 ) -> SimScenario {
-    let (w1, w2, _w3) = weights;
+    let (w1, w2, w3) = weights;
     let mut rng = seed;
 
     let mut installed_ids: HashSet<i32> = HashSet::new();
@@ -731,7 +1030,6 @@ pub fn run_scenario(
     let node_pos = build_node_pos(grid);
     let dz = grid_dz(grid);
 
-    // Early termination counters
     let mut consecutive_upper_floor_violations = 0u32;
     let mut consecutive_no_candidates = 0u32;
     let mut global_step_count = 0u32;
@@ -748,11 +1046,9 @@ pub fn run_scenario(
             break TerminationReason::NoCandidates;
         }
 
-        // Round-robin workfronts
         let wf_idx = ((global_step_count - 1) as usize) % workfronts.len();
         let wf = &workfronts[wf_idx];
 
-        // ── Bootstrap: first step installs minimum assembly ──────────────
         if installed_ids.is_empty() {
             let bootstrap = generate_bootstrap_candidates(wf, grid, &node_pos);
             let valid: Vec<&Candidate> = bootstrap
@@ -770,45 +1066,38 @@ pub fn run_scenario(
             }
             consecutive_no_candidates = 0;
 
-            let scores: Vec<f64> = valid.iter().map(|c| c.score(w1, w2, _w3)).collect();
-            let chosen_idx = weighted_random_choice(&scores, &mut rng);
-            let chosen = valid[chosen_idx];
+            let scores: Vec<f64> = valid.iter().map(|c| c.score(w1, w2, w3)).collect();
+            let chosen = valid[weighted_random_choice(&scores, &mut rng)];
 
             let step_floor = chosen
                 .element_ids
                 .iter()
-                .find_map(|eid| {
-                    let e = grid.elements.iter().find(|e| e.id == *eid)?;
-                    if e.member_type == "Column" {
-                        let (_, _, z) = grid.node_coords(e.node_i_id)?;
-                        Some((z / dz).round() as i32 + 1)
-                    } else {
-                        None
-                    }
-                })
+                .find_map(|eid| element_floor(*eid, grid, dz))
                 .unwrap_or(1);
 
-            let added = chosen.element_ids.len();
-            for eid in &chosen.element_ids {
+            let step = SimStep::from_elements(
+                wf.id,
+                chosen.element_ids.clone(),
+                step_floor,
+                PatternType::Bootstrap.as_str(),
+                last_sequence_number(&steps) + 1,
+            );
+
+            for eid in &step.element_ids {
                 installed_ids.insert(*eid);
-                if let Some(e) = grid.elements.iter().find(|e| e.id == *eid) {
+                if let Some(e) = get_element(grid, *eid) {
                     installed_nodes.insert(e.node_i_id);
                     installed_nodes.insert(e.node_j_id);
                 }
             }
-            steps.push(SimStep {
-                workfront_id: wf.id,
-                element_ids: chosen.element_ids.clone(),
-                floor: step_floor,
-            });
-            members_added_last_300.push(added);
+
+            members_added_last_300.push(step.element_ids.len());
+            steps.push(step);
             continue;
         }
 
-        // ── Normal step: select one element from frontier ─────────────────
         let candidates =
             collect_single_candidates(wf, grid, &installed_ids, &installed_nodes, &node_pos);
-
         if candidates.is_empty() {
             consecutive_no_candidates += 1;
             members_added_last_300.push(0);
@@ -819,13 +1108,11 @@ pub fn run_scenario(
         }
         consecutive_no_candidates = 0;
 
-        // Filter: stability
         let after_stability: Vec<&SingleCandidate> = candidates
             .iter()
             .filter(|c| check_single_stability(c.element_id, grid, &installed_ids))
             .collect();
 
-        // Filter: upper-floor constraint
         let valid: Vec<&&SingleCandidate> = after_stability
             .iter()
             .filter(|c| {
@@ -835,7 +1122,6 @@ pub fn run_scenario(
 
         if valid.is_empty() {
             if !after_stability.is_empty() {
-                // Stability OK but upper-floor blocked all
                 consecutive_upper_floor_violations += 1;
                 if consecutive_upper_floor_violations >= 3 {
                     break TerminationReason::UpperFloorViolation;
@@ -852,38 +1138,52 @@ pub fn run_scenario(
         consecutive_upper_floor_violations = 0;
 
         let scores: Vec<f64> = valid.iter().map(|c| c.score(w1, w2)).collect();
-        let chosen_idx = weighted_random_choice(&scores, &mut rng);
-        let chosen = valid[chosen_idx];
+        let chosen_seed = valid[weighted_random_choice(&scores, &mut rng)].element_id;
+        let (element_ids, pattern) = try_build_pattern(
+            chosen_seed,
+            grid,
+            &installed_ids,
+            &installed_nodes,
+            &node_pos,
+            threshold,
+            w1,
+            w2,
+            &mut rng,
+        );
 
-        // Determine floor
-        let step_floor = {
-            let e = grid.elements.iter().find(|e| e.id == chosen.element_id);
-            match e {
-                Some(e) if e.member_type == "Column" => {
-                    let (_, _, z) = grid.node_coords(e.node_i_id).unwrap_or((0.0, 0.0, 0.0));
-                    (z / dz).round() as i32 + 1
-                }
-                _ => steps.last().map(|s| s.floor).unwrap_or(1),
+        let step_floor = element_ids
+            .iter()
+            .find(|eid| is_column(grid, **eid))
+            .and_then(|eid| element_floor(*eid, grid, dz))
+            .or_else(|| {
+                element_ids
+                    .first()
+                    .and_then(|eid| element_floor(*eid, grid, dz))
+            })
+            .unwrap_or_else(|| steps.last().map(|s| s.floor).unwrap_or(1));
+
+        let step = SimStep::from_elements(
+            wf.id,
+            element_ids,
+            step_floor,
+            pattern,
+            last_sequence_number(&steps) + 1,
+        );
+
+        for eid in &step.element_ids {
+            installed_ids.insert(*eid);
+            if let Some(e) = get_element(grid, *eid) {
+                installed_nodes.insert(e.node_i_id);
+                installed_nodes.insert(e.node_j_id);
             }
-        };
-
-        // Install
-        installed_ids.insert(chosen.element_id);
-        if let Some(e) = grid.elements.iter().find(|e| e.id == chosen.element_id) {
-            installed_nodes.insert(e.node_i_id);
-            installed_nodes.insert(e.node_j_id);
         }
-        steps.push(SimStep {
-            workfront_id: wf.id,
-            element_ids: vec![chosen.element_id],
-            floor: step_floor,
-        });
-        members_added_last_300.push(1);
+
+        members_added_last_300.push(step.element_ids.len());
         if members_added_last_300.len() > 300 {
             members_added_last_300.remove(0);
         }
+        steps.push(step);
 
-        // No-progress check
         if global_step_count >= 300 {
             let recent_sum: usize = members_added_last_300.iter().sum();
             if recent_sum < 3 {
@@ -891,13 +1191,11 @@ pub fn run_scenario(
             }
         }
 
-        // Safety guard
         if global_step_count as usize >= total_elements * 10 + 1000 {
             break TerminationReason::MaxIterations;
         }
     };
 
-    // ── Metrics ───────────────────────────────────────────────────────────
     let total_steps = steps.len();
     let total_members: usize = steps.iter().map(|s| s.element_ids.len()).sum();
     let avg_members_per_step = if total_steps > 0 {
@@ -906,26 +1204,24 @@ pub fn run_scenario(
         0.0
     };
 
-    let avg_connectivity = {
-        if steps.is_empty() {
-            0.0
-        } else {
-            let mut cumulative: HashSet<i32> = HashSet::new();
-            let total_conn: f64 = steps
-                .iter()
-                .map(|step| {
-                    let conn = count_shared_nodes(&step.element_ids, grid, &cumulative) as f64;
-                    for eid in &step.element_ids {
-                        if let Some(e) = grid.elements.iter().find(|e| e.id == *eid) {
-                            cumulative.insert(e.node_i_id);
-                            cumulative.insert(e.node_j_id);
-                        }
+    let avg_connectivity = if steps.is_empty() {
+        0.0
+    } else {
+        let mut cumulative: HashSet<i32> = HashSet::new();
+        let total_conn: f64 = steps
+            .iter()
+            .map(|step| {
+                let conn = count_shared_nodes(&step.element_ids, grid, &cumulative) as f64;
+                for eid in &step.element_ids {
+                    if let Some(e) = get_element(grid, *eid) {
+                        cumulative.insert(e.node_i_id);
+                        cumulative.insert(e.node_j_id);
                     }
-                    conn
-                })
-                .sum();
-            total_conn / total_steps as f64
-        }
+                }
+                conn
+            })
+            .sum();
+        total_conn / total_steps as f64
     };
 
     SimScenario {
@@ -941,10 +1237,6 @@ pub fn run_scenario(
         },
     }
 }
-
-// ============================================================================
-// All scenarios runner
-// ============================================================================
 
 pub fn run_all_scenarios(
     count: usize,
@@ -963,10 +1255,6 @@ pub fn run_all_scenarios(
     scenarios.sort_by_key(|s| s.id);
     scenarios
 }
-
-// ============================================================================
-// Unit tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1018,6 +1306,24 @@ mod tests {
     }
 
     #[test]
+    fn test_forbidden_pattern_detection() {
+        let grid = make_grid_2x2x2();
+        assert!(contains_forbidden_pattern(&[1, 2, 3], &grid));
+        assert!(!contains_forbidden_pattern(&[1, 2], &grid));
+    }
+
+    #[test]
+    fn test_sim_step_sequences_are_global_and_aligned() {
+        let step = SimStep::from_elements(1, vec![7, 9, 11], 2, "ColGirderGirder", 4);
+        assert_eq!(step.pattern, "ColGirderGirder");
+        assert_eq!(step.element_ids, vec![7, 9, 11]);
+        assert_eq!(step.sequences.len(), 3);
+        assert_eq!(step.sequences[0].element_id, 7);
+        assert_eq!(step.sequences[0].sequence_number, 4);
+        assert_eq!(step.sequences[2].sequence_number, 6);
+    }
+
+    #[test]
     fn test_run_scenario_2x2x2() {
         let grid = make_grid_2x2x2();
         let wfs = make_workfronts_2x2();
@@ -1026,6 +1332,13 @@ mod tests {
             for eid in &step.element_ids {
                 assert!(*eid >= 1, "element ID should be >= 1");
             }
+            assert_eq!(
+                step.element_ids,
+                step.sequences
+                    .iter()
+                    .map(|s| s.element_id)
+                    .collect::<Vec<_>>()
+            );
         }
     }
 
@@ -1057,7 +1370,20 @@ mod tests {
         assert_eq!(ids, vec![1, 2, 3]);
     }
 
-    /// Center workfront (1,2) on 4×4×3 grid — must also produce steps.
+    #[test]
+    fn test_sequence_numbers_increase_across_steps() {
+        let grid = make_grid_2x2x2();
+        let wfs = make_workfronts_2x2();
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.3);
+        let numbers: Vec<usize> = scenario
+            .steps
+            .iter()
+            .flat_map(|step| step.sequences.iter().map(|s| s.sequence_number))
+            .collect();
+        let expected: Vec<usize> = (1..=numbers.len()).collect();
+        assert_eq!(numbers, expected);
+    }
+
     #[test]
     fn test_run_scenario_center_workfront() {
         let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
@@ -1074,7 +1400,6 @@ mod tests {
         );
     }
 
-    /// Default grid (4×4×3) — must finish quickly and install all or most elements.
     #[test]
     fn test_run_scenario_default_grid_4x4x3() {
         let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
@@ -1083,22 +1408,9 @@ mod tests {
             grid_x: 0,
             grid_y: 0,
         }];
-        println!(
-            "4×4×3 grid: nodes={}, elements={}",
-            grid.nodes.len(),
-            grid.elements.len()
-        );
         let t0 = std::time::Instant::now();
         let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.3);
         let elapsed = t0.elapsed();
-        println!(
-            "Scenario result: steps={}, members={}/{}, termination={:?}, elapsed={:.2?}",
-            scenario.metrics.total_steps,
-            scenario.metrics.total_members_installed,
-            grid.elements.len(),
-            scenario.metrics.termination_reason,
-            elapsed,
-        );
         assert!(
             scenario.metrics.total_steps >= 1,
             "should produce at least 1 step"

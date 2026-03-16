@@ -81,6 +81,15 @@ pub struct ScenarioMetrics {
     pub termination_reason: TerminationReason,
 }
 
+/// A single element installation entry in the global sequence order
+#[derive(Clone, Debug)]
+pub struct SimSequence {
+    /// Element ID installed at this sequence position (1-indexed element ID)
+    pub element_id: i32,
+    /// Global sequence number across the whole scenario (1-indexed)
+    pub sequence_number: usize,
+}
+
 /// A single step in a simulation scenario
 #[derive(Clone, Debug)]
 pub struct SimStep {
@@ -88,8 +97,40 @@ pub struct SimStep {
     pub workfront_id: i32,
     /// Element IDs installed in this step (1-indexed)
     pub element_ids: Vec<i32>,
+    /// Individual sequence entries contained in this step
+    pub sequences: Vec<SimSequence>,
     /// Floor level of this step
     pub floor: i32,
+    /// Pattern name used for this grouped step
+    pub pattern: String,
+}
+
+impl SimStep {
+    /// Build a step and auto-generate global sequence entries.
+    pub fn from_elements(
+        workfront_id: i32,
+        element_ids: Vec<i32>,
+        floor: i32,
+        pattern: impl Into<String>,
+        start_seq: usize,
+    ) -> Self {
+        let sequences = element_ids
+            .iter()
+            .enumerate()
+            .map(|(offset, &element_id)| SimSequence {
+                element_id,
+                sequence_number: start_seq + offset,
+            })
+            .collect();
+
+        Self {
+            workfront_id,
+            element_ids,
+            sequences,
+            floor,
+            pattern: pattern.into(),
+        }
+    }
 }
 
 /// A complete simulation scenario (one sequence of steps)

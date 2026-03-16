@@ -238,7 +238,7 @@ impl AssyPlanApp {
                     }
                 }
             }
-            None => {
+            Option::None => {
                 errors.push(format!(
                     "Line {}: Missing {} coordinate",
                     line_num, col_name
@@ -1473,6 +1473,39 @@ impl eframe::App for AssyPlanApp {
                                         .unwrap_or((0, None));
 
                                     ui.horizontal(|ui| {
+                                        let scenario_count = self.ui_state.sim_scenarios.len();
+                                        if scenario_count > 0 {
+                                            if self.ui_state.sim_selected_scenario.is_none() {
+                                                self.ui_state.sim_selected_scenario = Some(0);
+                                            }
+                                            let current_label = self
+                                                .ui_state
+                                                .sim_selected_scenario
+                                                .map(|i| format!("시나리오 {}", i + 1))
+                                                .unwrap_or_else(|| "선택...".to_string());
+                                            egui::ComboBox::from_id_source("sim_scenario_select")
+                                                .selected_text(&current_label)
+                                                .width(120.0)
+                                                .show_ui(ui, |ui| {
+                                                    for i in 0..scenario_count {
+                                                        let label = format!("시나리오 {}", i + 1);
+                                                        let selected =
+                                                            self.ui_state.sim_selected_scenario
+                                                                == Some(i);
+                                                        if ui
+                                                            .selectable_label(selected, &label)
+                                                            .clicked()
+                                                        {
+                                                            self.ui_state.sim_selected_scenario =
+                                                                Some(i);
+                                                            self.ui_state.sim_current_step = 1;
+                                                            self.ui_state.sim_playing = false;
+                                                        }
+                                                    }
+                                                });
+                                            ui.separator();
+                                        }
+
                                         // Prev
                                         if ui
                                             .add_enabled(
@@ -1548,11 +1581,6 @@ impl eframe::App for AssyPlanApp {
                                             ctx.request_repaint();
                                         }
                                     }
-                                    // Restore full rect for 3D rendering
-                                    let resp2 = ui.allocate_rect(
-                                        rect_3d,
-                                        egui::Sense::hover(),
-                                    );
                                     if let Some(ref grid) = self.sim_grid {
                                         // Render using a painter at the full 3D panel rect
                                         let painter = ui.painter_at(rect_3d);
@@ -1613,7 +1641,7 @@ impl eframe::App for AssyPlanApp {
                                             .collect();
 
                                         // Ghost (uninstalled)
-                                        let ghost = egui::Color32::from_gray(38);
+                                        let ghost = egui::Color32::from_gray(90);
                                         for e in &grid.elements {
                                             if installed_ids.contains(&e.id) {
                                                 continue;
@@ -1756,7 +1784,6 @@ impl eframe::App for AssyPlanApp {
                                             egui::FontId::proportional(9.0),
                                             egui::Color32::from_gray(180),
                                         );
-                                        let _ = resp2;
                                     }
                                 });
                         }
@@ -1887,6 +1914,10 @@ impl eframe::App for AssyPlanApp {
                                         // Uses step_render_data.base for transform (same as Step mode)
                                         if let Some(ref mut data) = self.render_data {
                                             data.calculate_transform(rect, &self.view_state);
+                                            let mut shown_element_ids =
+                                                std::collections::HashSet::new();
+                                            let mut shown_node_ids =
+                                                std::collections::HashSet::new();
 
                                             // Use step_render_data for rendering with sequence mode
                                             if let Some(ref mut step_data) = self.step_render_data {
@@ -1895,6 +1926,30 @@ impl eframe::App for AssyPlanApp {
                                                 step_data
                                                     .base
                                                     .calculate_transform(rect, &self.view_state);
+
+                                                let total = if !step_data.sequence_order.is_empty() {
+                                                    step_data.sequence_order.len()
+                                                } else {
+                                                    step_data.base.elements.len()
+                                                };
+                                                let max_pos = self
+                                                    .ui_state
+                                                    .current_sequence
+                                                    .min(total);
+                                                for pos in 0..max_pos {
+                                                    let elem_idx = if !step_data.sequence_order.is_empty() {
+                                                        step_data.sequence_order[pos]
+                                                    } else {
+                                                        pos
+                                                    };
+                                                    if let Some(element) =
+                                                        step_data.base.elements.get(elem_idx)
+                                                    {
+                                                        shown_element_ids.insert(element.id);
+                                                        shown_node_ids.insert(element.node_i_id);
+                                                        shown_node_ids.insert(element.node_j_id);
+                                                    }
+                                                }
 
                                                 step_data.render_sequence(
                                                     &painter,
@@ -1933,6 +1988,9 @@ impl eframe::App for AssyPlanApp {
                                                 && self.ui_state.show_nodes
                                             {
                                                 for node in &data.nodes {
+                                                    if !shown_node_ids.contains(&node.id) {
+                                                        continue;
+                                                    }
                                                     let pos = data.project_to_2d(
                                                         node.x,
                                                         node.y,
@@ -1957,6 +2015,9 @@ impl eframe::App for AssyPlanApp {
                                                 && self.ui_state.show_elements
                                             {
                                                 for element in &data.elements {
+                                                    if !shown_element_ids.contains(&element.id) {
+                                                        continue;
+                                                    }
                                                     let node_i = data
                                                         .nodes
                                                         .iter()
@@ -1994,6 +2055,23 @@ impl eframe::App for AssyPlanApp {
                                         if let Some(ref mut step_data) = self.step_render_data {
                                             // Sync current step from UI state to step_render_data
                                             step_data.set_current_step(self.ui_state.current_step);
+                                            let cumulative_indices =
+                                                step_data.get_cumulative_elements(
+                                                    self.ui_state.current_step,
+                                                );
+                                            let mut shown_element_ids =
+                                                std::collections::HashSet::new();
+                                            let mut shown_node_ids =
+                                                std::collections::HashSet::new();
+                                            for idx in cumulative_indices {
+                                                if let Some(element) =
+                                                    step_data.base.elements.get(idx)
+                                                {
+                                                    shown_element_ids.insert(element.id);
+                                                    shown_node_ids.insert(element.node_i_id);
+                                                    shown_node_ids.insert(element.node_j_id);
+                                                }
+                                            }
 
                                             // Calculate transform using base render data
                                             step_data
@@ -2027,6 +2105,9 @@ impl eframe::App for AssyPlanApp {
                                                 && self.ui_state.show_nodes
                                             {
                                                 for node in &step_data.base.nodes {
+                                                    if !shown_node_ids.contains(&node.id) {
+                                                        continue;
+                                                    }
                                                     let pos = step_data.base.project_to_2d(
                                                         node.x,
                                                         node.y,
@@ -2051,6 +2132,9 @@ impl eframe::App for AssyPlanApp {
                                                 && self.ui_state.show_elements
                                             {
                                                 for element in &step_data.base.elements {
+                                                    if !shown_element_ids.contains(&element.id) {
+                                                        continue;
+                                                    }
                                                     let node_i = step_data
                                                         .base
                                                         .nodes

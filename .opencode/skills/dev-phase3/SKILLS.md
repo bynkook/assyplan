@@ -213,10 +213,24 @@ pub struct ScenarioMetrics {
     pub termination_reason: TerminationReason,
 }
 
+// SimSequence — individual element within a step (1-indexed globally)
+pub struct SimSequence {
+    pub element_id: i32,
+    pub sequence_number: usize,  // 1-indexed, global across all steps
+}
+
+// SimStep — one pattern-based installation unit
 pub struct SimStep {
     pub workfront_id: i32,
-    pub element_ids: Vec<i32>,
+    pub element_ids: Vec<i32>,       // backward compat (= sequences.iter().map(|s| s.element_id))
+    pub sequences: Vec<SimSequence>, // individual sequence entries within this step
     pub floor: i32,
+    pub pattern: String,             // e.g. "ColCol", "ColGirder", "Bootstrap", etc.
+}
+
+impl SimStep {
+    /// Helper: build from element_ids + pattern, auto-generating sequences
+    pub fn from_elements(workfront_id, element_ids, floor, pattern, start_seq) -> SimStep
 }
 
 pub struct SimScenario {
