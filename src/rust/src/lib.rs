@@ -1451,28 +1451,45 @@ impl eframe::App for AssyPlanApp {
                                 .default_height(340.0)
                                 .min_height(100.0)
                                 .show_inside(ui, |ui| {
-                                    // ── Step navigation bar ───────────────────────────────
-                                    let (max_step, step_info) = self
+                                    // ── Step / Sequence navigation bar ────────────────────
+                                    let (max_step, step_info, max_sequence, seq_info) = self
                                         .ui_state
                                         .sim_selected_scenario
                                         .and_then(|idx| self.ui_state.sim_scenarios.get(idx))
                                         .map(|scenario| {
                                             let ms = scenario.steps.len();
                                             let step_disp = self.ui_state.sim_current_step.min(ms).max(1);
-                                            let info = scenario.steps.get(step_disp - 1).map(|s| {
+                                            let step_info = scenario.steps.get(step_disp - 1).map(|s| {
                                                 format!(
-                                                    "WF {}  •  Floor {}  •  {} member(s): {:?}",
+                                                    "WF {}  •  Floor {}  •  {} member(s): {:?}  •  Pattern: {}",
                                                     s.workfront_id,
                                                     s.floor,
                                                     s.element_ids.len(),
-                                                    s.element_ids
+                                                    s.element_ids,
+                                                    s.pattern,
                                                 )
                                             });
-                                            (ms, info)
+                                            // Compute max sequence number across all steps
+                                            let max_seq: usize = scenario.steps.iter()
+                                                .flat_map(|s| s.sequences.iter())
+                                                .map(|seq| seq.sequence_number)
+                                                .max()
+                                                .unwrap_or(0);
+                                            // Info for current sequence position
+                                            let cur_seq = self.ui_state.sim_current_sequence;
+                                            let seq_info = scenario.steps.iter()
+                                                .flat_map(|s| s.sequences.iter())
+                                                .find(|seq| seq.sequence_number == cur_seq)
+                                                .map(|seq| format!(
+                                                    "Seq {} / {}  •  Element #{}",
+                                                    cur_seq, max_seq, seq.element_id
+                                                ));
+                                            (ms, step_info, max_seq, seq_info)
                                         })
-                                        .unwrap_or((0, None));
+                                        .unwrap_or((0, None, 0, None));
 
                                     ui.horizontal(|ui| {
+                                        // ── Scenario ComboBox ─────────────────────────────
                                         let scenario_count = self.ui_state.sim_scenarios.len();
                                         if scenario_count > 0 {
                                             if self.ui_state.sim_selected_scenario.is_none() {
@@ -1499,6 +1516,7 @@ impl eframe::App for AssyPlanApp {
                                                             self.ui_state.sim_selected_scenario =
                                                                 Some(i);
                                                             self.ui_state.sim_current_step = 1;
+                                                            self.ui_state.sim_current_sequence = 1;
                                                             self.ui_state.sim_playing = false;
                                                         }
                                                     }
@@ -1506,61 +1524,124 @@ impl eframe::App for AssyPlanApp {
                                             ui.separator();
                                         }
 
-                                        // Prev
-                                        if ui
-                                            .add_enabled(
-                                                self.ui_state.sim_current_step > 1,
-                                                egui::Button::new("◀"),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.ui_state.sim_current_step =
-                                                self.ui_state.sim_current_step.saturating_sub(1).max(1);
-                                            self.ui_state.sim_playing = false;
+                                        // ── Step / Sequence mode toggle ───────────────────
+                                        let in_seq_mode = self.ui_state.sim_nav_sequence_mode;
+                                        if ui.selectable_label(!in_seq_mode, "Step").clicked() {
+                                            self.ui_state.sim_nav_sequence_mode = false;
                                         }
-                                        // Slider
-                                        if max_step > 0 {
-                                            ui.add(
-                                                egui::Slider::new(
-                                                    &mut self.ui_state.sim_current_step,
-                                                    1..=max_step,
+                                        if ui.selectable_label(in_seq_mode, "Seq").clicked() {
+                                            self.ui_state.sim_nav_sequence_mode = true;
+                                        }
+                                        ui.separator();
+
+                                        if !self.ui_state.sim_nav_sequence_mode {
+                                            // ── Step mode ◀ slider ▶ ─────────────────────
+                                            if ui
+                                                .add_enabled(
+                                                    self.ui_state.sim_current_step > 1,
+                                                    egui::Button::new("◀"),
                                                 )
-                                                .text("Step")
-                                                .clamp_to_range(true),
+                                                .clicked()
+                                            {
+                                                self.ui_state.sim_current_step =
+                                                    self.ui_state.sim_current_step.saturating_sub(1).max(1);
+                                                self.ui_state.sim_playing = false;
+                                            }
+                                            if max_step > 0 {
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut self.ui_state.sim_current_step,
+                                                        1..=max_step,
+                                                    )
+                                                    .text("Step")
+                                                    .clamp_to_range(true),
+                                                );
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    max_step > 0
+                                                        && self.ui_state.sim_current_step < max_step,
+                                                    egui::Button::new("▶"),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.ui_state.sim_current_step =
+                                                    (self.ui_state.sim_current_step + 1).min(max_step);
+                                                self.ui_state.sim_playing = false;
+                                            }
+                                            ui.separator();
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} / {}",
+                                                    self.ui_state.sim_current_step.min(max_step.max(1)),
+                                                    max_step
+                                                ))
+                                                .strong(),
+                                            );
+                                        } else {
+                                            // ── Sequence mode ◀ slider ▶ ─────────────────
+                                            if ui
+                                                .add_enabled(
+                                                    self.ui_state.sim_current_sequence > 1,
+                                                    egui::Button::new("◀"),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.ui_state.sim_current_sequence =
+                                                    self.ui_state.sim_current_sequence.saturating_sub(1).max(1);
+                                            }
+                                            if max_sequence > 0 {
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut self.ui_state.sim_current_sequence,
+                                                        1..=max_sequence,
+                                                    )
+                                                    .text("Seq")
+                                                    .clamp_to_range(true),
+                                                );
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    max_sequence > 0
+                                                        && self.ui_state.sim_current_sequence < max_sequence,
+                                                    egui::Button::new("▶"),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.ui_state.sim_current_sequence =
+                                                    (self.ui_state.sim_current_sequence + 1).min(max_sequence);
+                                            }
+                                            ui.separator();
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} / {}",
+                                                    self.ui_state.sim_current_sequence.min(max_sequence.max(1)),
+                                                    max_sequence
+                                                ))
+                                                .strong(),
                                             );
                                         }
-                                        // Next
-                                        if ui
-                                            .add_enabled(
-                                                max_step > 0
-                                                    && self.ui_state.sim_current_step < max_step,
-                                                egui::Button::new("▶"),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.ui_state.sim_current_step =
-                                                (self.ui_state.sim_current_step + 1).min(max_step);
-                                            self.ui_state.sim_playing = false;
-                                        }
-                                        // Step counter
-                                        ui.separator();
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{} / {}",
-                                                self.ui_state.sim_current_step.min(max_step.max(1)),
-                                                max_step
-                                            ))
-                                            .strong(),
-                                        );
                                     });
 
-                                    // Step detail (floor / workfront / member list)
-                                    if let Some(info) = step_info {
-                                        ui.label(
-                                            egui::RichText::new(info)
-                                                .size(10.0)
-                                                .color(egui::Color32::from_rgb(160, 210, 255)),
-                                        );
+                                    // Detail line below the nav bar
+                                    if !self.ui_state.sim_nav_sequence_mode {
+                                        // Step detail (floor / workfront / member list / pattern)
+                                        if let Some(info) = step_info {
+                                            ui.label(
+                                                egui::RichText::new(info)
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(160, 210, 255)),
+                                            );
+                                        }
+                                    } else {
+                                        // Sequence detail (element id)
+                                        if let Some(info) = seq_info {
+                                            ui.label(
+                                                egui::RichText::new(info)
+                                                    .size(10.0)
+                                                    .color(egui::Color32::from_rgb(180, 255, 200)),
+                                            );
+                                        }
                                     }
 
                                     ui.separator();
@@ -1594,14 +1675,26 @@ impl eframe::App for AssyPlanApp {
                                                 self.ui_state.sim_scenarios.get(idx)
                                             })
                                             .map(|scenario| {
-                                                let steps_to_show = self
-                                                    .ui_state
-                                                    .sim_current_step
-                                                    .min(scenario.steps.len());
-                                                scenario.steps[..steps_to_show]
-                                                    .iter()
-                                                    .flat_map(|s| s.element_ids.iter().copied())
-                                                    .collect()
+                                                if !self.ui_state.sim_nav_sequence_mode {
+                                                    // Step mode: show elements up to sim_current_step
+                                                    let steps_to_show = self
+                                                        .ui_state
+                                                        .sim_current_step
+                                                        .min(scenario.steps.len());
+                                                    scenario.steps[..steps_to_show]
+                                                        .iter()
+                                                        .flat_map(|s| s.element_ids.iter().copied())
+                                                        .collect()
+                                                } else {
+                                                    // Sequence mode: show individual members whose
+                                                    // sequence_number <= sim_current_sequence
+                                                    let cur_seq = self.ui_state.sim_current_sequence;
+                                                    scenario.steps.iter()
+                                                        .flat_map(|s| s.sequences.iter())
+                                                        .filter(|seq| seq.sequence_number <= cur_seq)
+                                                        .map(|seq| seq.element_id)
+                                                        .collect()
+                                                }
                                             })
                                             .unwrap_or_default();
 

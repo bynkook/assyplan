@@ -272,6 +272,10 @@ pub struct UiState {
     pub sim_export_requested: bool,
     /// Last export status message (shown in UI after export)
     pub sim_export_status: String,
+    /// Navigation mode in sim 3D view: true = Sequence mode, false = Step mode
+    pub sim_nav_sequence_mode: bool,
+    /// Current sequence position in Sequence nav mode (1-indexed, global across all steps)
+    pub sim_current_sequence: usize,
 }
 
 impl UiState {
@@ -321,6 +325,8 @@ impl UiState {
             sim_scenario_count: 2,
             sim_export_requested: false,
             sim_export_status: String::new(),
+            sim_nav_sequence_mode: false,
+            sim_current_sequence: 1,
         }
     }
 
@@ -365,6 +371,8 @@ impl UiState {
         self.sim_running = false;
         self.sim_export_requested = false;
         self.sim_export_status.clear();
+        self.sim_nav_sequence_mode = false;
+        self.sim_current_sequence = 1;
     }
 
     /// Set step data from Python step table
