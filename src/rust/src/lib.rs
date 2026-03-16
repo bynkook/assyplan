@@ -1093,23 +1093,41 @@ impl eframe::App for AssyPlanApp {
 
                 // Display mode toggle (Model / Construction)
                 ui.label("Display:");
-                ui.selectable_value(
-                    &mut self.ui_state.display_mode,
-                    graphics::DisplayMode::Model,
-                    "Model",
-                );
-                let construction_enabled = self.ui_state.has_data;
-                if ui
-                    .add_enabled(
-                        construction_enabled,
-                        egui::SelectableLabel::new(
-                            self.ui_state.display_mode == graphics::DisplayMode::Construction,
-                            "Construction",
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.ui_state.display_mode = graphics::DisplayMode::Construction;
+                if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
+                    // In Simulation mode: Model/Construction controls sim_view_is_model only.
+                    // display_mode must stay as Simulation.
+                    if ui
+                        .selectable_label(self.ui_state.sim_view_is_model, "Model")
+                        .clicked()
+                    {
+                        self.ui_state.sim_view_is_model = true;
+                    }
+                    if ui
+                        .selectable_label(!self.ui_state.sim_view_is_model, "Construction")
+                        .clicked()
+                    {
+                        self.ui_state.sim_view_is_model = false;
+                    }
+                } else {
+                    // Development mode: Model/Construction change display_mode as before.
+                    ui.selectable_value(
+                        &mut self.ui_state.display_mode,
+                        graphics::DisplayMode::Model,
+                        "Model",
+                    );
+                    let construction_enabled = self.ui_state.has_data;
+                    if ui
+                        .add_enabled(
+                            construction_enabled,
+                            egui::SelectableLabel::new(
+                                self.ui_state.display_mode == graphics::DisplayMode::Construction,
+                                "Construction",
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.ui_state.display_mode = graphics::DisplayMode::Construction;
+                    }
                 }
 
                 ui.separator();
@@ -1438,17 +1456,6 @@ impl eframe::App for AssyPlanApp {
                 "View" => {
                     // Simulation mode has its own view (grid plan), independent of render_data
                     if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
-                        // Model / Construction sub-mode toggle (always visible)
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(!self.ui_state.sim_view_is_model, "Construction").clicked() {
-                                self.ui_state.sim_view_is_model = false;
-                            }
-                            if ui.selectable_label(self.ui_state.sim_view_is_model, "Model").clicked() {
-                                self.ui_state.sim_view_is_model = true;
-                            }
-                        });
-                        ui.separator();
-
                         // When a grid + selected scenario exist: split view
                         // - bottom panel: 3D render of installed elements (orbit/zoom via view_state)
                         // - remaining area: 2D grid plan with workfront click handling
