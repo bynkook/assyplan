@@ -362,6 +362,30 @@ When `render_sim_settings` detects config change, it clears `sim_workfronts` and
 ### Unused `GridConfig` import warning
 `sim_ui.rs` imports `GridConfig` but doesn't use it directly (accessed via `state.grid_config`). This is a pre-existing warning — do not suppress with `#[allow(unused_imports)]`, fix by removing the import if refactoring.
 
+### console build cfg_attr (`main.rs`)
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]
+```
+This allows users to see `println!` debug output even in release builds. Do NOT change to `"windows"` — that suppresses the console window entirely.
+
+### SimStep pattern field
+`SimStep.pattern` is a human-readable string: `"Bootstrap"`, `"Col"`, `"Girder"`, `"ColCol"`, `"ColGirder"`, `"GirderGirder"`, `"ColColGirder"`, `"ColGirderCol"`, `"ColGirderGirder"`, `"ColColGirderGirder"`, `"ColColGirderColGirder"`. Used for display in Result tab step info.
+
+### Forbidden patterns (sim_engine.rs)
+`try_build_pattern()` must NEVER produce:
+- 3 consecutive Columns without any Girder between them: `Col→Col→Col`
+- 4 consecutive elements with 3 Columns: `Col→Col→Col→Girder`
+These are blocked in the pattern builder by checking `consecutive_col_count`.
+
+### Inactive element ghost color
+Construction mode sim 3D view inactive elements use `Color32::from_gray(90)` (NOT 38 — too dark to see on monitor).
+
+### sim 3D view orbit — single `allocate_rect`
+In the sim 3D view (inlined in `lib.rs` View tab), use a SINGLE `allocate_rect` call. A second `allocate_rect` for the same rect causes double orbit processing and erratic camera behavior. The hover check must use `ui.input(|i| i.pointer.hover_pos()).map(|p| rect_3d.contains(p))` directly.
+
+### Construction mode element ID display filtering
+In Construction Sequence/Step modes, node/element IDs must only be shown for **installed** elements (not ghost/inactive). Loop over installed element IDs only, not all elements. Otherwise IDs appear for elements not yet visible on screen.
+
 ## File Structure Changes (Phase 3 Additions)
 
 ```
@@ -395,6 +419,13 @@ src/rust/
 | Sim View 3D render (lib.rs View tab, inlined) | ✅ |
 | Scenario comparison chart (render_scenario_comparison_chart) | ✅ |
 | Debug file export (CSV per scenario + summary.txt) | ✅ |
+| SimSequence/SimStep separation (pattern-based steps) | ✅ |
+| Forbidden pattern enforcement (Col→Col→Col blocked) | ✅ |
+| Scenario ComboBox dropdown in sim 3D view nav bar | ✅ |
+| Inactive element color fix (gray 38→90) | ✅ |
+| Sim 3D view orbit unification (single allocate_rect) | ✅ |
+| Construction mode ID display filtering (installed only) | ✅ |
+| Console build (cfg_attr windows_subsystem = "console") | ✅ |
 
 ### Sim View 3D Render — Implementation Notes
 - Inlined directly in `lib.rs` View tab (NOT in sim_ui.rs — dead code `render_sim_3d` was removed)

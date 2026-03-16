@@ -37,7 +37,8 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 ├── .opencode/
 │   └── skills/
 │       ├── dev-phase1/SKILLS.md           ← Phase 1 기술 스택 + 구현 패턴 참조
-│       └── dev-phase2/SKILLS.md           ← Phase 2 기술 스택 + 구현 패턴 참조 ★현재
+│       ├── dev-phase2/SKILLS.md           ← Phase 2 기술 스택 + 구현 패턴 참조
+│       └── dev-phase3/SKILLS.md           ← Phase 3 기술 스택 + 구현 패턴 참조 ★현재
 │
 ├── src/
 │   ├── python/                            ← Python 레이어
@@ -50,18 +51,21 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 │   │   └── data_io.py                     ← 직렬화/입출력
 │   │
 │   └── rust/                             ← Rust 레이어
-│       ├── Cargo.toml                     ← Rust 의존성 (eframe 0.27, PyO3 0.21)
+│       ├── Cargo.toml                     ← Rust 의존성 (eframe 0.27, PyO3 0.21, rayon 1)
 │       └── src/
 │           ├── lib.rs                     ← PyO3 바인딩 + eframe app + recalculate()
-│           ├── main.rs                    ← 단독 실행 진입점
+│           ├── main.rs                    ← 단독 실행 진입점 (cfg_attr console build)
 │           ├── stability.rs               ← ★★ 핵심: 안정성 검증, 테이블 생성, 층 판별
+│           ├── sim_grid.rs                ← ★★ Phase 3: 격자 기반 구조요소 풀 생성
+│           ├── sim_engine.rs              ← ★★ Phase 3: Monte-Carlo 시뮬레이션 엔진 (rayon)
 │           └── graphics/
 │               ├── mod.rs                 ← 모듈 내보내기
 │               ├── renderer.rs            ← 2D 렌더링 엔진 (egui::Painter)
 │               ├── step_renderer.rs       ← 스텝별 누적 렌더링 + 캐싱
 │               ├── view_state.rs          ← 3D 뷰포트 상태 (카메라, 회전, 줌)
 │               ├── axis_cube.rs           ← 방향 큐브 렌더링
-│               └── ui.rs                  ← ★★ 핵심: UiState, 모든 탭 렌더링, Chart 1-3
+│               ├── ui.rs                  ← ★★ 핵심: UiState, 모든 탭 렌더링, Chart 1-3
+│               └── sim_ui.rs              ← ★★ Phase 3: Simulation 탭 UI (Settings/View/Result)
 │
 ├── tests/
 │   └── python/
@@ -82,8 +86,8 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 | Phase | 상태 | 설명 |
 |-------|------|------|
 | Phase 1 | ✅ 완료 | Development Mode - CSV 파싱, 유효성 검사, 3D 뷰어 |
-| Phase 2 | 🔄 진행 중 | Step 기반 시공 시각화, Metric, Charts |
-| Phase 3 | ⏳ 예정 | Simulation Mode - 실제 제약 적용, 시공 순서 자동 생성 |
+| Phase 2 | ✅ 완료 | Step 기반 시공 시각화, Metric, Charts |
+| Phase 3 | 🔄 진행 중 | Simulation Mode - Monte-Carlo 시공 순서 자동 생성, 패턴 기반 Step/Sequence |
 
 ---
 
@@ -110,8 +114,17 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
   - ⚠️ **성능 주의**: 호출마다 전체 노드 스캔 + unique z 정렬 반복. 현재 규모(수백~수천 부재)는 무방하나, Phase 3 이후 대형 구조물 대응 시 z-map 캐싱 최적화 필요
 - **upper_floor_threshold**: 0.0~1.0 (기본값 0.3 = 30%)
   - Settings 탭 슬라이더로 조정
-  - Phase 2에서는 **시각화(Chart 3)만** — 시공 순서 재계산은 Phase 3 예정
-- **Simulation Mode**: 버튼만 표시, 비활성 상태 유지 (Phase 3까지)
+  - Phase 2에서는 **시각화(Chart 3)만** — 실제 시공 순서 제약은 Phase 3에서 구현
+
+### Phase 3 (Simulation Mode)
+- **sim_grid.rs**: 격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성
+- **sim_engine.rs**: Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성
+  - `SimSequence`: 개별 부재 단위 (1-indexed global sequence_number)
+  - `SimStep`: 패턴 기반 설치 단위 (`pattern` 필드 포함)
+  - 허용 패턴: `Col`, `Girder`, `ColCol`, `ColGirder`, `GirderGirder`, `ColColGirder`, `ColGirderCol`, `ColGirderGirder`, `ColColGirderGirder`, `ColColGirderColGirder`
+  - **금지 패턴**: `Col→Col→Col`, `Col→Col→Col→Girder` (3개 연속 Column 금지)
+- **upper_floor_threshold**: `sim_engine.rs`에서 `threshold * 100.0`으로 변환 후 `stability.rs`에 전달
+- **console build**: `main.rs` `#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]`
 
 ---
 
@@ -142,10 +155,36 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 
 **중요 패턴**: `floor_colors` 배열은 `render_result_tab_inner` 함수 스코프에 정의됨 (Chart 2/3 공유). 절대 chart 클로저 안에 넣지 말 것.
 
+**Phase 3 신규 타입** (ui.rs):
+- `SimSequence { element_id: i32, sequence_number: usize }` — 개별 부재 단위 (1-indexed globally)
+- `SimStep { workfront_id, element_ids, sequences: Vec<SimSequence>, floor, pattern: String }` — 패턴 기반 설치 단위
+- `SimStep::from_elements(workfront_id, element_ids, floor, pattern, start_seq)` — 헬퍼
+
 ### `src/rust/src/lib.rs`
 - `recalculate()`: CSV 로드 → 테이블 생성 → UiState 업데이트 전체 파이프라인
+- `run_simulation()`: Grid 생성 → run_all_scenarios() → best scenario 선택
 - `update_floor_counts_for_step()`: 스텝별 층 데이터 업데이트
 - PyO3 바인딩 (`PyNode`, `PyElement`, `PyRenderData`, `PyStepTable`)
+- Sim 3D view (View 탭 인라인): 설치된 부재 렌더링 + 시나리오 ComboBox + step nav bar
+
+### `src/rust/src/sim_grid.rs` (Phase 3 신규)
+격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성.
+- `SimGrid::new(nx, ny, nz, dx, dy, dz)` → SimGrid
+- IDs 1-indexed: nodes row-major (x→y→z), elements: columns first then X-girders then Y-girders
+
+### `src/rust/src/sim_engine.rs` (Phase 3 신규)
+Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성.
+- `run_scenario(scenario_id, grid, workfronts, seed, weights, threshold)` → SimScenario
+- `run_all_scenarios(count, grid, workfronts, weights, threshold)` → Vec<SimScenario>
+- `try_build_pattern(seed_id, grid, installed_ids, ...)` — 패턴 확장 (금지 패턴 차단)
+- threshold 변환: `threshold * 100.0` (stability.rs는 0~100 범위 기대)
+
+### `src/rust/src/graphics/sim_ui.rs` (Phase 3 신규)
+Simulation 탭 전용 UI (Settings, View, Result).
+- `render_sim_settings(ui, state)` → bool
+- `render_sim_view(ui, state)` → bool
+- `render_sim_result(ui, state)`
+- `render_scenario_comparison_chart(ui, state)` (private, Result 하단 다중 시나리오 비교)
 
 ---
 
@@ -163,7 +202,7 @@ cp target/release/assyplan.exe ../../assyplan.exe
 ### Skills 문서 업데이트 규칙
 1. 각 개발 단계 완료 또는 주요 변경 시 `.opencode/skills/dev-phase{N}/SKILLS.md` 업데이트
 2. 기술 스택, 아키텍처, 구현 패턴, Gotcha 사항 문서화
-3. **현재 활성**: `.opencode/skills/dev-phase2/SKILLS.md`
+3. **현재 활성**: `.opencode/skills/dev-phase3/SKILLS.md`
 
 ---
 
@@ -171,7 +210,7 @@ cp target/release/assyplan.exe ../../assyplan.exe
 
 ### 새 기능 추가 시 순서
 1. `devplandoc.md` 에서 스펙 확인
-2. `.opencode/skills/dev-phase2/SKILLS.md` 에서 관련 패턴 확인
+2. `.opencode/skills/dev-phase3/SKILLS.md` 에서 관련 패턴 확인
 3. `stability.rs` 또는 `ui.rs` 수정
 4. `lsp_diagnostics` 로 오류 확인
 5. `cargo build --release` 빌드
@@ -202,7 +241,9 @@ cp target/release/assyplan.exe ../../assyplan.exe
 - **view_state scroll zoom**: `handle_input()`에서 scroll 감지 조건으로 `response.hovered()` 사용 금지. Construction mode에서 TopBottomPanel(nav bar)이 같은 프레임에 존재할 경우 `hovered()`가 false를 반환하여 scroll event가 무시됨. 반드시 `ui.input(|i| i.pointer.hover_pos()).map(|p| response.rect.contains(p))` 로 직접 비교할 것.
 - **Sequence 모드 transform**: Construction Sequence 모드에서 렌더링 직전 반드시 `step_data.base.calculate_transform(rect, &view_state)` 호출 필요. `render_data.calculate_transform()`만 호출하면 `step_render_data.base`의 transform이 갱신되지 않아 zoom/pan이 반영되지 않음.
 - **grid bubble trimming 일관성**: `renderer.rs`(Model view)와 `step_renderer.rs`(Construction view)는 grid line 렌더링 코드가 각각 독립 구현됨. 한쪽을 수정하면 다른 쪽도 반드시 동일하게 수정할 것. bubble 원 내부 침범 방지: `let p1_trimmed = p1 + (p2-p1).normalized() * bubble_radius` 후 `line_segment([p1_trimmed, p2], ...)`.
-
+- **console build** (`main.rs`): `#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]` — release 빌드에서도 콘솔 출력 허용. `"windows"`로 변경하면 콘솔이 완전히 숨겨짐 (금지).
+- **sim 3D view orbit — single allocate_rect**: lib.rs View 탭 인라인 sim 3D view에서 `allocate_rect`는 반드시 한 번만 호출. 두 번 호출하면 orbit 이중 처리 버그 발생. hover 체크는 `ui.input(|i| i.pointer.hover_pos()).map(|p| rect.contains(p))`로 직접 비교.
+- **construction mode element ID 필터링**: Sequence/Step 모드에서 node/element ID는 **설치된 부재에만** 표시. 전체 elements 루프 금지 — 설치된 ID 목록만 순회할 것.
 ### Python
 - **charset_normalizer 인코딩 이름**: `"utf_8"`, `"euc_kr"` (언더스코어) — 대시(`"utf-8"`) 아님
 - **data_io.py LSP 오류**: Series → ConvertibleToInt 타입 오류 다수 존재. Phase 2 시작 전부터 있던 기존 이슈. 수정하지 말 것 (기능에 영향 없음).
@@ -250,8 +291,8 @@ fn build_z_level_map(nodes: &[StabilityNode]) -> HashMap<i64, i32> { ... }
 ```
 .opencode/skills/
 ├── dev-phase1/SKILLS.md    ← Phase 1 완료 (Python+Rust 기반 구조 + 렌더링)
-├── dev-phase2/SKILLS.md    ← Phase 2 현재 (Step/Metric/Chart, 현재 활성)
-└── dev-phase3/SKILLS.md    ← Phase 3 예정 시 생성
+├── dev-phase2/SKILLS.md    ← Phase 2 완료 (Step/Metric/Chart)
+└── dev-phase3/SKILLS.md    ← Phase 3 현재 활성 (Simulation Mode, Monte-Carlo, SimStep/SimSequence)
 ```
 
 **작성 규칙**:
