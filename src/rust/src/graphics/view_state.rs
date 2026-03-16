@@ -40,7 +40,17 @@ impl ViewState {
     }
 
     pub fn handle_input(&mut self, response: &egui::Response, ui: &egui::Ui) -> bool {
-        if !response.contains_pointer() && !response.dragged() {
+        // Use rect-based pointer check instead of response.contains_pointer().
+        // contains_pointer() relies on egui's hit-test which can fail when the response
+        // is allocated inside a nested TopBottomPanel (e.g. the sim 3D bottom panel),
+        // causing orbit drag to be silently ignored on the first frame.
+        // Checking pointer_pos against response.rect directly is always reliable.
+        let pointer_in_rect = ui
+            .input(|input| input.pointer.hover_pos())
+            .map(|pos| response.rect.contains(pos))
+            .unwrap_or(false);
+
+        if !pointer_in_rect && !response.dragged() {
             return false;
         }
 
@@ -63,15 +73,7 @@ impl ViewState {
             changed = true;
         }
 
-        // Zoom: scroll wheel zooms in/out
-        // Use pointer position check against response.rect for reliable hover detection.
-        // response.hovered() can return false in Construction mode when a TopBottomPanel
-        // (nav bar with slider) is rendered in the same frame, causing scroll to be missed.
-        let pointer_in_rect = ui
-            .input(|input| input.pointer.hover_pos())
-            .map(|pos| response.rect.contains(pos))
-            .unwrap_or(false);
-
+        // Zoom: scroll wheel
         if pointer_in_rect {
             let scroll_delta = ui.input(|input| input.raw_scroll_delta.y);
 

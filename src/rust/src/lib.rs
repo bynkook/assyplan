@@ -1526,14 +1526,14 @@ impl eframe::App for AssyPlanApp {
                                                 let current_label = self
                                                     .ui_state
                                                     .sim_selected_scenario
-                                                    .map(|i| format!("시나리오 {}", i + 1))
-                                                    .unwrap_or_else(|| "선택...".to_string());
+                                                    .map(|i| format!("Scenario {}", i + 1))
+                                                    .unwrap_or_else(|| "Select...".to_string());
                                                 egui::ComboBox::from_id_source("sim_scenario_select")
                                                     .selected_text(&current_label)
                                                     .width(120.0)
                                                     .show_ui(ui, |ui| {
                                                         for i in 0..scenario_count {
-                                                            let label = format!("시나리오 {}", i + 1);
+                                                            let label = format!("Scenario {}", i + 1);
                                                             let selected =
                                                                 self.ui_state.sim_selected_scenario
                                                                     == Some(i);
