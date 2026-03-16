@@ -639,16 +639,72 @@ fn push_pattern_if_valid(
     }
 }
 
+/// Returns the (dx_sign, dy_sign) direction of a girder element.
+/// (±1, 0) means X-axis aligned, (0, ±1) means Y-axis aligned.
+fn girder_axis(eid: i32, grid: &SimGrid) -> Option<(i8, i8)> {
+    let e = get_element(grid, eid)?;
+    let (xi, yi, _) = grid.node_coords(e.node_i_id)?;
+    let (xj, yj, _) = grid.node_coords(e.node_j_id)?;
+    let dx = xj - xi;
+    let dy = yj - yi;
+    Some((
+        if dx.abs() > 0.001 {
+            dx.signum() as i8
+        } else {
+            0
+        },
+        if dy.abs() > 0.001 {
+            dy.signum() as i8
+        } else {
+            0
+        },
+    ))
+}
+
 fn contains_forbidden_pattern(element_ids: &[i32], grid: &SimGrid) -> bool {
     let types: Vec<&str> = element_ids
         .iter()
         .filter_map(|eid| get_element(grid, *eid).map(|e| e.member_type.as_str()))
         .collect();
 
-    matches!(
+    // Forbid 3+ consecutive columns (regardless of girders after)
+    if matches!(
         types.as_slice(),
         ["Column", "Column", "Column"] | ["Column", "Column", "Column", "Girder"]
-    )
+    ) {
+        return true;
+    }
+
+    // Forbid 2+ girders in the same axis direction (parallel girders)
+    // A valid multi-girder bundle must have girders in perpendicular directions.
+    let girder_axes: Vec<(i8, i8)> = element_ids
+        .iter()
+        .filter(|&&eid| {
+            get_element(grid, eid)
+                .map(|e| e.member_type == "Girder")
+                .unwrap_or(false)
+        })
+        .filter_map(|&eid| girder_axis(eid, grid))
+        .collect();
+
+    if girder_axes.len() >= 2 {
+        // Check every pair — if any two are parallel (same axis), forbid the bundle
+        for i in 0..girder_axes.len() {
+            for j in (i + 1)..girder_axes.len() {
+                let (ax, ay) = girder_axes[i];
+                let (bx, by) = girder_axes[j];
+                // Parallel if they share the same non-zero axis component
+                // (1,0) ∥ (1,0), (-1,0) ∥ (1,0), (0,1) ∥ (0,-1) etc.
+                let dot = ax as i32 * bx as i32 + ay as i32 * by as i32;
+                // dot != 0 means not perpendicular → parallel or anti-parallel → forbidden
+                if dot != 0 {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn element_floor(element_id: i32, grid: &SimGrid, dz: f64) -> Option<i32> {
@@ -1046,14 +1102,23 @@ pub fn run_scenario(
             break TerminationReason::NoCandidates;
         }
 
-        let wf_idx = ((global_step_count - 1) as usize) % workfronts.len();
-        let wf = &workfronts[wf_idx];
+        // All workfronts contribute candidates every step (merged pool).
+        // Pick the workfront whose chosen candidate wins the score competition.
+        // Round-robin index is used only as tiebreak / wf_id assignment fallback.
+        let wf_idx_fallback = ((global_step_count - 1) as usize) % workfronts.len();
 
         if installed_ids.is_empty() {
-            let bootstrap = generate_bootstrap_candidates(wf, grid, &node_pos);
-            let valid: Vec<&Candidate> = bootstrap
+            // Bootstrap: try all workfronts, merge candidates, pick best
+            let mut all_bootstrap: Vec<(usize, Candidate)> = Vec::new();
+            for (wf_idx, wf) in workfronts.iter().enumerate() {
+                for c in generate_bootstrap_candidates(wf, grid, &node_pos) {
+                    all_bootstrap.push((wf_idx, c));
+                }
+            }
+            let valid: Vec<(usize, &Candidate)> = all_bootstrap
                 .iter()
-                .filter(|c| check_bundle_stability(&c.element_ids, grid, &installed_ids))
+                .filter(|(_, c)| check_bundle_stability(&c.element_ids, grid, &installed_ids))
+                .map(|(wf_idx, c)| (*wf_idx, c))
                 .collect();
 
             if valid.is_empty() {
@@ -1066,8 +1131,10 @@ pub fn run_scenario(
             }
             consecutive_no_candidates = 0;
 
-            let scores: Vec<f64> = valid.iter().map(|c| c.score(w1, w2, w3)).collect();
-            let chosen = valid[weighted_random_choice(&scores, &mut rng)];
+            let scores: Vec<f64> = valid.iter().map(|(_, c)| c.score(w1, w2, w3)).collect();
+            let best_idx = weighted_random_choice(&scores, &mut rng);
+            let (chosen_wf_idx, chosen) = valid[best_idx];
+            let wf = &workfronts[chosen_wf_idx];
 
             let step_floor = chosen
                 .element_ids
@@ -1096,9 +1163,23 @@ pub fn run_scenario(
             continue;
         }
 
-        let candidates =
-            collect_single_candidates(wf, grid, &installed_ids, &installed_nodes, &node_pos);
-        if candidates.is_empty() {
+        // Merge candidates from ALL workfronts — each workfront contributes its
+        // own frontier in parallel; the best seed across all of them is chosen.
+        let mut all_candidates: Vec<(usize, SingleCandidate)> = Vec::new();
+        for (wf_idx, wf) in workfronts.iter().enumerate() {
+            for c in
+                collect_single_candidates(wf, grid, &installed_ids, &installed_nodes, &node_pos)
+            {
+                all_candidates.push((wf_idx, c));
+            }
+        }
+        // Deduplicate by element_id (same element reachable from multiple wf's)
+        {
+            let mut seen_eids: HashSet<i32> = HashSet::new();
+            all_candidates.retain(|(_, c)| seen_eids.insert(c.element_id));
+        }
+
+        if all_candidates.is_empty() {
             consecutive_no_candidates += 1;
             members_added_last_300.push(0);
             if consecutive_no_candidates >= 10 {
@@ -1108,16 +1189,18 @@ pub fn run_scenario(
         }
         consecutive_no_candidates = 0;
 
-        let after_stability: Vec<&SingleCandidate> = candidates
+        let after_stability: Vec<(usize, &SingleCandidate)> = all_candidates
             .iter()
-            .filter(|c| check_single_stability(c.element_id, grid, &installed_ids))
+            .filter(|(_, c)| check_single_stability(c.element_id, grid, &installed_ids))
+            .map(|(wf_idx, c)| (*wf_idx, c))
             .collect();
 
-        let valid: Vec<&&SingleCandidate> = after_stability
+        let valid: Vec<(usize, &&SingleCandidate)> = after_stability
             .iter()
-            .filter(|c| {
+            .filter(|(_, c)| {
                 check_upper_floor_constraint(&[c.element_id], grid, &installed_ids, threshold)
             })
+            .map(|(wf_idx, c)| (*wf_idx, c))
             .collect();
 
         if valid.is_empty() {
@@ -1137,8 +1220,14 @@ pub fn run_scenario(
         }
         consecutive_upper_floor_violations = 0;
 
-        let scores: Vec<f64> = valid.iter().map(|c| c.score(w1, w2)).collect();
-        let chosen_seed = valid[weighted_random_choice(&scores, &mut rng)].element_id;
+        let scores: Vec<f64> = valid.iter().map(|(_, c)| c.score(w1, w2)).collect();
+        let best_valid_idx = weighted_random_choice(&scores, &mut rng);
+        let (chosen_wf_idx, chosen_cand) = valid[best_valid_idx];
+        let chosen_seed = chosen_cand.element_id;
+        // Use the workfront that owns the chosen seed for wf_id attribution
+        let wf = &workfronts[chosen_wf_idx];
+        let _ = wf_idx_fallback; // suppress unused warning
+
         let (element_ids, pattern) = try_build_pattern(
             chosen_seed,
             grid,

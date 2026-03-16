@@ -273,7 +273,7 @@ impl RenderData {
     /// Render grid lines on the current view plane (Revit-style)
     /// Grid lines are drawn at unique X and Y node coordinates on the min_z plane
     /// with numbered bubble markers at grid ends
-    fn render_grid(&self, painter: &egui::Painter, _rect: egui::Rect, view_state: &ViewState) {
+    pub fn render_grid(&self, painter: &egui::Painter, _rect: egui::Rect, view_state: &ViewState) {
         if self.nodes.is_empty() {
             return;
         }

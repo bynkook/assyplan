@@ -1773,6 +1773,9 @@ impl eframe::App for AssyPlanApp {
                                         render_data
                                             .calculate_transform(rect_3d, &self.view_state);
 
+                                        // Revit-style grid lines (same as dev mode)
+                                        render_data.render_grid(&painter, rect_3d, &self.view_state);
+
                                         let node_map: std::collections::HashMap<
                                             i32,
                                             (f64, f64, f64),
@@ -2006,6 +2009,7 @@ impl eframe::App for AssyPlanApp {
 
                         // 2D grid plan (remaining area, handles workfront clicks)
                         if graphics::sim_ui::render_sim_view(ui, &mut self.ui_state) {
+                            self.ui_state.needs_recalc = true;
                             ctx.request_repaint();
                         }
                     } else {
@@ -2391,6 +2395,7 @@ impl eframe::App for AssyPlanApp {
                             graphics::DisplayMode::Simulation => {
                                 // Simulation mode view — grid plan + workfront selector
                                 if graphics::sim_ui::render_sim_view(ui, &mut self.ui_state) {
+                                    self.ui_state.needs_recalc = true;
                                     ctx.request_repaint();
                                 }
                             }
