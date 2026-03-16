@@ -1438,11 +1438,22 @@ impl eframe::App for AssyPlanApp {
                 "View" => {
                     // Simulation mode has its own view (grid plan), independent of render_data
                     if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
+                        // Model / Construction sub-mode toggle (always visible)
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(!self.ui_state.sim_view_is_model, "Construction").clicked() {
+                                self.ui_state.sim_view_is_model = false;
+                            }
+                            if ui.selectable_label(self.ui_state.sim_view_is_model, "Model").clicked() {
+                                self.ui_state.sim_view_is_model = true;
+                            }
+                        });
+                        ui.separator();
+
                         // When a grid + selected scenario exist: split view
                         // - bottom panel: 3D render of installed elements (orbit/zoom via view_state)
                         // - remaining area: 2D grid plan with workfront click handling
                         let has_3d = self.sim_grid.is_some()
-                            && self.ui_state.sim_selected_scenario.is_some();
+                            && (self.ui_state.sim_selected_scenario.is_some() || self.ui_state.sim_view_is_model);
 
                         if has_3d {
                             // Bottom panel: 3D view (resizable, default 300px)
@@ -1451,8 +1462,14 @@ impl eframe::App for AssyPlanApp {
                                 .default_height(340.0)
                                 .min_height(100.0)
                                 .show_inside(ui, |ui| {
-                                    // ── Step / Sequence navigation bar ────────────────────
-                                    let (max_step, step_info, max_sequence, seq_info) = self
+                                    // Ensure Orbit3D mode for consistent orbit behavior
+                                    if self.view_state.view_mode != graphics::ViewMode::Orbit3D {
+                                        self.view_state.set_view_mode(graphics::ViewMode::Orbit3D);
+                                    }
+
+                                    // ── Step / Sequence navigation bar (Construction mode only) ─
+                                    let (max_step, step_info, max_sequence, seq_info) = if !self.ui_state.sim_view_is_model {
+                                        self
                                         .ui_state
                                         .sim_selected_scenario
                                         .and_then(|idx| self.ui_state.sim_scenarios.get(idx))
@@ -1486,181 +1503,184 @@ impl eframe::App for AssyPlanApp {
                                                 ));
                                             (ms, step_info, max_seq, seq_info)
                                         })
-                                        .unwrap_or((0, None, 0, None));
-
-                                    ui.horizontal(|ui| {
-                                        // ── Scenario ComboBox ─────────────────────────────
-                                        let scenario_count = self.ui_state.sim_scenarios.len();
-                                        if scenario_count > 0 {
-                                            if self.ui_state.sim_selected_scenario.is_none() {
-                                                self.ui_state.sim_selected_scenario = Some(0);
-                                            }
-                                            let current_label = self
-                                                .ui_state
-                                                .sim_selected_scenario
-                                                .map(|i| format!("시나리오 {}", i + 1))
-                                                .unwrap_or_else(|| "선택...".to_string());
-                                            egui::ComboBox::from_id_source("sim_scenario_select")
-                                                .selected_text(&current_label)
-                                                .width(120.0)
-                                                .show_ui(ui, |ui| {
-                                                    for i in 0..scenario_count {
-                                                        let label = format!("시나리오 {}", i + 1);
-                                                        let selected =
-                                                            self.ui_state.sim_selected_scenario
-                                                                == Some(i);
-                                                        if ui
-                                                            .selectable_label(selected, &label)
-                                                            .clicked()
-                                                        {
-                                                            self.ui_state.sim_selected_scenario =
-                                                                Some(i);
-                                                            self.ui_state.sim_current_step = 1;
-                                                            self.ui_state.sim_current_sequence = 1;
-                                                            self.ui_state.sim_playing = false;
-                                                        }
-                                                    }
-                                                });
-                                            ui.separator();
-                                        }
-
-                                        // ── Step / Sequence mode toggle ───────────────────
-                                        let in_seq_mode = self.ui_state.sim_nav_sequence_mode;
-                                        if ui.selectable_label(!in_seq_mode, "Step").clicked() {
-                                            self.ui_state.sim_nav_sequence_mode = false;
-                                        }
-                                        if ui.selectable_label(in_seq_mode, "Seq").clicked() {
-                                            self.ui_state.sim_nav_sequence_mode = true;
-                                        }
-                                        ui.separator();
-
-                                        if !self.ui_state.sim_nav_sequence_mode {
-                                            // ── Step mode ◀ slider ▶ ─────────────────────
-                                            if ui
-                                                .add_enabled(
-                                                    self.ui_state.sim_current_step > 1,
-                                                    egui::Button::new("◀"),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.ui_state.sim_current_step =
-                                                    self.ui_state.sim_current_step.saturating_sub(1).max(1);
-                                                self.ui_state.sim_playing = false;
-                                            }
-                                            if max_step > 0 {
-                                                ui.add(
-                                                    egui::Slider::new(
-                                                        &mut self.ui_state.sim_current_step,
-                                                        1..=max_step,
-                                                    )
-                                                    .text("Step")
-                                                    .clamp_to_range(true),
-                                                );
-                                            }
-                                            if ui
-                                                .add_enabled(
-                                                    max_step > 0
-                                                        && self.ui_state.sim_current_step < max_step,
-                                                    egui::Button::new("▶"),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.ui_state.sim_current_step =
-                                                    (self.ui_state.sim_current_step + 1).min(max_step);
-                                                self.ui_state.sim_playing = false;
-                                            }
-                                            ui.separator();
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{} / {}",
-                                                    self.ui_state.sim_current_step.min(max_step.max(1)),
-                                                    max_step
-                                                ))
-                                                .strong(),
-                                            );
-                                        } else {
-                                            // ── Sequence mode ◀ slider ▶ ─────────────────
-                                            if ui
-                                                .add_enabled(
-                                                    self.ui_state.sim_current_sequence > 1,
-                                                    egui::Button::new("◀"),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.ui_state.sim_current_sequence =
-                                                    self.ui_state.sim_current_sequence.saturating_sub(1).max(1);
-                                            }
-                                            if max_sequence > 0 {
-                                                ui.add(
-                                                    egui::Slider::new(
-                                                        &mut self.ui_state.sim_current_sequence,
-                                                        1..=max_sequence,
-                                                    )
-                                                    .text("Seq")
-                                                    .clamp_to_range(true),
-                                                );
-                                            }
-                                            if ui
-                                                .add_enabled(
-                                                    max_sequence > 0
-                                                        && self.ui_state.sim_current_sequence < max_sequence,
-                                                    egui::Button::new("▶"),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.ui_state.sim_current_sequence =
-                                                    (self.ui_state.sim_current_sequence + 1).min(max_sequence);
-                                            }
-                                            ui.separator();
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{} / {}",
-                                                    self.ui_state.sim_current_sequence.min(max_sequence.max(1)),
-                                                    max_sequence
-                                                ))
-                                                .strong(),
-                                            );
-                                        }
-                                    });
-
-                                    // Detail line below the nav bar
-                                    if !self.ui_state.sim_nav_sequence_mode {
-                                        // Step detail (floor / workfront / member list / pattern)
-                                        if let Some(info) = step_info {
-                                            ui.label(
-                                                egui::RichText::new(info)
-                                                    .size(10.0)
-                                                    .color(egui::Color32::from_rgb(160, 210, 255)),
-                                            );
-                                        }
+                                        .unwrap_or((0, None, 0, None))
                                     } else {
-                                        // Sequence detail (element id)
-                                        if let Some(info) = seq_info {
-                                            ui.label(
-                                                egui::RichText::new(info)
-                                                    .size(10.0)
-                                                    .color(egui::Color32::from_rgb(180, 255, 200)),
-                                            );
-                                        }
-                                    }
+                                        (0, None, 0, None)
+                                    };
 
-                                    ui.separator();
+                                    if !self.ui_state.sim_view_is_model {
+                                        ui.horizontal(|ui| {
+                                            // ── Scenario ComboBox ─────────────────────────────
+                                            let scenario_count = self.ui_state.sim_scenarios.len();
+                                            if scenario_count > 0 {
+                                                if self.ui_state.sim_selected_scenario.is_none() {
+                                                    self.ui_state.sim_selected_scenario = Some(0);
+                                                }
+                                                let current_label = self
+                                                    .ui_state
+                                                    .sim_selected_scenario
+                                                    .map(|i| format!("시나리오 {}", i + 1))
+                                                    .unwrap_or_else(|| "선택...".to_string());
+                                                egui::ComboBox::from_id_source("sim_scenario_select")
+                                                    .selected_text(&current_label)
+                                                    .width(120.0)
+                                                    .show_ui(ui, |ui| {
+                                                        for i in 0..scenario_count {
+                                                            let label = format!("시나리오 {}", i + 1);
+                                                            let selected =
+                                                                self.ui_state.sim_selected_scenario
+                                                                    == Some(i);
+                                                            if ui
+                                                                .selectable_label(selected, &label)
+                                                                .clicked()
+                                                            {
+                                                                self.ui_state.sim_selected_scenario =
+                                                                    Some(i);
+                                                                self.ui_state.sim_current_step = 1;
+                                                                self.ui_state.sim_current_sequence = 1;
+                                                                self.ui_state.sim_playing = false;
+                                                            }
+                                                        }
+                                                    });
+                                                ui.separator();
+                                            }
+
+                                            // ── Step / Sequence mode toggle ───────────────────
+                                            let in_seq_mode = self.ui_state.sim_nav_sequence_mode;
+                                            if ui.selectable_label(!in_seq_mode, "Step").clicked() {
+                                                self.ui_state.sim_nav_sequence_mode = false;
+                                            }
+                                            if ui.selectable_label(in_seq_mode, "Seq").clicked() {
+                                                self.ui_state.sim_nav_sequence_mode = true;
+                                            }
+                                            ui.separator();
+
+                                            if !self.ui_state.sim_nav_sequence_mode {
+                                                // ── Step mode ◀ slider ▶ ─────────────────────
+                                                if ui
+                                                    .add_enabled(
+                                                        self.ui_state.sim_current_step > 1,
+                                                        egui::Button::new("◀"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.ui_state.sim_current_step =
+                                                        self.ui_state.sim_current_step.saturating_sub(1).max(1);
+                                                    self.ui_state.sim_playing = false;
+                                                }
+                                                if max_step > 0 {
+                                                    ui.add(
+                                                        egui::Slider::new(
+                                                            &mut self.ui_state.sim_current_step,
+                                                            1..=max_step,
+                                                        )
+                                                        .text("Step")
+                                                        .clamp_to_range(true),
+                                                    );
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        max_step > 0
+                                                            && self.ui_state.sim_current_step < max_step,
+                                                        egui::Button::new("▶"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.ui_state.sim_current_step =
+                                                        (self.ui_state.sim_current_step + 1).min(max_step);
+                                                    self.ui_state.sim_playing = false;
+                                                }
+                                                ui.separator();
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{} / {}",
+                                                        self.ui_state.sim_current_step.min(max_step.max(1)),
+                                                        max_step
+                                                    ))
+                                                    .strong(),
+                                                );
+                                            } else {
+                                                // ── Sequence mode ◀ slider ▶ ─────────────────
+                                                if ui
+                                                    .add_enabled(
+                                                        self.ui_state.sim_current_sequence > 1,
+                                                        egui::Button::new("◀"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.ui_state.sim_current_sequence =
+                                                        self.ui_state.sim_current_sequence.saturating_sub(1).max(1);
+                                                }
+                                                if max_sequence > 0 {
+                                                    ui.add(
+                                                        egui::Slider::new(
+                                                            &mut self.ui_state.sim_current_sequence,
+                                                            1..=max_sequence,
+                                                        )
+                                                        .text("Seq")
+                                                        .clamp_to_range(true),
+                                                    );
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        max_sequence > 0
+                                                            && self.ui_state.sim_current_sequence < max_sequence,
+                                                        egui::Button::new("▶"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.ui_state.sim_current_sequence =
+                                                        (self.ui_state.sim_current_sequence + 1).min(max_sequence);
+                                                }
+                                                ui.separator();
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{} / {}",
+                                                        self.ui_state.sim_current_sequence.min(max_sequence.max(1)),
+                                                        max_sequence
+                                                    ))
+                                                    .strong(),
+                                                );
+                                            }
+                                        });
+
+                                        // Detail line below the nav bar
+                                        if !self.ui_state.sim_nav_sequence_mode {
+                                            // Step detail (floor / workfront / member list / pattern)
+                                            if let Some(info) = step_info {
+                                                ui.label(
+                                                    egui::RichText::new(info)
+                                                        .size(10.0)
+                                                        .color(egui::Color32::from_rgb(160, 210, 255)),
+                                                );
+                                            }
+                                        } else {
+                                            // Sequence detail (element id)
+                                            if let Some(info) = seq_info {
+                                                ui.label(
+                                                    egui::RichText::new(info)
+                                                        .size(10.0)
+                                                        .color(egui::Color32::from_rgb(180, 255, 200)),
+                                                );
+                                            }
+                                        }
+
+                                        ui.separator();
+                                    } // end Construction nav bar
 
                                     // ── 3D viewport (remaining space) ─────────────────────
-                                    // Handle orbit/zoom/pan input first (needs &mut ViewState)
+                                    // Call handle_input unconditionally (mirrors dev mode pattern).
+                                    // handle_input uses its own pointer-in-rect check for scroll/zoom.
+                                    // The early-return guard in handle_input uses response.contains_pointer()
+                                    // which can be unreliable inside TopBottomPanel, but orbit drag
+                                    // (response.dragged_by) and zoom (pointer_in_rect check inside) both work.
                                     let rect_3d = ui.available_rect_before_wrap();
                                     let resp = ui.allocate_rect(
                                         rect_3d,
                                         egui::Sense::click_and_drag(),
                                     );
-                                    let pointer_in_rect = ui
-                                        .input(|i| i.pointer.hover_pos())
-                                        .map(|p| rect_3d.contains(p))
-                                        .unwrap_or(false);
-                                    if pointer_in_rect || resp.dragged() {
-                                        if self.view_state.handle_input(&resp, ui) {
-                                            ctx.request_repaint();
-                                        }
+                                    if self.view_state.handle_input(&resp, ui) {
+                                        ctx.request_repaint();
                                     }
                                     if let Some(ref grid) = self.sim_grid {
                                         // Render using a painter at the full 3D panel rect
@@ -1668,7 +1688,12 @@ impl eframe::App for AssyPlanApp {
                                         use crate::graphics::renderer::{Element, Node, RenderData};
                                         use std::collections::HashSet;
 
-                                        let installed_ids: HashSet<i32> = self
+                                        // In Model mode: all elements are "installed" (fully active)
+                                        // In Construction mode: elements up to current step/sequence
+                                        let installed_ids: HashSet<i32> = if self.ui_state.sim_view_is_model {
+                                            grid.elements.iter().map(|e| e.id).collect()
+                                        } else {
+                                            self
                                             .ui_state
                                             .sim_selected_scenario
                                             .and_then(|idx| {
@@ -1696,7 +1721,8 @@ impl eframe::App for AssyPlanApp {
                                                         .collect()
                                                 }
                                             })
-                                            .unwrap_or_default();
+                                            .unwrap_or_default()
+                                        };
 
                                         painter.rect_filled(
                                             rect_3d,
@@ -1820,23 +1846,94 @@ impl eframe::App for AssyPlanApp {
                                             }
                                         }
 
+                                        // Node ID labels (only for installed/active nodes)
+                                        if self.ui_state.show_id_labels
+                                            && self.ui_state.show_node_ids
+                                            && self.ui_state.show_nodes
+                                        {
+                                            let active_node_ids: std::collections::HashSet<i32> =
+                                                grid.elements.iter()
+                                                    .filter(|e| installed_ids.contains(&e.id))
+                                                    .flat_map(|e| [e.node_i_id, e.node_j_id])
+                                                    .collect();
+                                            for n in &grid.nodes {
+                                                if !active_node_ids.contains(&n.id) {
+                                                    continue;
+                                                }
+                                                let p = render_data.project_to_2d(
+                                                    n.x, n.y, n.z, &self.view_state,
+                                                );
+                                                if rect_3d.contains(p) {
+                                                    painter.text(
+                                                        p + egui::vec2(5.0, -5.0),
+                                                        egui::Align2::LEFT_BOTTOM,
+                                                        n.id.to_string(),
+                                                        egui::FontId::proportional(10.0),
+                                                        egui::Color32::WHITE,
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        // Element ID labels (only for installed/active elements)
+                                        if self.ui_state.show_id_labels
+                                            && self.ui_state.show_element_ids
+                                            && self.ui_state.show_elements
+                                        {
+                                            for e in &grid.elements {
+                                                if !installed_ids.contains(&e.id) {
+                                                    continue;
+                                                }
+                                                if let (
+                                                    Some(&(xi, yi, zi)),
+                                                    Some(&(xj, yj, zj)),
+                                                ) = (
+                                                    node_map.get(&e.node_i_id),
+                                                    node_map.get(&e.node_j_id),
+                                                ) {
+                                                    let mid = render_data.project_to_2d(
+                                                        (xi + xj) / 2.0,
+                                                        (yi + yj) / 2.0,
+                                                        (zi + zj) / 2.0,
+                                                        &self.view_state,
+                                                    );
+                                                    if rect_3d.contains(mid) {
+                                                        painter.text(
+                                                            mid + egui::vec2(3.0, -3.0),
+                                                            egui::Align2::LEFT_BOTTOM,
+                                                            e.id.to_string(),
+                                                            egui::FontId::proportional(9.0),
+                                                            egui::Color32::YELLOW,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // Info overlay
-                                        let step_total = self
-                                            .ui_state
-                                            .sim_selected_scenario
-                                            .and_then(|i| {
-                                                self.ui_state.sim_scenarios.get(i)
-                                            })
-                                            .map(|s| s.steps.len())
-                                            .unwrap_or(0);
-                                        let overlay = format!(
-                                            "3D View — Step {}/{} — {} member(s) installed",
-                                            self.ui_state
-                                                .sim_current_step
-                                                .min(step_total.max(1)),
-                                            step_total,
-                                            installed_ids.len()
-                                        );
+                                        let overlay = if self.ui_state.sim_view_is_model {
+                                            format!(
+                                                "Model View — {} member(s) total",
+                                                installed_ids.len()
+                                            )
+                                        } else {
+                                            let step_total = self
+                                                .ui_state
+                                                .sim_selected_scenario
+                                                .and_then(|i| {
+                                                    self.ui_state.sim_scenarios.get(i)
+                                                })
+                                                .map(|s| s.steps.len())
+                                                .unwrap_or(0);
+                                            format!(
+                                                "3D View — Step {}/{} — {} member(s) installed",
+                                                self.ui_state
+                                                    .sim_current_step
+                                                    .min(step_total.max(1)),
+                                                step_total,
+                                                installed_ids.len()
+                                            )
+                                        };
                                         painter.text(
                                             rect_3d.left_top()
                                                 + egui::vec2(8.0, 8.0),
@@ -2284,7 +2381,12 @@ impl eframe::App for AssyPlanApp {
                 }
                 "Result" => {
                     if self.ui_state.display_mode == graphics::DisplayMode::Simulation {
-                        graphics::sim_ui::render_sim_result(ui, &mut self.ui_state);
+                        egui::ScrollArea::vertical()
+                            .id_source("sim_result_tab_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                graphics::sim_ui::render_sim_result(ui, &mut self.ui_state);
+                            });
                     } else {
                         // Use full Result tab UI with metrics, progress bars, floor data
                         graphics::render_result_tab(ui, &self.ui_state);

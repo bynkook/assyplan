@@ -276,6 +276,8 @@ pub struct UiState {
     pub sim_nav_sequence_mode: bool,
     /// Current sequence position in Sequence nav mode (1-indexed, global across all steps)
     pub sim_current_sequence: usize,
+    /// Sim View sub-mode: true = Model (all elements active, no ghost), false = Construction
+    pub sim_view_is_model: bool,
 }
 
 impl UiState {
@@ -327,6 +329,7 @@ impl UiState {
             sim_export_status: String::new(),
             sim_nav_sequence_mode: false,
             sim_current_sequence: 1,
+            sim_view_is_model: false,
         }
     }
 
@@ -373,6 +376,7 @@ impl UiState {
         self.sim_export_status.clear();
         self.sim_nav_sequence_mode = false;
         self.sim_current_sequence = 1;
+        self.sim_view_is_model = false;
     }
 
     /// Set step data from Python step table
