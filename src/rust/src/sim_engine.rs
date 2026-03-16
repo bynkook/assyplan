@@ -235,6 +235,33 @@ fn check_bundle_stability(
         return has_minimum_assembly(&grid.nodes, &combined_elems);
     }
 
+    // Connectivity guard: the bundle must physically connect to the existing
+    // structure. Collect all node IDs that are already "touched" by installed
+    // elements, then verify that at least one node of the bundle touches that set.
+    // Without this check, isolated ground-level columns would pass
+    // validate_column_support (z=0 → always true) even when far from the
+    // current construction front.
+    {
+        let installed_node_set: HashSet<i32> = installed_ids
+            .iter()
+            .filter_map(|&eid| get_element(grid, eid))
+            .flat_map(|e| [e.node_i_id, e.node_j_id])
+            .collect();
+
+        let bundle_touches_installed = element_ids.iter().any(|&eid| {
+            get_element(grid, eid)
+                .map(|e| {
+                    installed_node_set.contains(&e.node_i_id)
+                        || installed_node_set.contains(&e.node_j_id)
+                })
+                .unwrap_or(false)
+        });
+
+        if !bundle_touches_installed {
+            return false;
+        }
+    }
+
     for eid in element_ids {
         let Some(elem) = get_element(grid, *eid) else {
             return false;
@@ -639,72 +666,21 @@ fn push_pattern_if_valid(
     }
 }
 
-/// Returns the (dx_sign, dy_sign) direction of a girder element.
-/// (±1, 0) means X-axis aligned, (0, ±1) means Y-axis aligned.
-fn girder_axis(eid: i32, grid: &SimGrid) -> Option<(i8, i8)> {
-    let e = get_element(grid, eid)?;
-    let (xi, yi, _) = grid.node_coords(e.node_i_id)?;
-    let (xj, yj, _) = grid.node_coords(e.node_j_id)?;
-    let dx = xj - xi;
-    let dy = yj - yi;
-    Some((
-        if dx.abs() > 0.001 {
-            dx.signum() as i8
-        } else {
-            0
-        },
-        if dy.abs() > 0.001 {
-            dy.signum() as i8
-        } else {
-            0
-        },
-    ))
-}
-
 fn contains_forbidden_pattern(element_ids: &[i32], grid: &SimGrid) -> bool {
     let types: Vec<&str> = element_ids
         .iter()
         .filter_map(|eid| get_element(grid, *eid).map(|e| e.member_type.as_str()))
         .collect();
 
-    // Forbid 3+ consecutive columns (regardless of girders after)
-    if matches!(
+    // Forbid 3+ consecutive columns (regardless of girders after).
+    // All other validity (girder connectivity, parallel girders, etc.) is
+    // handled by check_bundle_stability — a single girder or parallel girders
+    // are valid as long as they connect to the existing structure and the
+    // resulting assembly is stable.
+    matches!(
         types.as_slice(),
         ["Column", "Column", "Column"] | ["Column", "Column", "Column", "Girder"]
-    ) {
-        return true;
-    }
-
-    // Forbid 2+ girders in the same axis direction (parallel girders)
-    // A valid multi-girder bundle must have girders in perpendicular directions.
-    let girder_axes: Vec<(i8, i8)> = element_ids
-        .iter()
-        .filter(|&&eid| {
-            get_element(grid, eid)
-                .map(|e| e.member_type == "Girder")
-                .unwrap_or(false)
-        })
-        .filter_map(|&eid| girder_axis(eid, grid))
-        .collect();
-
-    if girder_axes.len() >= 2 {
-        // Check every pair — if any two are parallel (same axis), forbid the bundle
-        for i in 0..girder_axes.len() {
-            for j in (i + 1)..girder_axes.len() {
-                let (ax, ay) = girder_axes[i];
-                let (bx, by) = girder_axes[j];
-                // Parallel if they share the same non-zero axis component
-                // (1,0) ∥ (1,0), (-1,0) ∥ (1,0), (0,1) ∥ (0,-1) etc.
-                let dot = ax as i32 * bx as i32 + ay as i32 * by as i32;
-                // dot != 0 means not perpendicular → parallel or anti-parallel → forbidden
-                if dot != 0 {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
+    )
 }
 
 fn element_floor(element_id: i32, grid: &SimGrid, dz: f64) -> Option<i32> {
