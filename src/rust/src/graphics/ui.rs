@@ -210,6 +210,9 @@ pub struct UiState {
     pub show_nodes: bool,
     /// Visibility: show elements
     pub show_elements: bool,
+    /// Visibility: show hidden (inactive/uninstalled) nodes & elements in ghost style.
+    /// Only applies in Construction display mode.
+    pub show_hidden: bool,
     /// Display mode: Model (full) or Construction (step-by-step)
     pub display_mode: DisplayMode,
     /// Whether step data has been calculated
@@ -299,6 +302,7 @@ impl UiState {
             show_grid: true,
             show_nodes: true,
             show_elements: true,
+            show_hidden: true,
             display_mode: DisplayMode::Model,
             has_step_data: false,
             construction_view_mode: ConstructionViewMode::Sequence,
@@ -350,6 +354,7 @@ impl UiState {
         self.show_grid = true;
         self.show_nodes = true;
         self.show_elements = true;
+        self.show_hidden = true;
         self.display_mode = DisplayMode::Model;
         self.has_step_data = false;
         self.construction_view_mode = ConstructionViewMode::Sequence;

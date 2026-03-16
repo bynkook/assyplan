@@ -12,6 +12,9 @@ pub struct VisibilitySettings {
     pub show_grid: bool,
     pub show_nodes: bool,
     pub show_elements: bool,
+    /// Show hidden (inactive/uninstalled) nodes and elements in ghost style.
+    /// Only relevant in Construction display mode; ignored in Model mode.
+    pub show_hidden: bool,
 }
 
 impl Default for VisibilitySettings {
@@ -20,9 +23,23 @@ impl Default for VisibilitySettings {
             show_grid: true,
             show_nodes: true,
             show_elements: true,
+            show_hidden: true,
         }
     }
 }
+
+// ── Shared rendering style constants ──────────────────────────────────────────
+/// Active node: blue dot, same as Dev Model view
+pub const ACTIVE_NODE_RADIUS: f32 = 3.0;
+pub const ACTIVE_NODE_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 100, 200);
+
+/// Ghost (inactive/uninstalled) element line style
+pub const GHOST_COLOR: egui::Color32 = egui::Color32::from_gray(90);
+pub const GHOST_STROKE_WIDTH: f32 = 0.5;
+
+/// Ghost (inactive) node dot
+pub const GHOST_NODE_RADIUS: f32 = 1.5;
+pub const GHOST_NODE_COLOR: egui::Color32 = egui::Color32::from_gray(70);
 
 /// Represents a 3D node in the structure
 #[derive(Clone, Debug)]

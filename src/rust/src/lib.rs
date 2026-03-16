@@ -1432,6 +1432,13 @@ impl eframe::App for AssyPlanApp {
                         ui.checkbox(&mut self.ui_state.show_grid, "Grid");
                         ui.checkbox(&mut self.ui_state.show_nodes, "Nodes");
                         ui.checkbox(&mut self.ui_state.show_elements, "Elements");
+                        // Hidden: inactive/uninstalled nodes & elements in ghost style.
+                        // Only meaningful in Construction mode — disable in Model mode.
+                        let is_construction = self.ui_state.display_mode != graphics::DisplayMode::Model;
+                        ui.add_enabled(
+                            is_construction,
+                            egui::Checkbox::new(&mut self.ui_state.show_hidden, "Hidden"),
+                        );
                     });
 
                     ui.separator();
@@ -1785,90 +1792,116 @@ impl eframe::App for AssyPlanApp {
                                             .map(|n| (n.id, (n.x, n.y, n.z)))
                                             .collect();
 
-                                        // Ghost (uninstalled)
-                                        let ghost = egui::Color32::from_gray(90);
-                                        for e in &grid.elements {
-                                            if installed_ids.contains(&e.id) {
-                                                continue;
-                                            }
-                                            if let (
-                                                Some(&(xi, yi, zi)),
-                                                Some(&(xj, yj, zj)),
-                                            ) = (
-                                                node_map.get(&e.node_i_id),
-                                                node_map.get(&e.node_j_id),
-                                            ) {
-                                                let p1 = render_data.project_to_2d(
-                                                    xi,
-                                                    yi,
-                                                    zi,
-                                                    &self.view_state,
-                                                );
-                                                let p2 = render_data.project_to_2d(
-                                                    xj,
-                                                    yj,
-                                                    zj,
-                                                    &self.view_state,
-                                                );
-                                                painter.line_segment(
-                                                    [p1, p2],
-                                                    egui::Stroke::new(0.5, ghost),
-                                                );
-                                            }
-                                        }
-
-                                        // Installed
-                                        let col_color =
-                                            egui::Color32::from_rgb(220, 80, 60);
-                                        let gdr_color =
-                                            egui::Color32::from_rgb(60, 190, 90);
-                                        for e in &grid.elements {
-                                            if !installed_ids.contains(&e.id) {
-                                                continue;
-                                            }
-                                            if let (
-                                                Some(&(xi, yi, zi)),
-                                                Some(&(xj, yj, zj)),
-                                            ) = (
-                                                node_map.get(&e.node_i_id),
-                                                node_map.get(&e.node_j_id),
-                                            ) {
-                                                let p1 = render_data.project_to_2d(
-                                                    xi,
-                                                    yi,
-                                                    zi,
-                                                    &self.view_state,
-                                                );
-                                                let p2 = render_data.project_to_2d(
-                                                    xj,
-                                                    yj,
-                                                    zj,
-                                                    &self.view_state,
-                                                );
-                                                let color = if e.member_type == "Column" {
-                                                    col_color
-                                                } else {
-                                                    gdr_color
-                                                };
-                                                painter.line_segment(
-                                                    [p1, p2],
-                                                    egui::Stroke::new(2.0, color),
-                                                );
+                                        // Ghost (uninstalled) — only when show_hidden is true
+                                        if self.ui_state.show_elements && self.ui_state.show_hidden {
+                                            for e in &grid.elements {
+                                                if installed_ids.contains(&e.id) {
+                                                    continue;
+                                                }
+                                                if let (
+                                                    Some(&(xi, yi, zi)),
+                                                    Some(&(xj, yj, zj)),
+                                                ) = (
+                                                    node_map.get(&e.node_i_id),
+                                                    node_map.get(&e.node_j_id),
+                                                ) {
+                                                    let p1 = render_data.project_to_2d(
+                                                        xi,
+                                                        yi,
+                                                        zi,
+                                                        &self.view_state,
+                                                    );
+                                                    let p2 = render_data.project_to_2d(
+                                                        xj,
+                                                        yj,
+                                                        zj,
+                                                        &self.view_state,
+                                                    );
+                                                    painter.line_segment(
+                                                        [p1, p2],
+                                                        egui::Stroke::new(
+                                                            graphics::renderer::GHOST_STROKE_WIDTH,
+                                                            graphics::renderer::GHOST_COLOR,
+                                                        ),
+                                                    );
+                                                }
                                             }
                                         }
 
-                                        // Nodes
-                                        let node_dot =
-                                            egui::Color32::from_gray(70);
-                                        for n in &grid.nodes {
-                                            let p = render_data.project_to_2d(
-                                                n.x,
-                                                n.y,
-                                                n.z,
-                                                &self.view_state,
-                                            );
-                                            if rect_3d.contains(p) {
-                                                painter.circle_filled(p, 1.5, node_dot);
+                                        // Installed (active) — unified Dev-mode colors
+                                        if self.ui_state.show_elements {
+                                            let col_color = egui::Color32::from_rgb(200, 50, 50);
+                                            let gdr_color = egui::Color32::from_rgb(50, 150, 50);
+                                            for e in &grid.elements {
+                                                if !installed_ids.contains(&e.id) {
+                                                    continue;
+                                                }
+                                                if let (
+                                                    Some(&(xi, yi, zi)),
+                                                    Some(&(xj, yj, zj)),
+                                                ) = (
+                                                    node_map.get(&e.node_i_id),
+                                                    node_map.get(&e.node_j_id),
+                                                ) {
+                                                    let p1 = render_data.project_to_2d(
+                                                        xi,
+                                                        yi,
+                                                        zi,
+                                                        &self.view_state,
+                                                    );
+                                                    let p2 = render_data.project_to_2d(
+                                                        xj,
+                                                        yj,
+                                                        zj,
+                                                        &self.view_state,
+                                                    );
+                                                    let color = if e.member_type == "Column" {
+                                                        col_color
+                                                    } else {
+                                                        gdr_color
+                                                    };
+                                                    painter.line_segment(
+                                                        [p1, p2],
+                                                        egui::Stroke::new(2.0, color),
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        // Nodes — ghost (inactive) + active (blue dot)
+                                        if self.ui_state.show_nodes {
+                                            // Collect active node IDs
+                                            let active_node_ids: std::collections::HashSet<i32> =
+                                                grid.elements.iter()
+                                                    .filter(|e| installed_ids.contains(&e.id))
+                                                    .flat_map(|e| [e.node_i_id, e.node_j_id])
+                                                    .collect();
+
+                                            for n in &grid.nodes {
+                                                let p = render_data.project_to_2d(
+                                                    n.x,
+                                                    n.y,
+                                                    n.z,
+                                                    &self.view_state,
+                                                );
+                                                if !rect_3d.contains(p) {
+                                                    continue;
+                                                }
+                                                if active_node_ids.contains(&n.id) {
+                                                    // Active: blue dot (Dev-mode standard)
+                                                    painter.circle_filled(
+                                                        p,
+                                                        graphics::renderer::ACTIVE_NODE_RADIUS,
+                                                        graphics::renderer::ACTIVE_NODE_COLOR,
+                                                    );
+                                                } else if self.ui_state.show_hidden {
+                                                    // Inactive ghost node
+                                                    painter.circle_filled(
+                                                        p,
+                                                        graphics::renderer::GHOST_NODE_RADIUS,
+                                                        graphics::renderer::GHOST_NODE_COLOR,
+                                                    );
+                                                }
                                             }
                                         }
 
@@ -1977,7 +2010,7 @@ impl eframe::App for AssyPlanApp {
                                                 egui::pos2(lx, ly + 4.0),
                                                 egui::pos2(lx + 16.0, ly + 4.0),
                                             ],
-                                            egui::Stroke::new(2.0, col_color),
+                                            egui::Stroke::new(2.0, egui::Color32::from_rgb(200, 50, 50)),
                                         );
                                         painter.text(
                                             egui::pos2(lx + 18.0, ly + 4.0),
@@ -1991,7 +2024,7 @@ impl eframe::App for AssyPlanApp {
                                                 egui::pos2(lx, ly + 18.0),
                                                 egui::pos2(lx + 16.0, ly + 18.0),
                                             ],
-                                            egui::Stroke::new(2.0, gdr_color),
+                                            egui::Stroke::new(2.0, egui::Color32::from_rgb(50, 150, 50)),
                                         );
                                         painter.text(
                                             egui::pos2(lx + 18.0, ly + 18.0),
@@ -2036,6 +2069,7 @@ impl eframe::App for AssyPlanApp {
                             show_grid: self.ui_state.show_grid,
                             show_nodes: self.ui_state.show_nodes,
                             show_elements: self.ui_state.show_elements,
+                            show_hidden: self.ui_state.show_hidden,
                         };
 
                         // Render based on display mode

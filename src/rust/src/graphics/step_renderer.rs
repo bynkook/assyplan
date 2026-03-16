@@ -4,7 +4,13 @@
 use eframe::egui::{Color32, Painter, Pos2, Rect, Stroke};
 use std::collections::{BTreeSet, HashMap};
 
-use super::{renderer::RenderData, renderer::VisibilitySettings, view_state::ViewState};
+use super::{
+    renderer::{
+        RenderData, VisibilitySettings, ACTIVE_NODE_COLOR, ACTIVE_NODE_RADIUS, GHOST_COLOR,
+        GHOST_STROKE_WIDTH,
+    },
+    view_state::ViewState,
+};
 
 /// Step-based render data with cumulative rendering support
 ///
@@ -252,6 +258,35 @@ impl StepRenderData {
             self.render_nodes_inline(painter, rect, view_state);
         }
 
+        // Ghost: render uninstalled elements first (behind active ones)
+        if visibility.show_elements && visibility.show_hidden && self.max_step > 0 {
+            let current = self.current_step;
+            for (element_idx, element) in self.base.elements.iter().enumerate() {
+                // Find which step this element belongs to
+                let mut element_step = 0usize;
+                for (step_idx, step_elements) in self.step_elements.iter().enumerate() {
+                    if step_elements.contains(&element_idx) {
+                        element_step = step_idx + 1;
+                        break;
+                    }
+                }
+                // Skip already-installed elements
+                if element_step != 0 && element_step <= current {
+                    continue;
+                }
+                let node_i = self.base.nodes.iter().find(|n| n.id == element.node_i_id);
+                let node_j = self.base.nodes.iter().find(|n| n.id == element.node_j_id);
+                if let (Some(ni), Some(nj)) = (node_i, node_j) {
+                    let p1 = self.base.project_to_2d(ni.x, ni.y, ni.z, view_state);
+                    let p2 = self.base.project_to_2d(nj.x, nj.y, nj.z, view_state);
+                    if rect.contains(p1) || rect.contains(p2) {
+                        painter
+                            .line_segment([p1, p2], Stroke::new(GHOST_STROKE_WIDTH, GHOST_COLOR));
+                    }
+                }
+            }
+        }
+
         // Render elements with step coloring
         if visibility.show_elements {
             self.render_step_elements(painter, rect, view_state);
@@ -284,6 +319,41 @@ impl StepRenderData {
         }
         if visibility.show_nodes {
             self.render_nodes_inline(painter, rect, view_state);
+        }
+
+        // Ghost: render elements after current_sequence first (behind active ones)
+        if visibility.show_elements && visibility.show_hidden && !self.base.elements.is_empty() {
+            let total = if !self.sequence_order.is_empty() {
+                self.sequence_order.len()
+            } else {
+                self.base.elements.len()
+            };
+            let max_pos = current_sequence.min(total);
+            // Collect installed element indices
+            let installed: std::collections::HashSet<usize> = (0..max_pos)
+                .map(|pos| {
+                    if !self.sequence_order.is_empty() {
+                        self.sequence_order[pos]
+                    } else {
+                        pos
+                    }
+                })
+                .collect();
+            for (elem_idx, element) in self.base.elements.iter().enumerate() {
+                if installed.contains(&elem_idx) {
+                    continue;
+                }
+                let node_i = self.base.nodes.iter().find(|n| n.id == element.node_i_id);
+                let node_j = self.base.nodes.iter().find(|n| n.id == element.node_j_id);
+                if let (Some(ni), Some(nj)) = (node_i, node_j) {
+                    let p1 = self.base.project_to_2d(ni.x, ni.y, ni.z, view_state);
+                    let p2 = self.base.project_to_2d(nj.x, nj.y, nj.z, view_state);
+                    if rect.contains(p1) || rect.contains(p2) {
+                        painter
+                            .line_segment([p1, p2], Stroke::new(GHOST_STROKE_WIDTH, GHOST_COLOR));
+                    }
+                }
+            }
         }
 
         // Render elements up to current_sequence
@@ -544,9 +614,7 @@ impl StepRenderData {
         for node in &self.base.nodes {
             let pos = self.base.project_to_2d(node.x, node.y, node.z, view_state);
             if rect.contains(pos) {
-                // Draw a small circle for each node
-                let radius = 3.0;
-                painter.circle_filled(pos, radius, Color32::from_rgb(0, 100, 200));
+                painter.circle_filled(pos, ACTIVE_NODE_RADIUS, ACTIVE_NODE_COLOR);
             }
         }
     }
