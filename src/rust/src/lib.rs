@@ -1186,6 +1186,10 @@ impl eframe::App for AssyPlanApp {
                         if let Some(ref mut data) = self.render_data {
                             data.invalidate_fit();
                         }
+                        // Also invalidate sim render data fit (sim 3D view shares view_state)
+                        if let Some(ref mut data) = self.sim_render_data {
+                            data.invalidate_fit();
+                        }
                         ctx.request_repaint();
                     }
                 }
@@ -1453,8 +1457,12 @@ impl eframe::App for AssyPlanApp {
                     // ── Simulation Mode Settings ──────────────────────────
                     if self.ui_state.mode == "Simulation" {
                         ui.separator();
-                        let _grid_changed =
+                        let grid_changed =
                             graphics::sim_ui::render_sim_settings(ui, &mut self.ui_state);
+                        if grid_changed {
+                            // Settings changed — highlight Recalc button to prompt re-run
+                            self.ui_state.needs_recalc = true;
+                        }
                     }
 
                     // ── Development Mode: Construction Constraints ────────
@@ -1496,11 +1504,6 @@ impl eframe::App for AssyPlanApp {
                                 .default_height(340.0)
                                 .min_height(100.0)
                                 .show_inside(ui, |ui| {
-                                    // Ensure Orbit3D mode for consistent orbit behavior
-                                    if self.view_state.view_mode != graphics::ViewMode::Orbit3D {
-                                        self.view_state.set_view_mode(graphics::ViewMode::Orbit3D);
-                                    }
-
                                     // ── Step / Sequence navigation bar (Construction mode only) ─
                                     let (max_step, step_info, max_sequence, seq_info) = if !self.ui_state.sim_view_is_model {
                                         self
