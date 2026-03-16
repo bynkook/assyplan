@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::{
     renderer::{
         RenderData, VisibilitySettings, ACTIVE_NODE_COLOR, ACTIVE_NODE_RADIUS, GHOST_COLOR,
-        GHOST_STROKE_WIDTH,
+        GHOST_NODE_COLOR, GHOST_NODE_RADIUS, GHOST_STROKE_WIDTH,
     },
     view_state::ViewState,
 };
@@ -222,17 +222,6 @@ impl StepRenderData {
         }
     }
 
-    /// Check if an element belongs to a specific step
-    #[allow(dead_code)]
-    fn is_element_in_step(&self, element_idx: usize, step: usize) -> bool {
-        let step_idx = step.saturating_sub(1);
-        if step_idx < self.step_elements.len() {
-            self.step_elements[step_idx].contains(&element_idx)
-        } else {
-            false
-        }
-    }
-
     /// Render with step-based coloring
     ///
     /// - Steps 1 to (current_step-1): grey, semi-transparent
@@ -250,12 +239,44 @@ impl StepRenderData {
         view_state: &ViewState,
         visibility: &VisibilitySettings,
     ) {
-        // Render grid and nodes based on visibility settings
+        // Render grid based on visibility settings
         if visibility.show_grid {
             self.render_grid_inline(painter, rect, view_state);
         }
+
+        // Collect active node IDs (nodes connected to installed elements)
+        let current = self.current_step;
+        let active_node_ids: std::collections::HashSet<i32> = self
+            .base
+            .elements
+            .iter()
+            .enumerate()
+            .filter(|(element_idx, _)| {
+                let mut element_step = 0usize;
+                for (step_idx, step_elements) in self.step_elements.iter().enumerate() {
+                    if step_elements.contains(element_idx) {
+                        element_step = step_idx + 1;
+                        break;
+                    }
+                }
+                element_step != 0 && element_step <= current
+            })
+            .flat_map(|(_, e)| [e.node_i_id, e.node_j_id])
+            .collect();
+
+        // Render nodes: active (blue) + ghost (gray)
         if visibility.show_nodes {
-            self.render_nodes_inline(painter, rect, view_state);
+            for node in &self.base.nodes {
+                let pos = self.base.project_to_2d(node.x, node.y, node.z, view_state);
+                if !rect.contains(pos) {
+                    continue;
+                }
+                if active_node_ids.contains(&node.id) {
+                    painter.circle_filled(pos, ACTIVE_NODE_RADIUS, ACTIVE_NODE_COLOR);
+                } else if visibility.show_hidden {
+                    painter.circle_filled(pos, GHOST_NODE_RADIUS, GHOST_NODE_COLOR);
+                }
+            }
         }
 
         // Ghost: render uninstalled elements first (behind active ones)
@@ -313,34 +334,54 @@ impl StepRenderData {
         visibility: &VisibilitySettings,
         current_sequence: usize,
     ) {
-        // Render grid and nodes based on visibility settings
+        // Render grid based on visibility settings
         if visibility.show_grid {
             self.render_grid_inline(painter, rect, view_state);
         }
+
+        // Collect installed element indices for this sequence position
+        let total = if !self.sequence_order.is_empty() {
+            self.sequence_order.len()
+        } else {
+            self.base.elements.len()
+        };
+        let max_pos = current_sequence.min(total);
+        let installed_elem_indices: std::collections::HashSet<usize> = (0..max_pos)
+            .map(|pos| {
+                if !self.sequence_order.is_empty() {
+                    self.sequence_order[pos]
+                } else {
+                    pos
+                }
+            })
+            .collect();
+
+        // Collect active node IDs (nodes connected to installed elements)
+        let active_node_ids: std::collections::HashSet<i32> = installed_elem_indices
+            .iter()
+            .filter_map(|&idx| self.base.elements.get(idx))
+            .flat_map(|e| [e.node_i_id, e.node_j_id])
+            .collect();
+
+        // Render nodes: active (blue) + ghost (gray)
         if visibility.show_nodes {
-            self.render_nodes_inline(painter, rect, view_state);
+            for node in &self.base.nodes {
+                let pos = self.base.project_to_2d(node.x, node.y, node.z, view_state);
+                if !rect.contains(pos) {
+                    continue;
+                }
+                if active_node_ids.contains(&node.id) {
+                    painter.circle_filled(pos, ACTIVE_NODE_RADIUS, ACTIVE_NODE_COLOR);
+                } else if visibility.show_hidden {
+                    painter.circle_filled(pos, GHOST_NODE_RADIUS, GHOST_NODE_COLOR);
+                }
+            }
         }
 
         // Ghost: render elements after current_sequence first (behind active ones)
         if visibility.show_elements && visibility.show_hidden && !self.base.elements.is_empty() {
-            let total = if !self.sequence_order.is_empty() {
-                self.sequence_order.len()
-            } else {
-                self.base.elements.len()
-            };
-            let max_pos = current_sequence.min(total);
-            // Collect installed element indices
-            let installed: std::collections::HashSet<usize> = (0..max_pos)
-                .map(|pos| {
-                    if !self.sequence_order.is_empty() {
-                        self.sequence_order[pos]
-                    } else {
-                        pos
-                    }
-                })
-                .collect();
             for (elem_idx, element) in self.base.elements.iter().enumerate() {
-                if installed.contains(&elem_idx) {
+                if installed_elem_indices.contains(&elem_idx) {
                     continue;
                 }
                 let node_i = self.base.nodes.iter().find(|n| n.id == element.node_i_id);
@@ -607,16 +648,6 @@ impl StepRenderData {
             n = n / 26 - 1;
         }
         result
-    }
-
-    /// Render nodes as small dots (inlined from RenderData to avoid private method issue)
-    fn render_nodes_inline(&self, painter: &Painter, rect: Rect, view_state: &ViewState) {
-        for node in &self.base.nodes {
-            let pos = self.base.project_to_2d(node.x, node.y, node.z, view_state);
-            if rect.contains(pos) {
-                painter.circle_filled(pos, ACTIVE_NODE_RADIUS, ACTIVE_NODE_COLOR);
-            }
-        }
     }
 
     /// Render elements with step-based coloring

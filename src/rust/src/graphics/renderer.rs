@@ -30,7 +30,7 @@ impl Default for VisibilitySettings {
 
 // ── Shared rendering style constants ──────────────────────────────────────────
 /// Active node: blue dot, same as Dev Model view
-pub const ACTIVE_NODE_RADIUS: f32 = 3.0;
+pub const ACTIVE_NODE_RADIUS: f32 = 2.0;
 pub const ACTIVE_NODE_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 100, 200);
 
 /// Ghost (inactive/uninstalled) element line style
@@ -435,7 +435,7 @@ impl RenderData {
         for node in &self.nodes {
             let pos = self.project_to_2d(node.x, node.y, node.z, view_state);
             if rect.contains(pos) {
-                painter.circle_filled(pos, 3.0, egui::Color32::from_rgb(0, 100, 200));
+                painter.circle_filled(pos, ACTIVE_NODE_RADIUS, ACTIVE_NODE_COLOR);
             }
         }
     }

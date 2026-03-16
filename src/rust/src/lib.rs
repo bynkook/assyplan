@@ -1781,7 +1781,9 @@ impl eframe::App for AssyPlanApp {
                                             .calculate_transform(rect_3d, &self.view_state);
 
                                         // Revit-style grid lines (same as dev mode)
-                                        render_data.render_grid(&painter, rect_3d, &self.view_state);
+                                        if self.ui_state.show_grid {
+                                            render_data.render_grid(&painter, rect_3d, &self.view_state);
+                                        }
 
                                         let node_map: std::collections::HashMap<
                                             i32,
