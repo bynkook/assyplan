@@ -372,7 +372,10 @@ pub fn validate_column_support(
 
 /// Validate girder support
 ///
-/// A girder's node_i and node_j must both be connected to already-stable elements.
+/// A girder's node_i and node_j must BOTH be connected to already-stable COLUMNS.
+/// Connecting to another girder alone is not sufficient — the girder must be
+/// anchored to columns on both ends. This prevents cantilever configurations
+/// (one end free or only connected to a non-column element) from passing.
 pub fn validate_girder_support(
     element: &StabilityElement,
     _nodes: &[StabilityNode],
@@ -383,20 +386,25 @@ pub fn validate_girder_support(
         return false;
     }
 
-    let ni_supported = is_node_supported(element.node_i_id, all_elements, stable_element_ids);
-    let nj_supported = is_node_supported(element.node_j_id, all_elements, stable_element_ids);
+    let ni_supported =
+        is_node_supported_by_column(element.node_i_id, all_elements, stable_element_ids);
+    let nj_supported =
+        is_node_supported_by_column(element.node_j_id, all_elements, stable_element_ids);
 
     ni_supported && nj_supported
 }
 
-/// Check if a node is supported by stable elements
-fn is_node_supported(
+/// Check if a node is supported specifically by a stable COLUMN.
+/// Used by validate_girder_support to prevent cantilever false positives.
+fn is_node_supported_by_column(
     node_id: i32,
     elements: &[StabilityElement],
     stable_element_ids: &HashSet<i32>,
 ) -> bool {
     let connected = get_elements_at_node(node_id, elements);
-    connected.iter().any(|e| stable_element_ids.contains(&e.id))
+    connected
+        .iter()
+        .any(|e| stable_element_ids.contains(&e.id) && e.member_type == "Column")
 }
 
 /// Check floor installation constraint
@@ -753,6 +761,16 @@ fn step_is_complete(
 }
 
 /// Check if current step elements are connected to the stable structure
+/// via a LATERAL connection (girder-to-column or girder-to-girder).
+///
+/// Pure vertical column stacking (upper col node_i == lower col node_j) is
+/// NOT considered "adjacent structure" connectivity — it is a basic column
+/// install precondition, not a stability criterion.
+///
+/// Connection requires:
+///   - At least one stable element is a **Girder**, OR
+///   - At least one current-step element is a **Girder** whose node touches
+///     any stable element's node.
 fn is_connected_to_stable_structure(
     assembled_stable: &HashSet<i32>,
     current_step_members: &[i32],
@@ -763,19 +781,39 @@ fn is_connected_to_stable_structure(
         return false;
     }
 
-    // Check if any current step element shares a node with assembled elements
+    // Build set of nodes belonging to stable GIRDERS only.
+    // Vertical column-to-column stacking must not count.
+    let stable_girder_nodes: HashSet<i32> = assembled_stable
+        .iter()
+        .filter_map(|id| element_by_id.get(id))
+        .filter(|e| e.member_type == "Girder")
+        .flat_map(|e| [e.node_i_id, e.node_j_id])
+        .collect();
+
+    // Build set of nodes belonging to ALL stable elements (for girder-in-step check).
+    let stable_all_nodes: HashSet<i32> = assembled_stable
+        .iter()
+        .filter_map(|id| element_by_id.get(id))
+        .flat_map(|e| [e.node_i_id, e.node_j_id])
+        .collect();
+
     for elem_id in current_step_members {
         if let Some(elem) = element_by_id.get(elem_id) {
-            for stable_id in assembled_stable {
-                if let Some(stable_elem) = element_by_id.get(stable_id) {
-                    // Check node connectivity
-                    if elem.node_i_id == stable_elem.node_i_id
-                        || elem.node_i_id == stable_elem.node_j_id
-                        || elem.node_j_id == stable_elem.node_i_id
-                        || elem.node_j_id == stable_elem.node_j_id
-                    {
-                        return true;
-                    }
+            if elem.member_type == "Girder" {
+                // A girder in the current step is laterally connected if either of its
+                // nodes touches any node of the stable structure (girder or column).
+                if stable_all_nodes.contains(&elem.node_i_id)
+                    || stable_all_nodes.contains(&elem.node_j_id)
+                {
+                    return true;
+                }
+            } else {
+                // A column in the current step is laterally connected ONLY if one of its
+                // nodes touches a stable GIRDER node (not another column's stacking node).
+                if stable_girder_nodes.contains(&elem.node_i_id)
+                    || stable_girder_nodes.contains(&elem.node_j_id)
+                {
+                    return true;
                 }
             }
         }
@@ -872,37 +910,46 @@ fn has_valid_girder_connection(
 }
 
 /// Check if two girders share a column connection point
+///
+/// The two girders must connect to the SAME column at the same physical node.
+/// This prevents parallel girders from passing when they each happen to connect
+/// to different columns that are both in `all_elements`.
 fn girders_share_column_connection(
     g1: &StabilityElement,
     g2: &StabilityElement,
     all_elements: &[StabilityElement],
 ) -> bool {
-    // Get columns that g1 connects to
     let g1_nodes = [g1.node_i_id, g1.node_j_id];
     let g2_nodes = [g2.node_i_id, g2.node_j_id];
 
-    // Find columns connected to g1
-    let g1_columns: Vec<i32> = all_elements
+    // Find columns connected to g1 at their exact node_i or node_j
+    // A column "connects" to a girder when the column's top node (node_j) matches
+    // a girder endpoint, OR the column's bottom node (node_i) matches.
+    let g1_column_nodes: HashSet<i32> = all_elements
         .iter()
-        .filter(|e| {
-            e.member_type == "Column"
-                && (g1_nodes.contains(&e.node_i_id) || g1_nodes.contains(&e.node_j_id))
-        })
-        .map(|e| e.id)
+        .filter(|e| e.member_type == "Column")
+        .filter(|c| g1_nodes.contains(&c.node_i_id) || g1_nodes.contains(&c.node_j_id))
+        .flat_map(|c| [c.node_i_id, c.node_j_id])
         .collect();
 
-    // Find columns connected to g2
-    let g2_columns: Vec<i32> = all_elements
+    let g2_column_nodes: HashSet<i32> = all_elements
         .iter()
-        .filter(|e| {
-            e.member_type == "Column"
-                && (g2_nodes.contains(&e.node_i_id) || g2_nodes.contains(&e.node_j_id))
-        })
-        .map(|e| e.id)
+        .filter(|e| e.member_type == "Column")
+        .filter(|c| g2_nodes.contains(&c.node_i_id) || g2_nodes.contains(&c.node_j_id))
+        .flat_map(|c| [c.node_i_id, c.node_j_id])
         .collect();
 
-    // Check if they share a column
-    g1_columns.iter().any(|c| g2_columns.contains(c))
+    // Require at least one SHARED node between the two sets — meaning the same
+    // physical node is part of a column connected to both girders.
+    // This ensures the two girders actually meet at the same column junction.
+    let shared_nodes: HashSet<&i32> = g1_column_nodes.intersection(&g2_column_nodes).collect();
+
+    // Additionally, the shared node must actually be an endpoint of BOTH girders
+    // (or their columns at that same node) to prevent false positives from
+    // distant columns that happen to share node IDs elsewhere in the structure.
+    shared_nodes
+        .iter()
+        .any(|&&n| g1_nodes.contains(&n) || g2_nodes.contains(&n))
 }
 
 // ============================================================================
@@ -1596,5 +1643,386 @@ mod tests {
         assert_eq!(render_table.len(), 5);
         // All elements should be in step 1
         assert!(render_table.iter().all(|(step, _, _)| *step == 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for stability condition bugs
+    // -----------------------------------------------------------------------
+
+    /// Bug 1 regression: 2 columns + 1 girder must NOT be a valid step.
+    /// Minimum assembly requires 3 columns + 2 perpendicular girders.
+    #[test]
+    fn test_step_not_valid_two_columns_one_girder() {
+        let nodes = create_test_nodes();
+        // 2 ground columns (id 1,2) + 1 girder connecting their tops (id 4)
+        let elements = vec![
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 4,
+                node_i_id: 5,
+                node_j_id: 6,
+                member_type: "Girder".to_string(),
+            },
+        ];
+        // No assembled_stable yet → disconnected case → must require 3 cols + 2 girders
+        assert!(
+            !has_minimum_assembly(&nodes, &elements),
+            "2 columns + 1 girder must NOT satisfy minimum assembly"
+        );
+    }
+
+    /// Bug 2 regression: 3 parallel columns + 2 parallel girders must NOT be valid.
+    /// The 2 girders run in the same direction (X), so no 90° pair exists.
+    #[test]
+    fn test_step_not_valid_three_columns_two_parallel_girders() {
+        // Nodes: 3 ground + 3 first-floor, all in X direction (y=0)
+        let nodes = vec![
+            StabilityNode {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 2,
+                x: 1000.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 3,
+                x: 2000.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 4,
+                x: 0.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 5,
+                x: 1000.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 6,
+                x: 2000.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+        ];
+        let elements = vec![
+            // 3 columns (ground → first floor)
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 4,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 3,
+                node_i_id: 3,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            // 2 girders — both in X direction (parallel)
+            StabilityElement {
+                id: 4,
+                node_i_id: 4,
+                node_j_id: 5,
+                member_type: "Girder".to_string(),
+            },
+            StabilityElement {
+                id: 5,
+                node_i_id: 5,
+                node_j_id: 6,
+                member_type: "Girder".to_string(),
+            },
+        ];
+        assert!(
+            !has_minimum_assembly(&nodes, &elements),
+            "3 columns + 2 parallel girders must NOT satisfy minimum assembly (need 90° pair)"
+        );
+    }
+
+    /// Bug 3 regression: cantilever girder (one free end) must NOT pass validate_girder_support.
+    #[test]
+    fn test_cantilever_girder_not_stable() {
+        let nodes = create_test_nodes();
+        let all_elements = vec![
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            // Girder: node_i (5) connected to stable col 1, node_j (7) has NO stable column
+            StabilityElement {
+                id: 4,
+                node_i_id: 5,
+                node_j_id: 7,
+                member_type: "Girder".to_string(),
+            },
+        ];
+        // Only columns 1 and 2 are stable
+        let stable_ids: HashSet<i32> = [1, 2].into_iter().collect();
+        let girder = &all_elements[2]; // id=4
+
+        assert!(
+            !validate_girder_support(girder, &nodes, &all_elements, &stable_ids),
+            "Cantilever girder (free end at node 7) must NOT be supported"
+        );
+    }
+
+    /// Bug 4 regression: column stacking (upper col node_i == lower col node_j) must NOT
+    /// count as "connected to adjacent structure" in is_connected_to_stable_structure.
+    #[test]
+    fn test_column_stacking_not_lateral_connection() {
+        // Floor 1 assembly is stable (3 cols + 2 girders)
+        let nodes = vec![
+            // Ground (z=0)
+            StabilityNode {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 2,
+                x: 1000.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 3,
+                x: 0.0,
+                y: 1000.0,
+                z: 0.0,
+            },
+            // Floor 1 (z=3000)
+            StabilityNode {
+                id: 4,
+                x: 0.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 5,
+                x: 1000.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 6,
+                x: 0.0,
+                y: 1000.0,
+                z: 3000.0,
+            },
+            // Floor 2 (z=6000)
+            StabilityNode {
+                id: 7,
+                x: 0.0,
+                y: 0.0,
+                z: 6000.0,
+            },
+            StabilityNode {
+                id: 8,
+                x: 1000.0,
+                y: 0.0,
+                z: 6000.0,
+            },
+        ];
+        let all_elements = vec![
+            // Floor 1 stable columns
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 4,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 3,
+                node_i_id: 3,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            // Floor 2 columns being tested (stacked on top of floor 1 cols)
+            StabilityElement {
+                id: 4,
+                node_i_id: 4,
+                node_j_id: 7,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 5,
+                node_i_id: 5,
+                node_j_id: 8,
+                member_type: "Column".to_string(),
+            },
+        ];
+        let element_by_id: HashMap<i32, &StabilityElement> =
+            all_elements.iter().map(|e| (e.id, e)).collect();
+
+        // Floor 1 columns are stable (but NO girders assembled yet)
+        let assembled_stable: HashSet<i32> = [1, 2, 3].into_iter().collect();
+        // Current step: 2 floor-2 columns only (no girder)
+        let current_step = vec![4, 5];
+
+        let connected = is_connected_to_stable_structure(
+            &assembled_stable,
+            &current_step,
+            &element_by_id,
+            &nodes,
+        );
+        assert!(
+            !connected,
+            "Column stacking (upper col node_i == lower col node_j) must NOT \
+             count as lateral connection — no stable girder exists yet"
+        );
+    }
+
+    /// Positive test: 2F columns ARE laterally connected once 1F girders are in assembled_stable.
+    #[test]
+    fn test_column_connected_via_stable_girder() {
+        let nodes = vec![
+            StabilityNode {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 2,
+                x: 1000.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 3,
+                x: 0.0,
+                y: 1000.0,
+                z: 0.0,
+            },
+            StabilityNode {
+                id: 4,
+                x: 0.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 5,
+                x: 1000.0,
+                y: 0.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 6,
+                x: 0.0,
+                y: 1000.0,
+                z: 3000.0,
+            },
+            StabilityNode {
+                id: 7,
+                x: 0.0,
+                y: 0.0,
+                z: 6000.0,
+            },
+            StabilityNode {
+                id: 8,
+                x: 1000.0,
+                y: 0.0,
+                z: 6000.0,
+            },
+        ];
+        let all_elements = vec![
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 4,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 3,
+                node_i_id: 3,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            // 1F girder (X-direction, node 4-5)
+            StabilityElement {
+                id: 10,
+                node_i_id: 4,
+                node_j_id: 5,
+                member_type: "Girder".to_string(),
+            },
+            // 2F columns stacked on 1F
+            StabilityElement {
+                id: 4,
+                node_i_id: 4,
+                node_j_id: 7,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 5,
+                node_i_id: 5,
+                node_j_id: 8,
+                member_type: "Column".to_string(),
+            },
+        ];
+        let element_by_id: HashMap<i32, &StabilityElement> =
+            all_elements.iter().map(|e| (e.id, e)).collect();
+
+        // Floor 1 cols + girder are stable
+        let assembled_stable: HashSet<i32> = [1, 2, 3, 10].into_iter().collect();
+        // Current step: 2F column (node_i=4 touches girder 10)
+        let current_step = vec![4];
+
+        let connected = is_connected_to_stable_structure(
+            &assembled_stable,
+            &current_step,
+            &element_by_id,
+            &nodes,
+        );
+        assert!(
+            connected,
+            "2F column whose node_i touches a stable girder node SHOULD be laterally connected"
+        );
     }
 }
