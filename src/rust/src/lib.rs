@@ -193,6 +193,8 @@ pub struct AssyPlanApp {
     stability_element_data: Vec<(String, Option<String>)>,
     // Simulation grid — stored after run_simulation() so View tab can render 3D
     sim_grid: Option<sim_grid::SimGrid>,
+    // RenderData built once from sim_grid (cached to avoid per-frame fit recalculation)
+    sim_render_data: Option<graphics::RenderData>,
 }
 
 impl Default for AssyPlanApp {
@@ -207,6 +209,7 @@ impl Default for AssyPlanApp {
             stability_elements: Vec::new(),
             stability_element_data: Vec::new(),
             sim_grid: None,
+            sim_render_data: None,
         }
     }
 }
@@ -815,6 +818,29 @@ impl AssyPlanApp {
         // Store grid so the View tab can render a 3D view of installed elements
         self.sim_grid = Some(grid.clone());
 
+        // Build RenderData once from the grid (cached — avoids per-frame fit recalculation
+        // which causes zoom oscillation when orbit angle changes the projected bounding box).
+        {
+            let mut rd = graphics::RenderData::new();
+            for n in &grid.nodes {
+                rd.add_node(graphics::renderer::Node {
+                    id: n.id,
+                    x: n.x,
+                    y: n.y,
+                    z: n.z,
+                });
+            }
+            for e in &grid.elements {
+                rd.add_element(graphics::renderer::Element {
+                    id: e.id,
+                    node_i_id: e.node_i_id,
+                    node_j_id: e.node_j_id,
+                    member_type: e.member_type.clone(),
+                });
+            }
+            self.sim_render_data = Some(rd);
+        }
+
         // Select best scenario: most total members installed (highest completion)
         let best_idx = scenarios
             .iter()
@@ -1019,6 +1045,7 @@ impl AssyPlanApp {
         self.stability_element_data.clear();
         // Clear simulation grid
         self.sim_grid = None;
+        self.sim_render_data = None;
     }
 }
 
@@ -1463,7 +1490,7 @@ impl eframe::App for AssyPlanApp {
                             && (self.ui_state.sim_selected_scenario.is_some() || self.ui_state.sim_view_is_model);
 
                         if has_3d {
-                            // Bottom panel: 3D view (resizable, default 300px)
+                            // Bottom panel: 3D view (resizable, default 340px)
                             egui::TopBottomPanel::bottom("sim_3d_panel")
                                 .resizable(true)
                                 .default_height(340.0)
@@ -1692,7 +1719,6 @@ impl eframe::App for AssyPlanApp {
                                     if let Some(ref grid) = self.sim_grid {
                                         // Render using a painter at the full 3D panel rect
                                         let painter = ui.painter_at(rect_3d);
-                                        use crate::graphics::renderer::{Element, Node, RenderData};
                                         use std::collections::HashSet;
 
                                         // In Model mode: all elements are "installed" (fully active)
@@ -1737,23 +1763,10 @@ impl eframe::App for AssyPlanApp {
                                             egui::Color32::from_gray(18),
                                         );
 
-                                        let mut render_data = RenderData::new();
-                                        for n in &grid.nodes {
-                                            render_data.add_node(Node {
-                                                id: n.id,
-                                                x: n.x,
-                                                y: n.y,
-                                                z: n.z,
-                                            });
-                                        }
-                                        for e in &grid.elements {
-                                            render_data.add_element(Element {
-                                                id: e.id,
-                                                node_i_id: e.node_i_id,
-                                                node_j_id: e.node_j_id,
-                                                member_type: e.member_type.clone(),
-                                            });
-                                        }
+                                        // Use cached RenderData (built once when sim_grid was set).
+                                        // Avoids per-frame fit recalculation which caused zoom
+                                        // oscillation when orbit angle changed the projected bbox.
+                                        if let Some(ref mut render_data) = self.sim_render_data {
                                         render_data
                                             .calculate_transform(rect_3d, &self.view_state);
 
@@ -1981,7 +1994,10 @@ impl eframe::App for AssyPlanApp {
                                             egui::FontId::proportional(9.0),
                                             egui::Color32::from_gray(180),
                                         );
+                                        } // end if let Some(ref mut render_data)
                                     }
+                                    // View cube overlay — matches dev mode, using sim 3D rect
+                                    graphics::axis_cube::paint_axis_cube(ctx, rect_3d, &self.view_state);
                                 });
                         }
 
@@ -2524,6 +2540,7 @@ fn render_data(data: &PyRenderData) -> PyResult<()> {
                 stability_elements: Vec::new(),
                 stability_element_data: Vec::new(),
                 sim_grid: None,
+                sim_render_data: None,
             }) as Box<dyn eframe::App>
         }),
     )
