@@ -528,27 +528,28 @@ impl StepRenderData {
         // Grid line stroke
         let stroke = Stroke::new(1.0, Color32::from_gray(120));
 
-        // Extension distance for grid lines beyond data bounds (for bubble marker placement)
-        let extend_dist = (max_x - min_x).max(max_y - min_y) * 0.15;
-
         // Bubble marker settings
-        let bubble_radius = 12.0_f32;
+        let bubble_radius = 10.0_f32;
+        let bubble_gap_px = 14.0_f32;
+        let line_tail_px = 20.0_f32;
         let bubble_stroke = Stroke::new(1.5, Color32::from_gray(100));
         let text_color = Color32::from_gray(80);
 
         // Draw X-direction grid lines (vertical lines in plan view)
         for (idx, &x_key) in unique_x.iter().enumerate() {
             let x = x_key as f64 / 10.0;
-            let p1 = self
-                .base
-                .project_to_2d(x, min_y - extend_dist, min_z, view_state);
-            let p2 = self
-                .base
-                .project_to_2d(x, max_y + extend_dist, min_z, view_state);
+            let edge_start = self.base.project_to_2d(x, min_y, min_z, view_state);
+            let edge_end = self.base.project_to_2d(x, max_y, min_z, view_state);
+            let line_vec = edge_end - edge_start;
+            if line_vec.length_sq() <= f32::EPSILON {
+                continue;
+            }
+            let dir = line_vec.normalized();
 
-            // Trim line start so it doesn't intrude into the bubble circle
-            let dir = (p2 - p1).normalized();
-            let p1_trimmed = p1 + dir * bubble_radius;
+            // Keep bubble-to-boundary gap in screen pixels, independent of model size.
+            let bubble_pos = edge_start - dir * (bubble_radius + bubble_gap_px);
+            let p1_trimmed = bubble_pos + dir * bubble_radius;
+            let p2 = edge_end + dir * line_tail_px;
 
             // Draw grid line (starting from trimmed point to avoid bubble overlap)
             painter.line_segment([p1_trimmed, p2], stroke);
@@ -556,7 +557,7 @@ impl StepRenderData {
             // Draw numbered bubble marker at extended end
             self.draw_grid_bubble(
                 painter,
-                p1,
+                bubble_pos,
                 idx + 1,
                 bubble_radius,
                 bubble_stroke,
@@ -568,16 +569,18 @@ impl StepRenderData {
         // Use letters A, B, C... for Y-direction grids (Revit convention)
         for (idx, &y_key) in unique_y.iter().enumerate() {
             let y = y_key as f64 / 10.0;
-            let p1 = self
-                .base
-                .project_to_2d(min_x - extend_dist, y, min_z, view_state);
-            let p2 = self
-                .base
-                .project_to_2d(max_x + extend_dist, y, min_z, view_state);
+            let edge_start = self.base.project_to_2d(min_x, y, min_z, view_state);
+            let edge_end = self.base.project_to_2d(max_x, y, min_z, view_state);
+            let line_vec = edge_end - edge_start;
+            if line_vec.length_sq() <= f32::EPSILON {
+                continue;
+            }
+            let dir = line_vec.normalized();
 
-            // Trim line start so it doesn't intrude into the bubble circle
-            let dir = (p2 - p1).normalized();
-            let p1_trimmed = p1 + dir * bubble_radius;
+            // Keep bubble-to-boundary gap in screen pixels, independent of model size.
+            let bubble_pos = edge_start - dir * (bubble_radius + bubble_gap_px);
+            let p1_trimmed = bubble_pos + dir * bubble_radius;
+            let p2 = edge_end + dir * line_tail_px;
 
             // Draw grid line (starting from trimmed point to avoid bubble overlap)
             painter.line_segment([p1_trimmed, p2], stroke);
@@ -586,7 +589,7 @@ impl StepRenderData {
             let label = Self::index_to_letter(idx);
             self.draw_grid_bubble_text(
                 painter,
-                p1,
+                bubble_pos,
                 &label,
                 bubble_radius,
                 bubble_stroke,
@@ -610,7 +613,7 @@ impl StepRenderData {
 
         // Draw number text centered in bubble
         let text = format!("{}", number);
-        let font_id = eframe::egui::FontId::proportional(radius * 1.2);
+        let font_id = eframe::egui::FontId::proportional(radius * 1.0);
         let galley = painter.layout_no_wrap(text, font_id, text_color);
         let text_pos = Pos2::new(pos.x - galley.size().x / 2.0, pos.y - galley.size().y / 2.0);
         painter.galley(text_pos, galley, text_color);
@@ -630,7 +633,7 @@ impl StepRenderData {
         painter.circle_stroke(pos, radius, stroke);
 
         // Draw text centered in bubble
-        let font_id = eframe::egui::FontId::proportional(radius * 1.2);
+        let font_id = eframe::egui::FontId::proportional(radius * 1.0);
         let galley = painter.layout_no_wrap(text.to_string(), font_id, text_color);
         let text_pos = Pos2::new(pos.x - galley.size().x / 2.0, pos.y - galley.size().y / 2.0);
         painter.galley(text_pos, galley, text_color);

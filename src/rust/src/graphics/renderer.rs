@@ -326,11 +326,10 @@ impl RenderData {
         // Grid line stroke
         let stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(120));
 
-        // Extension distance for grid lines beyond data bounds (for bubble marker placement)
-        let extend_dist = (max_x - min_x).max(max_y - min_y) * 0.15;
-
         // Bubble marker settings
-        let bubble_radius = 12.0_f32;
+        let bubble_radius = 10.0_f32;
+        let bubble_gap_px = 14.0_f32;
+        let line_tail_px = 20.0_f32;
         let bubble_stroke = egui::Stroke::new(1.5, egui::Color32::from_gray(100));
         let text_color = egui::Color32::from_gray(80);
 
@@ -338,18 +337,23 @@ impl RenderData {
         // These run parallel to Y axis at each unique X coordinate
         for (idx, &x_key) in unique_x.iter().enumerate() {
             let x = x_key as f64 / 10.0;
-            let p1 = self.project_to_2d(x, min_y - extend_dist, min_z, view_state);
-            let p2 = self.project_to_2d(x, max_y + extend_dist, min_z, view_state);
+            let edge_start = self.project_to_2d(x, min_y, min_z, view_state);
+            let edge_end = self.project_to_2d(x, max_y, min_z, view_state);
+            let line_vec = edge_end - edge_start;
+            if line_vec.length_sq() <= f32::EPSILON {
+                continue;
+            }
+            let dir = line_vec.normalized();
 
-            // Shrink line start by bubble_radius so it does not penetrate the circle marker
-            let dir = (p2 - p1).normalized();
-            let p1_trimmed = p1 + dir * bubble_radius;
+            // Keep bubble-to-boundary gap in screen pixels, independent of model size.
+            let bubble_pos = edge_start - dir * (bubble_radius + bubble_gap_px);
+            let p1_trimmed = bubble_pos + dir * bubble_radius;
+            let p2 = edge_end + dir * line_tail_px;
 
             // Draw grid line (trimmed at bubble end)
             painter.line_segment([p1_trimmed, p2], stroke);
 
-            // Draw bubble marker at the extended end (bottom side, min_y - extend_dist)
-            let bubble_pos = p1;
+            // Draw bubble marker at the min bound side
             self.draw_grid_bubble(
                 painter,
                 bubble_pos,
@@ -365,18 +369,23 @@ impl RenderData {
         // Use letters A, B, C... for Y-direction grids (Revit convention)
         for (idx, &y_key) in unique_y.iter().enumerate() {
             let y = y_key as f64 / 10.0;
-            let p1 = self.project_to_2d(min_x - extend_dist, y, min_z, view_state);
-            let p2 = self.project_to_2d(max_x + extend_dist, y, min_z, view_state);
+            let edge_start = self.project_to_2d(min_x, y, min_z, view_state);
+            let edge_end = self.project_to_2d(max_x, y, min_z, view_state);
+            let line_vec = edge_end - edge_start;
+            if line_vec.length_sq() <= f32::EPSILON {
+                continue;
+            }
+            let dir = line_vec.normalized();
 
-            // Shrink line start by bubble_radius so it does not penetrate the circle marker
-            let dir = (p2 - p1).normalized();
-            let p1_trimmed = p1 + dir * bubble_radius;
+            // Keep bubble-to-boundary gap in screen pixels, independent of model size.
+            let bubble_pos = edge_start - dir * (bubble_radius + bubble_gap_px);
+            let p1_trimmed = bubble_pos + dir * bubble_radius;
+            let p2 = edge_end + dir * line_tail_px;
 
             // Draw grid line (trimmed at bubble end)
             painter.line_segment([p1_trimmed, p2], stroke);
 
-            // Draw bubble marker at the extended end (left side, min_x - extend_dist)
-            let bubble_pos = p1;
+            // Draw bubble marker at the min bound side
             let label = index_to_letter(idx);
             self.draw_grid_bubble_text(
                 painter,
@@ -404,7 +413,7 @@ impl RenderData {
 
         // Draw number text centered in bubble
         let text = format!("{}", number);
-        let font_id = egui::FontId::proportional(radius * 1.2);
+        let font_id = egui::FontId::proportional(radius * 1.0);
         let galley = painter.layout_no_wrap(text, font_id, text_color);
         let text_pos = egui::pos2(pos.x - galley.size().x / 2.0, pos.y - galley.size().y / 2.0);
         painter.galley(text_pos, galley, text_color);
@@ -424,7 +433,7 @@ impl RenderData {
         painter.circle_stroke(pos, radius, stroke);
 
         // Draw text centered in bubble
-        let font_id = egui::FontId::proportional(radius * 1.2);
+        let font_id = egui::FontId::proportional(radius * 1.0);
         let galley = painter.layout_no_wrap(text.to_string(), font_id, text_color);
         let text_pos = egui::pos2(pos.x - galley.size().x / 2.0, pos.y - galley.size().y / 2.0);
         painter.galley(text_pos, galley, text_color);
