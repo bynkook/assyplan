@@ -2052,12 +2052,22 @@ impl eframe::App for AssyPlanApp {
                             && (self.ui_state.sim_selected_scenario.is_some() || self.ui_state.sim_view_is_model);
 
                         if has_3d {
+                            let total_view_height = ui.available_height();
+                            let min_top_height = 120.0_f32;
+                            let min_bottom_height = 100.0_f32;
+                            let max_bottom_height =
+                                (total_view_height - min_top_height).max(min_bottom_height);
+
                             // Bottom panel: 3D view (resizable, default 340px)
                             egui::TopBottomPanel::bottom("sim_3d_panel")
                                 .resizable(true)
                                 .default_height(340.0)
-                                .min_height(100.0)
+                                .min_height(min_bottom_height)
+                                .max_height(max_bottom_height)
                                 .show_inside(ui, |ui| {
+                                    // Add a small top gap so the panel divider above is not visually glued to the nav bar.
+                                    ui.add_space(4.0);
+
                                     // ── Step / Sequence navigation bar (Construction mode only) ─
                                     let (max_step, step_info, max_sequence, seq_info) = if !self.ui_state.sim_view_is_model {
                                         self

@@ -32,7 +32,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     let add_usize_input =
         |ui: &mut Ui, value: &mut usize, min: usize, max: usize, width: f32| -> bool {
             ui.add_sized(
-                [width, 0.0],
+                [width, 20.0],
                 egui::DragValue::new(value)
                     .clamp_range(min..=max)
                     .speed(1.0)
@@ -44,7 +44,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     let add_f64_input =
         |ui: &mut Ui, value: &mut f64, min: f64, max: f64, width: f32| -> bool {
             ui.add_sized(
-                [width, 0.0],
+                [width, 20.0],
                 egui::DragValue::new(value)
                     .clamp_range(min..=max)
                     .speed(0.1)
@@ -70,6 +70,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.nx, 2..=20)
                         .text("")
+                        .show_value(false)
                         .clamp_to_range(true),
                 );
                 if ui.small_button("▶").clicked() {
@@ -92,6 +93,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.ny, 2..=100)
                         .text("")
+                        .show_value(false)
                         .clamp_to_range(true),
                 );
                 if ui.small_button("▶").clicked() {
@@ -114,6 +116,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.nz, 1..=20)
                         .text("")
+                        .show_value(false)
                         .clamp_to_range(true),
                 );
                 if ui.small_button("▶").clicked() {
@@ -133,6 +136,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.dx, 1000.0..=20000.0)
                         .text("")
+                        .show_value(false)
                         .fixed_decimals(0)
                         .clamp_to_range(true),
                 );
@@ -150,6 +154,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.dy, 1000.0..=20000.0)
                         .text("")
+                        .show_value(false)
                         .fixed_decimals(0)
                         .clamp_to_range(true),
                 );
@@ -167,6 +172,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.dz, 1000.0..=10000.0)
                         .text("")
+                        .show_value(false)
                         .fixed_decimals(0)
                         .clamp_to_range(true),
                 );
@@ -219,6 +225,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         ui.add(
             egui::Slider::new(&mut state.upper_floor_threshold, 0.0..=1.0)
                 .text("")
+                .show_value(false)
                 .fixed_decimals(2)
                 .clamp_to_range(true),
         );
@@ -242,6 +249,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(w1, 0.0..=1.0)
                         .text("")
+                        .show_value(false)
                         .fixed_decimals(2)
                         .clamp_to_range(true),
                 );
@@ -254,6 +262,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(w2, 0.0..=1.0)
                         .text("")
+                        .show_value(false)
                         .fixed_decimals(2)
                         .clamp_to_range(true),
                 );
@@ -266,6 +275,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(w3, 0.0..=1.0)
                         .text("")
+                        .show_value(false)
                         .fixed_decimals(2)
                         .clamp_to_range(true),
                 );
@@ -285,6 +295,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         ui.add(
             egui::Slider::new(&mut state.sim_scenario_count, 1..=200)
                 .text("")
+                .show_value(false)
                 .clamp_to_range(true),
         );
         let _ = add_usize_input(ui, &mut state.sim_scenario_count, 1, 200, 56.0);
