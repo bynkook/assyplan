@@ -222,16 +222,134 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     ui.add_space(4.0);
     ui.label("Upper-Floor Column Rate Threshold:");
     ui.horizontal(|ui| {
-        ui.add(
+        if ui
+            .add(
             egui::Slider::new(&mut state.upper_floor_threshold, 0.0..=1.0)
                 .text("")
                 .show_value(false)
                 .fixed_decimals(2)
                 .clamp_to_range(true),
-        );
-        let _ = add_f64_input(ui, &mut state.upper_floor_threshold, 0.0, 1.0, 64.0);
+        )
+            .changed()
+        {
+            changed = true;
+        }
+        if add_f64_input(ui, &mut state.upper_floor_threshold, 0.0, 1.0, 64.0) {
+            changed = true;
+        }
         ui.label(format!("{:.0}%", state.upper_floor_threshold * 100.0));
     });
+
+    ui.add_space(8.0);
+    ui.label("Lower-Floor Column Completion Ratio Threshold:");
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+            egui::Slider::new(&mut state.lower_floor_completion_ratio, 0.0..=1.0)
+                .text("")
+                .show_value(false)
+                .fixed_decimals(2)
+                .clamp_to_range(true),
+        )
+            .changed()
+        {
+            changed = true;
+        }
+        if add_f64_input(ui, &mut state.lower_floor_completion_ratio, 0.0, 1.0, 64.0) {
+            changed = true;
+        }
+        ui.label(format!("{:.0}%", state.lower_floor_completion_ratio * 100.0));
+    });
+
+    ui.add_space(8.0);
+    ui.label("Lower-Floor Forced Completion Threshold:");
+    ui.horizontal(|ui| {
+        if add_usize_input(ui, &mut state.lower_floor_forced_completion, 0, 50, 64.0) {
+            changed = true;
+        }
+        ui.label("members");
+    });
+
+    ui.add_space(8.0);
+    ui.label("Upper-Floor Boost Bonus (score):");
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Slider::new(&mut state.upper_floor_boost_bonus, 0.0..=10.0)
+                    .text("")
+                    .show_value(false)
+                    .fixed_decimals(2)
+                    .clamp_to_range(true),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if add_f64_input(ui, &mut state.upper_floor_boost_bonus, 0.0, 10.0, 64.0) {
+            changed = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "When lower-floor column completion reaches this threshold (default 80%), this value is added to upper-floor candidate scores. Higher values accelerate upper-floor entry.",
+        )
+        .small()
+        .weak(),
+    );
+
+    ui.add_space(8.0);
+    ui.label("Lower-Floor Forced Bonus (score):");
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Slider::new(&mut state.lower_floor_forced_bonus, 0.0..=10.0)
+                    .text("")
+                    .show_value(false)
+                    .fixed_decimals(2)
+                    .clamp_to_range(true),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if add_f64_input(ui, &mut state.lower_floor_forced_bonus, 0.0, 10.0, 64.0) {
+            changed = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "When remaining lower-floor members are at or below the forced completion threshold (default 5), this value is added to lower-floor candidate scores to prioritize lower-floor finish.",
+        )
+        .small()
+        .weak(),
+    );
+
+    ui.add_space(8.0);
+    ui.label("Upper-Floor Forced Penalty (score):");
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Slider::new(&mut state.upper_floor_forced_penalty, 0.0..=10.0)
+                    .text("")
+                    .show_value(false)
+                    .fixed_decimals(2)
+                    .clamp_to_range(true),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if add_f64_input(ui, &mut state.upper_floor_forced_penalty, 0.0, 10.0, 64.0) {
+            changed = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "When lower floor is in forced completion zone (default <= 5 remaining), this value is subtracted from upper-floor candidate scores. Higher values enforce lower-floor-first completion.",
+        )
+        .small()
+        .weak(),
+    );
 
     ui.add_space(12.0);
     ui.separator();

@@ -1158,7 +1158,18 @@ impl AssyPlanApp {
         let cfg = self.ui_state.grid_config.clone();
         let workfronts = self.ui_state.sim_workfronts.clone();
         let weights = self.ui_state.sim_weights;
-        let threshold = self.ui_state.upper_floor_threshold;
+        let constraints = sim_engine::SimConstraints {
+            upper_floor_column_rate_threshold: self.ui_state.upper_floor_threshold,
+            lower_floor_completion_ratio_threshold: self
+                .ui_state
+                .lower_floor_completion_ratio,
+            lower_floor_forced_completion_threshold: self
+                .ui_state
+                .lower_floor_forced_completion,
+            upper_floor_boost_bonus: self.ui_state.upper_floor_boost_bonus,
+            lower_floor_forced_bonus: self.ui_state.lower_floor_forced_bonus,
+            upper_floor_forced_penalty: self.ui_state.upper_floor_forced_penalty,
+        };
         let count = self.ui_state.sim_scenario_count;
 
         if self.ui_state.sim_running {
@@ -1202,7 +1213,7 @@ impl AssyPlanApp {
                     &grid,
                     &workfronts,
                     weights,
-                    threshold,
+                    constraints,
                     Some(progress),
                     Some(cancel.clone()),
                 );

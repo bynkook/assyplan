@@ -316,9 +316,21 @@ Sequence-driven Monte-Carlo + 강한 Pruning + Workfront-local Weighted Sampling
 #### 시뮬레이션 모드(Simulation Mode) 의 환경설정 및 제약
 
 - 시뮬레이션 모드를 시작하면 환경설정에서 설정한 Grid Plane 을 표시한 x-y plan view 가 표시되고 사용자는 교차점을 선택 가능해진다.
-- 상층부 기둥 설치율 제약 : threshold 기본 0.3 (강제 적용)
+- 상층부 기둥 설치율 제약 : `upper floor column rate threshold` 기본 0.3 (강제 적용, hard block)
+- 하층부 기둥 완료율 기준 : `lower floor column completion ratio threshold` 기본 0.80 (soft weighting)
+- 하층부 강제 마감 기준 : `lower floor forced completion threshold` 기본 5 (soft weighting)
+- 보너스 계수(사용자 조정 가능):
+  - `upper floor boost bonus` 기본 +2.5
+  - `lower floor forced bonus` 기본 +3.0
+  - `upper floor forced penalty` 기본 -2.0
 - **추가 제약** : 하나의 Step에서 독립안정구조(5개 단위)를 생성할 수 있는 경우라도,  
   **기존 구조에 연결 가능한 증분 후보가 1개 이상 존재하면 반드시 증분 후보를 우선** 선택하도록 강제
+
+- 3-threshold + 보너스 정책 요약:
+  - 상층부 기둥 설치 후보는 먼저 `upper floor column rate threshold`를 검사한다. `(상층 누적 + 1) / 하층 누적 > threshold` 이면 후보를 거부한다.
+  - hard block을 통과한 후보들 사이에서는 점수 가중치를 적용한다.
+    - 하층 기둥 완료율이 `lower floor column completion ratio threshold` 이상이면 상층 후보 점수에 `upper floor boost bonus`를 더한다.
+    - 하층 미설치 부재(기둥+거더) 수가 `lower floor forced completion threshold` 이하이면 하층 후보 점수에 `lower floor forced bonus`를 더하고, 상층 후보 점수에서 `upper floor forced penalty`를 뺀다.
 
 #### 성능 목표 및 최적화 전략
 
@@ -347,6 +359,15 @@ Sequence-driven Monte-Carlo + 강한 Pruning + Workfront-local Weighted Sampling
 3. z 레벨 간격 : 레벨간 층고(일단 이번 연구에서는 상수값 고정)
 
 - *상층부 기둥 설치율 제약* : 임의의 층 N에 대해 (N+1층 기둥 누적 설치 갯수) / (N층 기둥 누적 설치 갯수) 비율이 임계값(threshold)을 초과하지 않도록 제어한다. 사용자는 0~1 사이의 값을 설정할 수 있으며 기본값은 **0.3(30%)**이다. 이 값이 낮을수록 상층부 공사는 하층부가 충분히 완료된 후에만 진행할 수 있다. N층 기둥이 1개도 설치되지 않은 경우(분모=0) 비율은 0.0으로 처리한다.
+
+- *하층부 기둥 완료율 기준* : 임의의 상층 후보에 대해 하층 기둥 완료율 `하층 설치 기둥 / 하층 전체 기둥`이 임계값 이상이면 상층 후보 점수에 보너스를 적용한다. 사용자는 0~1 사이의 값을 설정할 수 있으며 기본값은 **0.8(80%)**이다.
+
+- *하층부 강제 마감 기준* : 하층 미설치 부재(기둥+거더) 수가 임계값 이하가 되면 하층 후보 점수에 강한 보너스를 주고 상층 후보 점수에는 패널티를 준다. 사용자는 정수값을 설정할 수 있으며 기본값은 **5**이다.
+
+- *보너스 계수(사용자 설정)* :
+  - `upper floor boost bonus` 기본 **+2.5** : 하층 완료율 기준을 넘긴 뒤 상층 진입을 빠르게 한다.
+  - `lower floor forced bonus` 기본 **+3.0** : 하층 마감 구간에서 하층 마감을 강하게 유도한다.
+  - `upper floor forced penalty` 기본 **-2.0** : 하층 마감 구간에서 상층 진행을 억제한다.
 
 #### 개발 3단계에 필요한 SKILLS.md 업데이트 항목
 
@@ -496,11 +517,33 @@ Sequence-driven Monte-Carlo + 강한 Pruning + Workfront-local Weighted Sampling
   - **분모=0 처리**: N층 기둥이 1개도 설치되지 않은 경우 비율은 **0.0**
   - **threshold 기본값**: **0.3 (30%)**
   - **개발 모드**: 참고용 수평 점선(threshold line)만 차트에 표시
-  - **시뮬레이션 모드**: 이 값이 threshold를 초과하지 않도록 부재 생성 순서를 제약하는 데 사용
+  - **시뮬레이션 모드**: 이 값은 hard block으로 사용되며, 상층 후보를 먼저 허용/차단한다.
+
+- *하층부 기둥 완료율 기준 (Lower-Floor Column Completion Ratio Threshold)*
+
+  하층 기둥 완료율 `하층 설치 기둥 / 하층 전체 기둥`이 기준값 이상이 되면 상층 후보 점수에 `upper floor boost bonus`를 추가합니다.
+
+  - **기본값**: **0.8 (80%)**
+  - **역할**: 상층부 진입 시점을 조절하는 soft weighting 기준
+
+- *하층부 강제 마감 기준 (Lower-Floor Forced Completion Threshold)*
+
+  하층 미설치 부재(기둥+거더) 수가 기준값 이하가 되면, 하층 후보 점수에는 `lower floor forced bonus`를 더하고 상층 후보 점수에서는 `upper floor forced penalty`를 차감합니다.
+
+  - **기본값**: **5 members**
+  - **역할**: 하층 마감 구간에서 하층 우선 완료를 유도하는 soft weighting 기준
+
+- *보너스 계수 (Bonus Coefficients)*
+
+  - **upper floor boost bonus**: 기본 **+2.5**
+  - **lower floor forced bonus**: 기본 **+3.0**
+  - **upper floor forced penalty**: 기본 **-2.0**
+
+  사용자는 이 3개 계수를 조정하여 상층 진입 속도와 하층 마감 강도를 직관적으로 튜닝할 수 있습니다.
 
   사용자는 이 임계값(%)을 조정하여, 하층부 우선 작업과 상층부 공사 진행 속도 간의 균형을 조절할 수 있습니다.
 
-  이 제약은 시뮬레이션의 각 step에서 새로운 기둥을 생성할 때마다 검사됩니다.
+  이 제약/가중치는 시뮬레이션의 각 step에서 새로운 후보를 평가할 때마다 반영됩니다.
 
 - *부재 설치 갯수 합계* = 현재까지 누적된 step 에서 설치된 COUNT(기둥) + COUNT(거더)
 

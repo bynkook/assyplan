@@ -20,6 +20,16 @@ use crate::stability::{
     StabilityElement,
 };
 
+#[derive(Clone, Copy, Debug)]
+pub struct SimConstraints {
+    pub upper_floor_column_rate_threshold: f64,
+    pub lower_floor_completion_ratio_threshold: f64,
+    pub lower_floor_forced_completion_threshold: usize,
+    pub upper_floor_boost_bonus: f64,
+    pub lower_floor_forced_bonus: f64,
+    pub upper_floor_forced_penalty: f64,
+}
+
 #[derive(Default, Clone)]
 struct WorkfrontState {
     owned_ids: HashSet<i32>,
@@ -53,15 +63,14 @@ struct SingleCandidate {
     element_id: i32,
     connectivity: usize,
     frontier_dist: f64,
-    is_lowest_floor: bool,
+    floor_bonus: f64,
 }
 
 impl SingleCandidate {
     fn score(&self, w1: f64, w2: f64) -> f64 {
         let connectivity_score = self.connectivity as f64;
         let frontier_score = 1.0 / (1.0 + self.frontier_dist.max(0.0));
-        let low_floor_bonus = if self.is_lowest_floor { 0.2 } else { 0.0 };
-        (w1 * connectivity_score) + (w2 * frontier_score) + low_floor_bonus
+        (w1 * connectivity_score) + (w2 * frontier_score) + self.floor_bonus
     }
 }
 
@@ -489,11 +498,6 @@ fn check_upper_floor_constraint_tracked(
             continue;
         }
 
-        let remaining_lower = total_lower - installed_lower;
-        if remaining_lower <= 5 && installed_lower > 0 {
-            return false;
-        }
-
         if installed_lower > 0 {
             let installed_upper = *installed_per_floor.get(&floor).unwrap_or(&0) + 1;
             let ratio = installed_upper as f64 / installed_lower as f64;
@@ -603,50 +607,73 @@ fn check_upper_floor_constraint(
     check_upper_floor_constraint_tracked(element_ids, &tracker, &installed_per_floor, threshold)
 }
 
-/// Find a floor that has ≤5 uninstalled elements and should be prioritized for completion.
-/// Returns the lowest such floor (1-indexed), or None if no floor needs priority completion.
-fn find_priority_completion_floor(
+fn total_elements_per_floor(grid: &SimGrid, dz: f64) -> HashMap<i32, usize> {
+    let mut result: HashMap<i32, usize> = HashMap::new();
+    for elem in &grid.elements {
+        if let Some(floor) = element_floor(elem.id, grid, dz) {
+            *result.entry(floor).or_insert(0) += 1;
+        }
+    }
+    result
+}
+
+fn installed_elements_per_floor(
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
     dz: f64,
-) -> Option<i32> {
-    // Count total and installed elements per floor
-    let mut total_per_floor: HashMap<i32, usize> = HashMap::new();
-    let mut installed_per_floor: HashMap<i32, usize> = HashMap::new();
-
-    for elem in &grid.elements {
-        let Some((_, _, z)) = grid.node_coords(elem.node_i_id) else {
-            continue;
-        };
-        let floor = if elem.member_type == "Column" {
-            (z / dz).round() as i32 + 1
-        } else {
-            // Girder floor is based on its z level
-            (z / dz).round() as i32
-        };
-
-        *total_per_floor.entry(floor).or_insert(0) += 1;
-        if installed_ids.contains(&elem.id) {
-            *installed_per_floor.entry(floor).or_insert(0) += 1;
+) -> HashMap<i32, usize> {
+    let mut result: HashMap<i32, usize> = HashMap::new();
+    for eid in installed_ids {
+        if let Some(floor) = element_floor(*eid, grid, dz) {
+            *result.entry(floor).or_insert(0) += 1;
         }
     }
+    result
+}
 
-    // Find lowest floor with 1-5 remaining elements (not 0, not >5)
-    let mut floors: Vec<i32> = total_per_floor.keys().copied().collect();
+fn compute_floor_bonus_map(
+    floor_tracker: &FloorTracker,
+    installed_columns_per_floor: &HashMap<i32, usize>,
+    installed_elements_per_floor: &HashMap<i32, usize>,
+    total_elements_per_floor: &HashMap<i32, usize>,
+    constraints: SimConstraints,
+) -> HashMap<i32, f64> {
+    let mut floor_bonus: HashMap<i32, f64> = HashMap::new();
+    let mut floors: Vec<i32> = total_elements_per_floor.keys().copied().collect();
     floors.sort();
 
     for floor in floors {
-        let total = *total_per_floor.get(&floor).unwrap_or(&0);
-        let installed = *installed_per_floor.get(&floor).unwrap_or(&0);
-        let remaining = total.saturating_sub(installed);
+        floor_bonus.entry(floor).or_insert(0.0);
 
-        // Only prioritize if: has some progress AND 1-5 remaining
-        if installed > 0 && remaining >= 1 && remaining <= 5 {
-            return Some(floor);
+        if floor <= 1 {
+            continue;
+        }
+
+        let lower_floor = floor - 1;
+        let lower_total_columns = *floor_tracker.total_per_floor.get(&lower_floor).unwrap_or(&0);
+        let lower_installed_columns = *installed_columns_per_floor.get(&lower_floor).unwrap_or(&0);
+
+        let lower_total_elements = *total_elements_per_floor.get(&lower_floor).unwrap_or(&0);
+        let lower_installed_elements = *installed_elements_per_floor.get(&lower_floor).unwrap_or(&0);
+        let lower_remaining_elements = lower_total_elements.saturating_sub(lower_installed_elements);
+
+        if lower_remaining_elements >= 1
+            && lower_remaining_elements <= constraints.lower_floor_forced_completion_threshold
+        {
+            *floor_bonus.entry(lower_floor).or_insert(0.0) += constraints.lower_floor_forced_bonus;
+            *floor_bonus.entry(floor).or_insert(0.0) -= constraints.upper_floor_forced_penalty;
+            continue;
+        }
+
+        if lower_total_columns > 0 {
+            let lower_completion_ratio = lower_installed_columns as f64 / lower_total_columns as f64;
+            if lower_completion_ratio >= constraints.lower_floor_completion_ratio_threshold {
+                *floor_bonus.entry(floor).or_insert(0.0) += constraints.upper_floor_boost_bonus;
+            }
         }
     }
 
-    None
+    floor_bonus
 }
 
 fn collect_single_candidates(
@@ -656,7 +683,7 @@ fn collect_single_candidates(
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    priority_floor: Option<i32>,
+    floor_bonus_by_floor: &HashMap<i32, f64>,
 ) -> Vec<SingleCandidate> {
     collect_single_candidates_optimized(
         wf,
@@ -665,7 +692,7 @@ fn collect_single_candidates(
         local_element_ids,
         committed_ids,
         node_pos,
-        priority_floor,
+        floor_bonus_by_floor,
     )
 }
 
@@ -677,7 +704,7 @@ fn collect_single_candidates_legacy(
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    priority_floor: Option<i32>,
+    floor_bonus_by_floor: &HashMap<i32, f64>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
@@ -690,12 +717,6 @@ fn collect_single_candidates_legacy(
         }
 
         let floor = element_floor(elem.id, grid, grid_dz(grid)).unwrap_or(0);
-        if let Some(priority) = priority_floor {
-            if floor != priority {
-                continue;
-            }
-        }
-
         let local_positions = local_positions_by_floor
             .get(&floor)
             .unwrap_or(&empty_positions);
@@ -746,7 +767,7 @@ fn collect_single_candidates_legacy(
             element_id: elem.id,
             connectivity,
             frontier_dist: dist,
-            is_lowest_floor: floor == 1,
+            floor_bonus: *floor_bonus_by_floor.get(&floor).unwrap_or(&0.0),
         });
     }
 
@@ -760,21 +781,14 @@ fn collect_single_candidates_optimized(
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    priority_floor: Option<i32>,
+    floor_bonus_by_floor: &HashMap<i32, f64>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
     let empty_positions: HashSet<(usize, usize)> = HashSet::new();
     let mut result: Vec<SingleCandidate> = Vec::new();
 
-    let candidate_ids: &[i32] = if let Some(priority) = priority_floor {
-        grid.elements_by_floor
-            .get(&priority)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    } else {
-        grid.element_ids_in_order.as_slice()
-    };
+    let candidate_ids: &[i32] = grid.element_ids_in_order.as_slice();
 
     for eid in candidate_ids {
         if committed_ids.contains(eid) {
@@ -786,12 +800,6 @@ fn collect_single_candidates_optimized(
         };
 
         let floor = grid.element_floor_by_id.get(eid).copied().unwrap_or(0);
-        if let Some(priority) = priority_floor {
-            if floor != priority {
-                continue;
-            }
-        }
-
         let local_positions = local_positions_by_floor
             .get(&floor)
             .unwrap_or(&empty_positions);
@@ -843,7 +851,7 @@ fn collect_single_candidates_optimized(
             element_id: elem.id,
             connectivity,
             frontier_dist: dist,
-            is_lowest_floor: floor == 1,
+            floor_bonus: *floor_bonus_by_floor.get(&floor).unwrap_or(&0.0),
         });
     }
 
@@ -1501,7 +1509,7 @@ fn run_scenario_internal(
     workfronts: &[SimWorkfront],
     seed: u64,
     weights: (f64, f64, f64),
-    threshold: f64,
+    constraints: SimConstraints,
     cancel_flag: Option<&AtomicBool>,
 ) -> SimScenario {
     let (w1, w2, w3) = weights;
@@ -1518,6 +1526,7 @@ fn run_scenario_internal(
     let node_pos = build_node_pos(grid);
     let dz = grid_dz(grid);
     let floor_tracker = FloorTracker::from_grid(grid, dz);
+    let total_elements_by_floor = total_elements_per_floor(grid, dz);
 
     let mut consecutive_empty_cycles = 0u32;
     let mut next_sequence_start: usize = 1; // 1-based sequence numbering for from_local_steps
@@ -1576,13 +1585,20 @@ fn run_scenario_internal(
                 acc
             });
             let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
+            let committed_elements_per_floor =
+                installed_elements_per_floor(grid, &committed_ids, dz);
+            let floor_bonus_by_floor = compute_floor_bonus_map(
+                &floor_tracker,
+                &committed_floor_counts,
+                &committed_elements_per_floor,
+                &total_elements_by_floor,
+                constraints,
+            );
 
             total_sequence_rounds += 1;
 
             let mut selected_this_sequence: HashSet<i32> = HashSet::new();
             let mut sequence_installations: Vec<(i32, i32)> = Vec::new(); // (wf_id, element_id)
-            let priority_floor = find_priority_completion_floor(grid, &committed_ids, dz);
-
             // Each eligible workfront selects one element
             for wf in &eligible_wfs {
                 let Some(current_state) = workfront_states.get(&wf.id) else {
@@ -1671,7 +1687,7 @@ fn run_scenario_internal(
                             &local_ids,
                             &wf_committed_ids,
                             &node_pos,
-                            priority_floor,
+                            &floor_bonus_by_floor,
                         );
 
                         let valid_seeds: Vec<&SingleCandidate> = wf_candidates
@@ -1682,7 +1698,7 @@ fn run_scenario_internal(
                                     &[candidate.element_id],
                                     &floor_tracker,
                                     &committed_floor_counts,
-                                    threshold,
+                                    constraints.upper_floor_column_rate_threshold,
                                 )
                             })
                             .collect();
@@ -1785,7 +1801,7 @@ fn run_scenario_internal(
                                         &support_ids,
                                         &stable_nodes,
                                         &node_pos,
-                                        threshold,
+                                        constraints.upper_floor_column_rate_threshold,
                                         w1,
                                         w2,
                                         w3,
@@ -1987,7 +2003,15 @@ pub fn run_scenario(
     weights: (f64, f64, f64),
     threshold: f64,
 ) -> SimScenario {
-    run_scenario_internal(scenario_id, grid, workfronts, seed, weights, threshold, None)
+    let constraints = SimConstraints {
+        upper_floor_column_rate_threshold: threshold,
+        lower_floor_completion_ratio_threshold: 0.8,
+        lower_floor_forced_completion_threshold: 5,
+        upper_floor_boost_bonus: 2.5,
+        lower_floor_forced_bonus: 3.0,
+        upper_floor_forced_penalty: 2.0,
+    };
+    run_scenario_internal(scenario_id, grid, workfronts, seed, weights, constraints, None)
 }
 
 pub fn run_all_scenarios(
@@ -2008,12 +2032,20 @@ pub fn run_all_scenarios_with_progress(
     threshold: f64,
     progress_counter: Option<Arc<AtomicUsize>>,
 ) -> Vec<SimScenario> {
+    let constraints = SimConstraints {
+        upper_floor_column_rate_threshold: threshold,
+        lower_floor_completion_ratio_threshold: 0.8,
+        lower_floor_forced_completion_threshold: 5,
+        upper_floor_boost_bonus: 2.5,
+        lower_floor_forced_bonus: 3.0,
+        upper_floor_forced_penalty: 2.0,
+    };
     run_all_scenarios_with_progress_and_cancel(
         count,
         grid,
         workfronts,
         weights,
-        threshold,
+        constraints,
         progress_counter,
         None,
     )
@@ -2024,7 +2056,7 @@ pub fn run_all_scenarios_with_progress_and_cancel(
     grid: &SimGrid,
     workfronts: &[SimWorkfront],
     weights: (f64, f64, f64),
-    threshold: f64,
+    constraints: SimConstraints,
     progress_counter: Option<Arc<AtomicUsize>>,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Vec<SimScenario> {
@@ -2057,7 +2089,7 @@ pub fn run_all_scenarios_with_progress_and_cancel(
                 workfronts,
                 seed,
                 weights,
-                threshold,
+                constraints,
                 cancel_flag.as_deref(),
             );
             if let Some(counter) = &progress_counter {
@@ -2093,7 +2125,7 @@ mod tests {
             element_id: 1,
             connectivity: 2,
             frontier_dist: 1.0,
-            is_lowest_floor: true,
+            floor_bonus: 0.2,
         };
         let s = c.score(0.5, 0.3);
         assert!(s > 0.0, "score should be positive");
@@ -2583,7 +2615,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ab_upper_floor_constraint_legacy_vs_tracked_single_column() {
+    fn test_upper_floor_constraint_tracked_single_column_rate_based() {
         let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
         let dz = grid_dz(&grid);
         let tracker = FloorTracker::from_grid(&grid, dz);
@@ -2622,8 +2654,6 @@ mod tests {
                 .collect();
             let installed_per_floor = tracker.installed_per_floor_from(&installed);
 
-            let legacy =
-                check_upper_floor_constraint_legacy(&[floor2_col], &grid, &installed, 0.3);
             let tracked = check_upper_floor_constraint_tracked(
                 &[floor2_col],
                 &tracker,
@@ -2631,8 +2661,17 @@ mod tests {
                 0.3,
             );
 
+            // With one new upper-floor column candidate:
+            // ratio = 1 / installed_lower. Allow when ratio <= 0.3.
+            // installed_lower == 0 is treated as pass in tracked logic.
+            let expected = if installed_count == 0 {
+                true
+            } else {
+                (1.0 / installed_count as f64) <= 0.3
+            };
+
             assert_eq!(
-                legacy, tracked,
+                expected, tracked,
                 "mismatch at installed_count={} for floor2_col={}",
                 installed_count, floor2_col
             );
@@ -2702,6 +2741,7 @@ mod tests {
 
         let local_element_ids: HashSet<i32> = support_ids.iter().take(3).copied().collect();
         let committed_ids: HashSet<i32> = support_ids.iter().take(4).copied().collect();
+        let floor_bonus_by_floor: HashMap<i32, f64> = HashMap::new();
 
         let legacy = collect_single_candidates_legacy(
             &wf,
@@ -2710,7 +2750,7 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            None,
+            &floor_bonus_by_floor,
         );
         let optimized = collect_single_candidates_optimized(
             &wf,
@@ -2719,28 +2759,28 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            None,
+            &floor_bonus_by_floor,
         );
 
-        let legacy_sig: Vec<(i32, usize, i32, bool)> = legacy
+        let legacy_sig: Vec<(i32, usize, i32, i32)> = legacy
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    c.is_lowest_floor,
+                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
-        let optimized_sig: Vec<(i32, usize, i32, bool)> = optimized
+        let optimized_sig: Vec<(i32, usize, i32, i32)> = optimized
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    c.is_lowest_floor,
+                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
@@ -2768,6 +2808,8 @@ mod tests {
 
         let local_element_ids: HashSet<i32> = support_ids.iter().take(2).copied().collect();
         let committed_ids: HashSet<i32> = support_ids.iter().take(5).copied().collect();
+        let mut floor_bonus_by_floor: HashMap<i32, f64> = HashMap::new();
+        floor_bonus_by_floor.insert(2, 2.5);
 
         let legacy = collect_single_candidates_legacy(
             &wf,
@@ -2776,7 +2818,7 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            Some(2),
+            &floor_bonus_by_floor,
         );
         let optimized = collect_single_candidates_optimized(
             &wf,
@@ -2785,28 +2827,28 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            Some(2),
+            &floor_bonus_by_floor,
         );
 
-        let legacy_sig: Vec<(i32, usize, i32, bool)> = legacy
+        let legacy_sig: Vec<(i32, usize, i32, i32)> = legacy
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    c.is_lowest_floor,
+                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
-        let optimized_sig: Vec<(i32, usize, i32, bool)> = optimized
+        let optimized_sig: Vec<(i32, usize, i32, i32)> = optimized
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    c.is_lowest_floor,
+                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
