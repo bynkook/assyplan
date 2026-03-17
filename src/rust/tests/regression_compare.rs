@@ -6,9 +6,10 @@ use assyplan::sim_engine::run_all_scenarios;
 use assyplan::sim_grid::SimGrid;
 use assyplan::stability::{build_step_elements_map, generate_all_tables, get_floor_column_data};
 
-// Sim fingerprint changed after closure-aware scoring update
-// (w3 now biases toward cross-girder bay closure in bundle scoring).
-const EXPECTED_SIM_FINGERPRINT_V3: u64 = 2091212190232840390;
+// Sim fingerprint changed after workfront anchor fix:
+// min_xy_distance now always blends workfront (x,y) origin so upper floors
+// prefer candidates near the workfront start position.
+const EXPECTED_SIM_FINGERPRINT_V3: u64 = 12439245621222632079;
 // Dev fingerprint changed after canonical Dev step generation update
 // (local-step completion + global-cycle merge semantics).
 const EXPECTED_DEV_FINGERPRINT_V2: u64 = 7561072595717411788;

@@ -407,7 +407,8 @@ fn min_xy_distance_to_local_positions(
             .unwrap_or(f64::MAX);
     }
 
-    candidate_nodes
+    // Distance to existing local positions
+    let local_dist = candidate_nodes
         .iter()
         .filter_map(|node_id| node_pos.get(node_id))
         .map(|&(xi, yi, _)| {
@@ -420,7 +421,20 @@ fn min_xy_distance_to_local_positions(
                 .unwrap_or(f64::MAX)
         })
         .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(f64::MAX)
+        .unwrap_or(f64::MAX);
+
+    // Always blend workfront origin as virtual anchor — ensures upper floors
+    // still prefer candidates near the workfront (x,y) start position.
+    let wf_dist = candidate_nodes
+        .iter()
+        .filter_map(|node_id| node_pos.get(node_id))
+        .map(|&(xi, yi, _)| {
+            ((xi as i32 - wf.grid_x as i32).abs() + (yi as i32 - wf.grid_y as i32).abs()) as f64
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(f64::MAX);
+
+    local_dist.min(wf_dist)
 }
 
 #[cfg(test)]
