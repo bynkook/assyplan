@@ -53,7 +53,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             ui.label("Y Grid Lines:");
             let prev_ny = state.grid_config.ny;
             ui.add(
-                egui::Slider::new(&mut state.grid_config.ny, 2..=20)
+                egui::Slider::new(&mut state.grid_config.ny, 2..=100)
                     .text("")
                     .clamp_to_range(true),
             );
@@ -66,7 +66,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             ui.label("Z Levels (incl. ground):");
             let prev_nz = state.grid_config.nz;
             ui.add(
-                egui::Slider::new(&mut state.grid_config.nz, 2..=15)
+                egui::Slider::new(&mut state.grid_config.nz, 1..=20)
                     .text("")
                     .clamp_to_range(true),
             );
@@ -139,6 +139,14 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         ))
         .color(Color32::from_rgb(160, 220, 160)),
     );
+    if est_elements > 5_000 {
+        ui.label(
+            egui::RichText::new(
+                "Warning: Large model detected. Simulation may take longer; progress UI will help keep the app responsive.",
+            )
+            .color(Color32::from_rgb(255, 200, 80)),
+        );
+    }
 
     ui.add_space(12.0);
     ui.separator();

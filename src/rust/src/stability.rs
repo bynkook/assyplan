@@ -51,10 +51,12 @@ pub struct SequenceEntry {
 pub struct StepEntry {
     /// Workfront ID
     pub workfront_id: i32,
-    /// Step number within workfront (1-indexed)
+    /// Global step number (1-indexed)
     pub step: i32,
-    /// Element IDs in this step (2-5 elements per step based on stability)
+    /// Element IDs in this global step
     pub element_ids: Vec<i32>,
+    /// Pattern name (e.g. ColGirder, Bootstrap, Multi(2))
+    pub pattern: String,
 }
 
 /// Complete result from table generation
@@ -70,6 +72,8 @@ pub struct TableGenerationResult {
     pub workfront_count: i32,
     /// Any errors encountered during generation
     pub errors: Vec<String>,
+    /// Fatal generation error (results are not valid for step analytics)
+    pub fatal: bool,
 }
 
 impl Default for TableGenerationResult {
@@ -80,8 +84,68 @@ impl Default for TableGenerationResult {
             max_step: 0,
             workfront_count: 0,
             errors: Vec::new(),
+            fatal: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepCandidateMask {
+    ColumnOnly,
+    GirderOnly,
+    Both,
+}
+
+impl StepCandidateMask {
+    pub fn allows(self, is_column_candidate: bool) -> bool {
+        match self {
+            StepCandidateMask::ColumnOnly => is_column_candidate,
+            StepCandidateMask::GirderOnly => !is_column_candidate,
+            StepCandidateMask::Both => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepPatternType {
+    Col,
+    Girder,
+    ColCol,
+    ColGirder,
+    GirderGirder,
+    ColColGirder,
+    ColGirderCol,
+    ColGirderColGirder,
+    ColGirderGirder,
+    ColColGirderGirder,
+    ColColGirderColGirder,
+    Bootstrap,
+}
+
+impl StepPatternType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Col => "Col",
+            Self::Girder => "Girder",
+            Self::ColCol => "ColCol",
+            Self::ColGirder => "ColGirder",
+            Self::GirderGirder => "GirderGirder",
+            Self::ColColGirder => "ColColGirder",
+            Self::ColGirderCol => "ColGirderCol",
+            Self::ColGirderColGirder => "ColGirderColGirder",
+            Self::ColGirderGirder => "ColGirderGirder",
+            Self::ColColGirderGirder => "ColColGirderGirder",
+            Self::ColColGirderColGirder => "ColColGirderColGirder",
+            Self::Bootstrap => "Bootstrap",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepBufferDecision {
+    Incomplete(StepCandidateMask),
+    Complete(StepPatternType),
+    Invalid,
 }
 
 // ============================================================================
@@ -123,10 +187,256 @@ fn get_girder_elements(elements: &[StabilityElement]) -> Vec<&StabilityElement> 
         .collect()
 }
 
-/// Get floor level for a node based on z-coordinate
-/// Returns 1-indexed floor level
-fn get_floor_level(node_id: i32, nodes: &[StabilityNode]) -> Option<i32> {
-    // Get all unique z values sorted
+pub fn classify_member_signature(
+    signature: &str,
+    has_stable_structure: bool,
+) -> StepBufferDecision {
+    match signature {
+        "" => {
+            if has_stable_structure {
+                StepBufferDecision::Incomplete(StepCandidateMask::Both)
+            } else {
+                StepBufferDecision::Incomplete(StepCandidateMask::ColumnOnly)
+            }
+        }
+        "G" => {
+            if has_stable_structure {
+                StepBufferDecision::Complete(StepPatternType::Girder)
+            } else {
+                StepBufferDecision::Invalid
+            }
+        }
+        "C" => {
+            if has_stable_structure {
+                StepBufferDecision::Incomplete(StepCandidateMask::Both)
+            } else {
+                StepBufferDecision::Incomplete(StepCandidateMask::ColumnOnly)
+            }
+        }
+        "CC" => StepBufferDecision::Incomplete(StepCandidateMask::GirderOnly),
+        "CCG" => StepBufferDecision::Incomplete(StepCandidateMask::Both),
+        "CCGC" => StepBufferDecision::Incomplete(StepCandidateMask::GirderOnly),
+        "CCGG" => StepBufferDecision::Complete(StepPatternType::ColColGirderGirder),
+        "CCGCG" => {
+            if has_stable_structure {
+                StepBufferDecision::Complete(StepPatternType::ColColGirderColGirder)
+            } else {
+                StepBufferDecision::Complete(StepPatternType::Bootstrap)
+            }
+        }
+        "CG" => StepBufferDecision::Complete(StepPatternType::ColGirder),
+        "CGC" => StepBufferDecision::Incomplete(StepCandidateMask::GirderOnly),
+        "CGCG" => StepBufferDecision::Complete(StepPatternType::ColGirderColGirder),
+        "CGG" => StepBufferDecision::Complete(StepPatternType::ColGirderGirder),
+        "GG" | "CCC" | "CCCG" => StepBufferDecision::Invalid,
+        _ => StepBufferDecision::Invalid,
+    }
+}
+
+pub fn classify_element_buffer(
+    buffer_element_ids: &[i32],
+    element_by_id: &HashMap<i32, &StabilityElement>,
+    has_stable_structure: bool,
+) -> StepBufferDecision {
+    let signature: String = buffer_element_ids
+        .iter()
+        .map(|eid| {
+            if element_by_id
+                .get(eid)
+                .map(|e| e.member_type == "Column")
+                .unwrap_or(false)
+            {
+                'C'
+            } else {
+                'G'
+            }
+        })
+        .collect();
+
+    classify_member_signature(signature.as_str(), has_stable_structure)
+}
+
+fn collect_local_stable_context(
+    element_ids: &[i32],
+    all_elements: &[StabilityElement],
+    installed_ids: &HashSet<i32>,
+) -> HashSet<i32> {
+    let candidate_nodes: HashSet<i32> = all_elements
+        .iter()
+        .filter(|e| element_ids.contains(&e.id))
+        .flat_map(|elem| [elem.node_i_id, elem.node_j_id])
+        .collect();
+
+    all_elements
+        .iter()
+        .filter(|elem| installed_ids.contains(&elem.id))
+        .filter(|elem| {
+            candidate_nodes.contains(&elem.node_i_id) || candidate_nodes.contains(&elem.node_j_id)
+        })
+        .map(|elem| elem.id)
+        .collect()
+}
+
+fn is_node_connected_to_installed_column(
+    node_id: i32,
+    all_elements: &[StabilityElement],
+    installed_ids: &HashSet<i32>,
+) -> bool {
+    all_elements
+        .iter()
+        .filter(|e| e.member_type == "Column" && installed_ids.contains(&e.id))
+        .any(|col| col.node_i_id == node_id || col.node_j_id == node_id)
+}
+
+fn is_node_connected_to_installed_girder(
+    node_id: i32,
+    all_elements: &[StabilityElement],
+    installed_ids: &HashSet<i32>,
+) -> bool {
+    all_elements
+        .iter()
+        .filter(|e| e.member_type == "Girder" && installed_ids.contains(&e.id))
+        .any(|gir| gir.node_i_id == node_id || gir.node_j_id == node_id)
+}
+
+fn check_girders_perpendicular(
+    girder_ids: &[i32],
+    element_by_id: &HashMap<i32, &StabilityElement>,
+    nodes: &[StabilityNode],
+) -> bool {
+    for i in 0..girder_ids.len() {
+        for j in (i + 1)..girder_ids.len() {
+            let Some(g1) = element_by_id.get(&girder_ids[i]) else {
+                return false;
+            };
+            let Some(g2) = element_by_id.get(&girder_ids[j]) else {
+                return false;
+            };
+            if are_perpendicular(&get_girder_direction(g1, nodes), &get_girder_direction(g2, nodes)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn check_step_bundle_stability(
+    element_ids: &[i32],
+    all_elements: &[StabilityElement],
+    nodes: &[StabilityNode],
+    installed_ids: &HashSet<i32>,
+) -> bool {
+    let element_by_id: HashMap<i32, &StabilityElement> =
+        all_elements.iter().map(|e| (e.id, e)).collect();
+
+    let local_stable_ids = collect_local_stable_context(element_ids, all_elements, installed_ids);
+    let mut combined_local_ids: HashSet<i32> = local_stable_ids.clone();
+    combined_local_ids.extend(element_ids.iter().copied());
+
+    if local_stable_ids.is_empty() {
+        let pattern_elements: Vec<StabilityElement> = all_elements
+            .iter()
+            .filter(|e| element_ids.contains(&e.id))
+            .cloned()
+            .collect();
+        return has_minimum_assembly(nodes, &pattern_elements);
+    }
+
+    let pattern_columns: Vec<i32> = element_ids
+        .iter()
+        .filter(|eid| {
+            element_by_id
+                .get(eid)
+                .map(|e| e.member_type == "Column")
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+    let pattern_girders: Vec<i32> = element_ids
+        .iter()
+        .filter(|eid| {
+            element_by_id
+                .get(eid)
+                .map(|e| e.member_type == "Girder")
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+
+    for col_id in &pattern_columns {
+        let Some(col) = element_by_id.get(col_id) else {
+            return false;
+        };
+        if !validate_column_support(col, nodes, all_elements, &local_stable_ids) {
+            return false;
+        }
+    }
+
+    for gir_id in &pattern_girders {
+        let Some(gir) = element_by_id.get(gir_id) else {
+            return false;
+        };
+        if !validate_girder_support(gir, nodes, all_elements, &combined_local_ids) {
+            return false;
+        }
+    }
+
+    if !pattern_girders.is_empty() {
+        let has_adjacent_connection = pattern_girders.iter().any(|gir_id| {
+            let Some(gir) = element_by_id.get(gir_id) else {
+                return false;
+            };
+            is_node_connected_to_installed_column(gir.node_i_id, all_elements, &local_stable_ids)
+                || is_node_connected_to_installed_column(
+                    gir.node_j_id,
+                    all_elements,
+                    &local_stable_ids,
+                )
+                || is_node_connected_to_installed_girder(
+                    gir.node_i_id,
+                    all_elements,
+                    &local_stable_ids,
+                )
+                || is_node_connected_to_installed_girder(
+                    gir.node_j_id,
+                    all_elements,
+                    &local_stable_ids,
+                )
+                || pattern_columns.iter().any(|col_id| {
+                    let Some(col) = element_by_id.get(col_id) else {
+                        return false;
+                    };
+                    let girder_touches_column_top =
+                        col.node_j_id == gir.node_i_id || col.node_j_id == gir.node_j_id;
+                    let column_is_anchored = is_node_connected_to_installed_column(
+                        col.node_i_id,
+                        all_elements,
+                        &local_stable_ids,
+                    ) || is_node_connected_to_installed_girder(
+                        col.node_i_id,
+                        all_elements,
+                        &local_stable_ids,
+                    );
+                    girder_touches_column_top && column_is_anchored
+                })
+        });
+
+        if !has_adjacent_connection {
+            return false;
+        }
+    }
+
+    if pattern_girders.len() >= 2
+        && !check_girders_perpendicular(&pattern_girders, &element_by_id, nodes)
+    {
+        return false;
+    }
+
+    true
+}
+
+/// Build floor lookup map from z(mm) key to 1-indexed floor.
+fn build_z_level_map(nodes: &[StabilityNode]) -> HashMap<i64, i32> {
     let mut z_values: Vec<i64> = nodes
         .iter()
         .map(|n| (n.z * 1000.0).round() as i64)
@@ -134,34 +444,82 @@ fn get_floor_level(node_id: i32, nodes: &[StabilityNode]) -> Option<i32> {
     z_values.sort();
     z_values.dedup();
 
-    // Get z for this node
+    z_values
+        .into_iter()
+        .enumerate()
+        .map(|(idx, z_key)| (z_key, (idx + 1) as i32))
+        .collect()
+}
+
+/// Get floor level for a node based on z-coordinate
+/// Returns 1-indexed floor level
+#[cfg(test)]
+fn get_floor_level_legacy(node_id: i32, nodes: &[StabilityNode]) -> Option<i32> {
+    let mut z_values: Vec<i64> = nodes
+        .iter()
+        .map(|n| (n.z * 1000.0).round() as i64)
+        .collect();
+    z_values.sort();
+    z_values.dedup();
+
     let node_z = get_node_coords(node_id, nodes)?.2;
     let node_z_key = (node_z * 1000.0).round() as i64;
 
-    // Floor is 1-indexed position in sorted z values
     z_values
         .iter()
         .position(|&z| z == node_z_key)
         .map(|idx| (idx + 1) as i32)
 }
 
-/// Get floor level where a column starts (node_i bottom node)
-fn get_column_floor(element: &StabilityElement, nodes: &[StabilityNode]) -> Option<i32> {
+/// Cached floor lookup using precomputed z-level map.
+fn get_floor_level_cached(
+    node_id: i32,
+    nodes: &[StabilityNode],
+    z_level_map: &HashMap<i64, i32>,
+) -> Option<i32> {
+    let node_z = get_node_coords(node_id, nodes)?.2;
+    let node_z_key = (node_z * 1000.0).round() as i64;
+    z_level_map.get(&node_z_key).copied()
+}
+
+/// Compatibility wrapper (legacy signature).
+#[cfg(test)]
+fn get_floor_level(node_id: i32, nodes: &[StabilityNode]) -> Option<i32> {
+    get_floor_level_legacy(node_id, nodes)
+}
+
+/// Cached floor lookup for columns.
+fn get_column_floor_cached(
+    element: &StabilityElement,
+    nodes: &[StabilityNode],
+    z_level_map: &HashMap<i64, i32>,
+) -> Option<i32> {
     if element.member_type != "Column" {
         return None;
     }
-    get_floor_level(element.node_i_id, nodes)
+    get_floor_level_cached(element.node_i_id, nodes, z_level_map)
 }
 
 /// Get floor column counts (columns per floor level)
+#[cfg(test)]
 fn get_floor_column_counts(
     elements: &[StabilityElement],
     nodes: &[StabilityNode],
 ) -> HashMap<i32, i32> {
+    let z_level_map = build_z_level_map(nodes);
+    get_floor_column_counts_cached(elements, nodes, &z_level_map)
+}
+
+/// Cached floor column counts using precomputed z-level map.
+fn get_floor_column_counts_cached(
+    elements: &[StabilityElement],
+    nodes: &[StabilityNode],
+    z_level_map: &HashMap<i64, i32>,
+) -> HashMap<i32, i32> {
     let mut floor_counts: HashMap<i32, i32> = HashMap::new();
 
     for element in elements.iter().filter(|e| e.member_type == "Column") {
-        if let Some(floor) = get_column_floor(element, nodes) {
+        if let Some(floor) = get_column_floor_cached(element, nodes, z_level_map) {
             *floor_counts.entry(floor).or_insert(0) += 1;
         }
     }
@@ -423,8 +781,10 @@ pub fn check_floor_installation_constraint(
         return (true, 100.0);
     }
 
+    let z_level_map = build_z_level_map(nodes);
+
     // Get total columns per floor
-    let total_per_floor = get_floor_column_counts(all_elements, nodes);
+    let total_per_floor = get_floor_column_counts_cached(all_elements, nodes, &z_level_map);
 
     // Get installed columns per floor
     let installed_elements: Vec<_> = all_elements
@@ -432,7 +792,8 @@ pub fn check_floor_installation_constraint(
         .filter(|e| installed_element_ids.contains(&e.id))
         .cloned()
         .collect();
-    let installed_per_floor = get_floor_column_counts(&installed_elements, nodes);
+    let installed_per_floor =
+        get_floor_column_counts_cached(&installed_elements, nodes, &z_level_map);
 
     // Check lower floor (N-1) percentage
     let lower_floor = target_floor - 1;
@@ -595,14 +956,24 @@ pub fn assign_workfront_steps(
     elements: &[StabilityElement],
     nodes: &[StabilityNode],
 ) -> (Vec<StepEntry>, Vec<String>) {
+    #[derive(Clone, Debug, Default)]
+    struct DevWorkfrontState {
+        cursor: usize,
+        buffer: Vec<i32>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct DevLocalStep {
+        workfront_id: i32,
+        element_ids: Vec<i32>,
+        pattern: StepPatternType,
+    }
+
     let mut step_table: Vec<StepEntry> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-
-    // Create element lookup by ID
     let element_by_id: HashMap<i32, &StabilityElement> =
         elements.iter().map(|e| (e.id, e)).collect();
 
-    // Group sequence by workfront
     let mut workfront_sequences: HashMap<i32, Vec<i32>> = HashMap::new();
     for entry in sequence_table {
         workfront_sequences
@@ -611,337 +982,181 @@ pub fn assign_workfront_steps(
             .push(entry.element_id);
     }
 
-    // Process each workfront in sorted order for deterministic step assignment
     let mut sorted_workfront_ids: Vec<i32> = workfront_sequences.keys().cloned().collect();
     sorted_workfront_ids.sort();
 
-    for workfront_id in sorted_workfront_ids {
-        let workfront_element_ids = workfront_sequences
-            .get(&workfront_id)
-            .cloned()
-            .unwrap_or_default();
+    let mut states: HashMap<i32, DevWorkfrontState> = sorted_workfront_ids
+        .iter()
+        .map(|wf| (*wf, DevWorkfrontState::default()))
+        .collect();
 
-        // CORRECT ALGORITHM:
-        // - assembled_stable: All finalized previous steps (already stable)
-        // - current_step_members: Elements in the open (current) step
-        // - Close step when current_step_members form a stable configuration
-        let mut assembled_stable: HashSet<i32> = HashSet::new();
-        let mut current_step = 1i32;
-        let mut current_step_members: Vec<i32> = Vec::new();
+    let mut stable_ids: HashSet<i32> = HashSet::new();
+    let mut global_step = 1i32;
+    let mut no_progress_cycles = 0usize;
 
-        for element_id in workfront_element_ids {
-            if element_by_id.get(&element_id).is_none() {
-                continue;
+    loop {
+        let all_consumed = sorted_workfront_ids.iter().all(|wf| {
+            let seq_len = workfront_sequences.get(wf).map(|v| v.len()).unwrap_or(0);
+            states
+                .get(wf)
+                .map(|s| s.cursor >= seq_len)
+                .unwrap_or(true)
+        });
+        if all_consumed {
+            break;
+        }
+
+        let mut cycle_local_steps: Vec<DevLocalStep> = Vec::new();
+        let mut cycle_completed: HashSet<i32> = HashSet::new();
+        let mut cycle_progress = false;
+        let mut no_progress_rounds = 0usize;
+
+        loop {
+            let eligible: Vec<i32> = sorted_workfront_ids
+                .iter()
+                .copied()
+                .filter(|wf| !cycle_completed.contains(wf))
+                .collect();
+            if eligible.is_empty() {
+                break;
             }
 
-            // Add element to current step (always)
-            current_step_members.push(element_id);
+            let mut round_progress = false;
 
-            // Check if current step is now complete (stable)
-            if step_is_complete(
-                &assembled_stable,
-                &current_step_members,
-                &element_by_id,
-                elements,
-                nodes,
-            ) {
-                // Close the step - save it
-                step_table.push(StepEntry {
-                    workfront_id,
-                    step: current_step,
-                    element_ids: current_step_members.clone(),
-                });
-
-                // Move current step members to assembled_stable
-                for id in &current_step_members {
-                    assembled_stable.insert(*id);
+            for wf_id in &eligible {
+                let Some(seq) = workfront_sequences.get(wf_id) else {
+                    continue;
+                };
+                let Some(state) = states.get_mut(wf_id) else {
+                    continue;
+                };
+                if state.cursor >= seq.len() {
+                    continue;
                 }
 
-                // Start new step
-                current_step_members.clear();
-                current_step += 1;
+                let element_id = seq[state.cursor];
+                state.cursor += 1;
+                state.buffer.push(element_id);
+
+                round_progress = true;
+                cycle_progress = true;
+
+                let mut cycle_context = stable_ids.clone();
+                for ls in &cycle_local_steps {
+                    cycle_context.extend(ls.element_ids.iter().copied());
+                }
+
+                match classify_element_buffer(
+                    &state.buffer,
+                    &element_by_id,
+                    !cycle_context.is_empty(),
+                ) {
+                    StepBufferDecision::Invalid => {
+                        errors.push(format!(
+                            "Workfront {} has invalid pattern while building step: [{}]",
+                            wf_id,
+                            state
+                                .buffer
+                                .iter()
+                                .map(|id| id.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    StepBufferDecision::Complete(pattern) => {
+                        if check_step_bundle_stability(&state.buffer, elements, nodes, &cycle_context)
+                        {
+                            cycle_local_steps.push(DevLocalStep {
+                                workfront_id: *wf_id,
+                                element_ids: state.buffer.clone(),
+                                pattern,
+                            });
+                            cycle_completed.insert(*wf_id);
+                            state.buffer.clear();
+                        }
+                    }
+                    StepBufferDecision::Incomplete(_) => {}
+                }
+            }
+
+            if !round_progress {
+                no_progress_rounds += 1;
+                if no_progress_rounds >= 2 {
+                    break;
+                }
+            } else {
+                no_progress_rounds = 0;
+            }
+
+            if cycle_completed.len() >= eligible.len() {
+                break;
             }
         }
 
-        // Handle remaining elements: loop ended without step_is_complete() ever returning true.
-        // These members could not form a stable configuration — this is a structural error.
-        if !current_step_members.is_empty() {
-            errors.push(format!(
-                "Workfront {} step {} is incomplete: {} member(s) [{}] could not form a stable \
-                 configuration. Check that all required predecessor elements are present and \
-                 that the assembly satisfies minimum stability requirements.",
-                workfront_id,
-                current_step,
-                current_step_members.len(),
-                current_step_members
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            // Still record the step so the table is complete for diagnostics
-            step_table.push(StepEntry {
-                workfront_id,
-                step: current_step,
-                element_ids: current_step_members.clone(),
-            });
+        if cycle_local_steps.is_empty() {
+            if !cycle_progress {
+                no_progress_cycles += 1;
+                if no_progress_cycles >= 2 {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        no_progress_cycles = 0;
+
+        let max_len = cycle_local_steps
+            .iter()
+            .map(|ls| ls.element_ids.len())
+            .max()
+            .unwrap_or(0);
+        let mut merged_element_ids: Vec<i32> = Vec::new();
+        for round in 0..max_len {
+            for ls in &cycle_local_steps {
+                if let Some(eid) = ls.element_ids.get(round) {
+                    merged_element_ids.push(*eid);
+                }
+            }
+        }
+
+        for eid in &merged_element_ids {
+            stable_ids.insert(*eid);
+        }
+
+        let pattern = if cycle_local_steps.len() == 1 {
+            cycle_local_steps[0].pattern.as_str().to_string()
+        } else {
+            format!("Multi({})", cycle_local_steps.len())
+        };
+
+        step_table.push(StepEntry {
+            workfront_id: cycle_local_steps[0].workfront_id,
+            step: global_step,
+            element_ids: merged_element_ids,
+            pattern,
+        });
+        global_step += 1;
+    }
+
+    for wf_id in &sorted_workfront_ids {
+        if let Some(state) = states.get(wf_id) {
+            if !state.buffer.is_empty() {
+                errors.push(format!(
+                    "Workfront {} has incomplete local step: {} member(s) [{}] could not form a complete stable step.",
+                    wf_id,
+                    state.buffer.len(),
+                    state
+                        .buffer
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
     }
 
     (step_table, errors)
-}
-
-/// Check if current step is complete (forms a stable configuration)
-///
-/// RULES:
-/// 1. If current_step is DISCONNECTED from assembled_stable:
-///    - Need full minimum assembly unit: 3 columns + 2 girders at 90°
-/// 2. If current_step is CONNECTED to assembled_stable:
-///    - Need all new members properly supported + at least one girder forming 90° connection
-fn step_is_complete(
-    assembled_stable: &HashSet<i32>,
-    current_step_members: &[i32],
-    element_by_id: &HashMap<i32, &StabilityElement>,
-    all_elements: &[StabilityElement],
-    nodes: &[StabilityNode],
-) -> bool {
-    if current_step_members.is_empty() {
-        return false;
-    }
-
-    // Get current step elements
-    let current_elements: Vec<StabilityElement> = current_step_members
-        .iter()
-        .filter_map(|id| element_by_id.get(id).map(|e| (*e).clone()))
-        .collect();
-
-    // Combined set: assembled_stable + current_step
-    let mut combined_ids: HashSet<i32> = assembled_stable.clone();
-    for id in current_step_members {
-        combined_ids.insert(*id);
-    }
-
-    let combined_elements: Vec<StabilityElement> = combined_ids
-        .iter()
-        .filter_map(|id| element_by_id.get(id).map(|e| (*e).clone()))
-        .collect();
-
-    // Check if current step is connected to stable structure
-    let is_connected = is_connected_to_stable_structure(
-        assembled_stable,
-        current_step_members,
-        element_by_id,
-        nodes,
-    );
-
-    if !is_connected {
-        // CASE 1: Disconnected (first step or isolated workfront)
-        // Need full minimum assembly: 3 columns + 2 girders at 90°
-        has_minimum_assembly(nodes, &current_elements)
-    } else {
-        // CASE 2: Connected to existing stable structure
-        // Check: all new members properly supported AND forms valid extension
-        // Valid extension = at least one girder in current step connects to form 90° with existing
-        all_members_supported(&current_elements, &combined_ids, all_elements, nodes)
-            && has_valid_girder_connection(
-                assembled_stable,
-                &current_elements,
-                &combined_elements,
-                nodes,
-            )
-    }
-}
-
-/// Check if current step elements are connected to the stable structure
-/// via a LATERAL connection (girder-to-column or girder-to-girder).
-///
-/// Pure vertical column stacking (upper col node_i == lower col node_j) is
-/// NOT considered "adjacent structure" connectivity — it is a basic column
-/// install precondition, not a stability criterion.
-///
-/// Connection requires:
-///   - At least one stable element is a **Girder**, OR
-///   - At least one current-step element is a **Girder** whose node touches
-///     any stable element's node.
-fn is_connected_to_stable_structure(
-    assembled_stable: &HashSet<i32>,
-    current_step_members: &[i32],
-    element_by_id: &HashMap<i32, &StabilityElement>,
-    _nodes: &[StabilityNode],
-) -> bool {
-    if assembled_stable.is_empty() {
-        return false;
-    }
-
-    // Build set of nodes belonging to stable GIRDERS only.
-    // Vertical column-to-column stacking must not count.
-    let stable_girder_nodes: HashSet<i32> = assembled_stable
-        .iter()
-        .filter_map(|id| element_by_id.get(id))
-        .filter(|e| e.member_type == "Girder")
-        .flat_map(|e| [e.node_i_id, e.node_j_id])
-        .collect();
-
-    // Build set of nodes belonging to ALL stable elements (for girder-in-step check).
-    let stable_all_nodes: HashSet<i32> = assembled_stable
-        .iter()
-        .filter_map(|id| element_by_id.get(id))
-        .flat_map(|e| [e.node_i_id, e.node_j_id])
-        .collect();
-
-    for elem_id in current_step_members {
-        if let Some(elem) = element_by_id.get(elem_id) {
-            if elem.member_type == "Girder" {
-                // A girder in the current step is laterally connected if either of its
-                // nodes touches any node of the stable structure (girder or column).
-                if stable_all_nodes.contains(&elem.node_i_id)
-                    || stable_all_nodes.contains(&elem.node_j_id)
-                {
-                    return true;
-                }
-            } else {
-                // A column in the current step is laterally connected ONLY if one of its
-                // nodes touches a stable GIRDER node (not another column's stacking node).
-                if stable_girder_nodes.contains(&elem.node_i_id)
-                    || stable_girder_nodes.contains(&elem.node_j_id)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Check if all members in current step are properly supported
-fn all_members_supported(
-    current_elements: &[StabilityElement],
-    combined_ids: &HashSet<i32>,
-    all_elements: &[StabilityElement],
-    nodes: &[StabilityNode],
-) -> bool {
-    for elem in current_elements {
-        let is_supported = if elem.member_type == "Column" {
-            validate_column_support(elem, nodes, all_elements, combined_ids)
-        } else {
-            validate_girder_support(elem, nodes, all_elements, combined_ids)
-        };
-
-        if !is_supported {
-            return false;
-        }
-    }
-    true
-}
-
-/// Check if current step has a valid girder connection forming 90° with existing structure
-///
-/// For extension steps: needs at least one girder that completes a 90° configuration
-fn has_valid_girder_connection(
-    assembled_stable: &HashSet<i32>,
-    current_elements: &[StabilityElement],
-    combined_elements: &[StabilityElement],
-    nodes: &[StabilityNode],
-) -> bool {
-    // Get girders in current step
-    let current_girders: Vec<&StabilityElement> = current_elements
-        .iter()
-        .filter(|e| e.member_type == "Girder")
-        .collect();
-
-    if current_girders.is_empty() {
-        // No girder in current step - not complete yet
-        return false;
-    }
-
-    // Get girders in assembled stable
-    let stable_girders: Vec<&StabilityElement> = combined_elements
-        .iter()
-        .filter(|e| assembled_stable.contains(&e.id) && e.member_type == "Girder")
-        .collect();
-
-    // Check if any current girder forms 90° with any stable girder
-    for curr_g in &current_girders {
-        let curr_dir = get_girder_direction(*curr_g, nodes);
-
-        for stable_g in &stable_girders {
-            let stable_dir = get_girder_direction(*stable_g, nodes);
-
-            // Check perpendicular (90°)
-            if are_perpendicular(&curr_dir, &stable_dir) {
-                // Also need to share a column connection point
-                if girders_share_column_connection(*curr_g, *stable_g, combined_elements) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Also check: if current step forms its own 90° pair
-    if current_girders.len() >= 2 {
-        for i in 0..current_girders.len() {
-            for j in (i + 1)..current_girders.len() {
-                let dir_i = get_girder_direction(current_girders[i], nodes);
-                let dir_j = get_girder_direction(current_girders[j], nodes);
-
-                if are_perpendicular(&dir_i, &dir_j) {
-                    if girders_share_column_connection(
-                        current_girders[i],
-                        current_girders[j],
-                        combined_elements,
-                    ) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Check if two girders share a column connection point
-///
-/// The two girders must connect to the SAME column at the same physical node.
-/// This prevents parallel girders from passing when they each happen to connect
-/// to different columns that are both in `all_elements`.
-fn girders_share_column_connection(
-    g1: &StabilityElement,
-    g2: &StabilityElement,
-    all_elements: &[StabilityElement],
-) -> bool {
-    let g1_nodes = [g1.node_i_id, g1.node_j_id];
-    let g2_nodes = [g2.node_i_id, g2.node_j_id];
-
-    // Find columns connected to g1 at their exact node_i or node_j
-    // A column "connects" to a girder when the column's top node (node_j) matches
-    // a girder endpoint, OR the column's bottom node (node_i) matches.
-    let g1_column_nodes: HashSet<i32> = all_elements
-        .iter()
-        .filter(|e| e.member_type == "Column")
-        .filter(|c| g1_nodes.contains(&c.node_i_id) || g1_nodes.contains(&c.node_j_id))
-        .flat_map(|c| [c.node_i_id, c.node_j_id])
-        .collect();
-
-    let g2_column_nodes: HashSet<i32> = all_elements
-        .iter()
-        .filter(|e| e.member_type == "Column")
-        .filter(|c| g2_nodes.contains(&c.node_i_id) || g2_nodes.contains(&c.node_j_id))
-        .flat_map(|c| [c.node_i_id, c.node_j_id])
-        .collect();
-
-    // Require at least one SHARED node between the two sets — meaning the same
-    // physical node is part of a column connected to both girders.
-    // This ensures the two girders actually meet at the same column junction.
-    let shared_nodes: HashSet<&i32> = g1_column_nodes.intersection(&g2_column_nodes).collect();
-
-    // Additionally, the shared node must actually be an endpoint of BOTH girders
-    // (or their columns at that same node) to prevent false positives from
-    // distant columns that happen to share node IDs elsewhere in the structure.
-    shared_nodes
-        .iter()
-        .any(|&&n| g1_nodes.contains(&n) || g2_nodes.contains(&n))
 }
 
 // ============================================================================
@@ -1001,6 +1216,13 @@ pub fn generate_all_tables(
     let (step_table, step_errors) = assign_workfront_steps(&result.sequence_table, elements, nodes);
     result.step_table = step_table;
     result.errors.extend(step_errors);
+
+    if result.step_table.is_empty() {
+        result.errors.push(
+            "입력 데이터 오류: 안정 조건을 만족하는 local/global step을 생성할 수 없습니다. 부재 생성 순서와 predecessor 관계를 확인하세요.".to_string(),
+        );
+        result.fatal = true;
+    }
 
     // Calculate max step
     result.max_step = result.step_table.iter().map(|s| s.step).max().unwrap_or(0);
@@ -1067,6 +1289,7 @@ pub fn generate_all_tables(
             elements.len(),
             missing
         ));
+        result.fatal = true;
     }
 
     result
@@ -1147,7 +1370,7 @@ pub fn save_step_table(
     let mut file = std::fs::File::create(file_path)?;
 
     // Write header
-    writeln!(file, "workfront_id,step,element_count,element_ids")?;
+    writeln!(file, "workfront_id,step,pattern,element_count,element_ids")?;
 
     // Write data
     for entry in step_table {
@@ -1160,9 +1383,10 @@ pub fn save_step_table(
 
         writeln!(
             file,
-            "{},{},{},\"{}\"",
+            "{},{},{},{},\"{}\"",
             entry.workfront_id,
             entry.step,
+            entry.pattern,
             entry.element_ids.len(),
             element_ids_str
         )?;
@@ -1232,8 +1456,10 @@ pub fn save_metric_table(
     use std::io::Write;
     let mut file = std::fs::File::create(file_path)?;
 
+    let z_level_map = build_z_level_map(nodes);
+
     // Get all unique floors
-    let floor_counts = get_floor_column_counts(elements, nodes);
+    let floor_counts = get_floor_column_counts_cached(elements, nodes, &z_level_map);
     let mut floors: Vec<i32> = floor_counts.keys().cloned().collect();
     floors.sort();
 
@@ -1254,14 +1480,11 @@ pub fn save_metric_table(
 
     // Track cumulative state
     let mut installed_ids: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    let mut current_step = 0i32;
-
     for entry in &steps {
         // Add elements from this step
         for id in &entry.element_ids {
             installed_ids.insert(*id);
         }
-        current_step = entry.step;
 
         // Calculate cumulative metrics
         let installed_elements: Vec<&StabilityElement> = installed_ids
@@ -1280,18 +1503,19 @@ pub fn save_metric_table(
         let total_elements = total_columns + total_girders;
 
         // Calculate per-floor column installation rates
-        let installed_floor_counts = get_floor_column_counts(
+        let installed_floor_counts = get_floor_column_counts_cached(
             &installed_elements
                 .iter()
                 .filter(|e| e.member_type == "Column")
                 .map(|e| (*e).clone())
                 .collect::<Vec<_>>(),
             nodes,
+            &z_level_map,
         );
 
         let mut row = format!(
             "{},{},{},{}",
-            current_step, total_elements, total_columns, total_girders
+            entry.step, total_elements, total_columns, total_girders
         );
 
         for floor in &floors {
@@ -1344,7 +1568,8 @@ pub fn get_floor_column_data(
     elements: &[StabilityElement],
     nodes: &[StabilityNode],
 ) -> Vec<(i32, usize)> {
-    let floor_counts = get_floor_column_counts(elements, nodes);
+    let z_level_map = build_z_level_map(nodes);
+    let floor_counts = get_floor_column_counts_cached(elements, nodes, &z_level_map);
     let mut result: Vec<(i32, usize)> = floor_counts
         .into_iter()
         .map(|(floor, count)| (floor, count as usize))
@@ -1370,6 +1595,7 @@ pub fn build_step_elements_map(
     // Build element lookup
     let element_by_id: HashMap<i32, &StabilityElement> =
         elements.iter().map(|e| (e.id, e)).collect();
+    let z_level_map = build_z_level_map(nodes);
 
     for entry in step_table {
         let step_idx = entry.step as usize;
@@ -1377,10 +1603,10 @@ pub fn build_step_elements_map(
             for elem_id in &entry.element_ids {
                 if let Some(elem) = element_by_id.get(elem_id) {
                     let floor = if elem.member_type == "Column" {
-                        get_column_floor(elem, nodes).unwrap_or(0)
+                        get_column_floor_cached(elem, nodes, &z_level_map).unwrap_or(0)
                     } else {
                         // Girders: use z coordinate of lower node to determine floor
-                        get_floor_level(elem.node_i_id, nodes).unwrap_or(0)
+                        get_floor_level_cached(elem.node_i_id, nodes, &z_level_map).unwrap_or(0)
                     };
                     step_elements[step_idx].push((*elem_id, elem.member_type.clone(), floor));
                 }
@@ -1398,6 +1624,7 @@ pub fn build_step_elements_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim_grid::SimGrid;
 
     fn create_test_nodes() -> Vec<StabilityNode> {
         vec![
@@ -1452,6 +1679,57 @@ mod tests {
                 z: 3000.0,
             },
         ]
+    }
+
+    fn is_connected_to_stable_structure(
+        assembled_stable: &HashSet<i32>,
+        current_step: &[i32],
+        element_by_id: &HashMap<i32, &StabilityElement>,
+        _nodes: &[StabilityNode],
+    ) -> bool {
+        let stable_girder_nodes: HashSet<i32> = assembled_stable
+            .iter()
+            .filter_map(|eid| element_by_id.get(eid).copied())
+            .filter(|elem| elem.member_type == "Girder")
+            .flat_map(|elem| [elem.node_i_id, elem.node_j_id])
+            .collect();
+
+        if stable_girder_nodes.is_empty() {
+            return false;
+        }
+
+        current_step
+            .iter()
+            .filter_map(|eid| element_by_id.get(eid).copied())
+            .any(|elem| {
+                stable_girder_nodes.contains(&elem.node_i_id)
+                    || stable_girder_nodes.contains(&elem.node_j_id)
+            })
+    }
+
+    #[test]
+    fn test_ab_floor_lookup_legacy_vs_cached() {
+        let grid = SimGrid::new(6, 8, 5, 6000.0, 6000.0, 4000.0);
+        let nodes = &grid.nodes;
+        let z_level_map = build_z_level_map(nodes);
+
+        for node in nodes {
+            let legacy = get_floor_level_legacy(node.id, nodes);
+            let cached = get_floor_level_cached(node.id, nodes, &z_level_map);
+            assert_eq!(legacy, cached, "node_id={}", node.id);
+        }
+    }
+
+    #[test]
+    fn test_ab_floor_column_counts_legacy_vs_cached() {
+        let grid = SimGrid::new(6, 8, 5, 6000.0, 6000.0, 4000.0);
+        let nodes = &grid.nodes;
+        let elements = &grid.elements;
+        let z_level_map = build_z_level_map(nodes);
+
+        let legacy = get_floor_column_counts(elements, nodes);
+        let cached = get_floor_column_counts_cached(elements, nodes, &z_level_map);
+        assert_eq!(legacy, cached);
     }
 
     fn create_minimum_assembly_elements() -> Vec<StabilityElement> {
@@ -1608,9 +1886,9 @@ mod tests {
         let element_data: Vec<(String, Option<String>)> = vec![
             ("A".to_string(), None),                  // Column 1 - workfront start
             ("B".to_string(), Some("A".to_string())), // Column 2 depends on A
-            ("C".to_string(), Some("B".to_string())), // Column 3 depends on B
-            ("D".to_string(), Some("C".to_string())), // Girder 1 depends on C
-            ("E".to_string(), Some("D".to_string())), // Girder 2 depends on D
+            ("C".to_string(), Some("D".to_string())), // Column 3 depends on D
+            ("D".to_string(), Some("B".to_string())), // Girder 1 depends on B
+            ("E".to_string(), Some("C".to_string())), // Girder 2 depends on C
         ];
 
         let result = generate_all_tables(&nodes, &elements, &element_data);
@@ -1619,6 +1897,32 @@ mod tests {
         assert_eq!(result.workfront_count, 1);
         assert_eq!(result.sequence_table.len(), 5);
         assert!(!result.step_table.is_empty());
+        assert_eq!(result.step_table[0].pattern, "Bootstrap");
+    }
+
+    #[test]
+    fn test_generate_all_tables_fatal_when_no_step_can_form() {
+        let nodes = create_test_nodes();
+        let elements = create_minimum_assembly_elements();
+
+        // C -> C -> C -> G -> G chain should be rejected by unified pattern rules
+        let element_data: Vec<(String, Option<String>)> = vec![
+            ("A".to_string(), None),
+            ("B".to_string(), Some("A".to_string())),
+            ("C".to_string(), Some("B".to_string())),
+            ("D".to_string(), Some("C".to_string())),
+            ("E".to_string(), Some("D".to_string())),
+        ];
+
+        let result = generate_all_tables(&nodes, &elements, &element_data);
+
+        assert_eq!(result.sequence_table.len(), 5);
+        assert!(result.step_table.is_empty());
+        assert!(result.fatal);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("local/global step을 생성할 수 없습니다")));
     }
 
     #[test]
@@ -1628,6 +1932,7 @@ mod tests {
             workfront_id: 1,
             step: 1,
             element_ids: vec![1, 2, 3, 4, 5],
+            pattern: "Bootstrap".to_string(),
         }];
 
         let render_table = step_table_for_rendering(&step_table, &elements);

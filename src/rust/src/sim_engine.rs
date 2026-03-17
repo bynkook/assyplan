@@ -5,18 +5,22 @@
 //! - step: pattern-based stability unit that may contain multiple sequences
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use crate::graphics::ui::{
-    LocalStep, ScenarioMetrics, SimScenario, SimSequence, SimStep, SimWorkfront, TerminationReason,
+    LocalStep, ScenarioMetrics, SimScenario, SimSequence, SimStep, SimWorkfront,
+    TerminationReason,
 };
 use crate::sim_grid::SimGrid;
 use crate::stability::{
-    has_minimum_assembly, validate_column_support, validate_girder_support, StabilityElement,
+    check_step_bundle_stability, classify_member_signature, StepBufferDecision, StepPatternType,
+    StabilityElement,
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Default, Clone)]
 struct WorkfrontState {
     owned_ids: HashSet<i32>,
     buffer_sequences: Vec<SimSequence>,
@@ -24,149 +28,126 @@ struct WorkfrontState {
 }
 
 impl WorkfrontState {
-    fn buffer_element_ids(&self) -> Vec<i32> {
-        self.buffer_sequences.iter().map(|seq| seq.element_id).collect()
-    }
-
     fn all_local_ids(&self) -> HashSet<i32> {
         let mut ids = self.owned_ids.clone();
         ids.extend(self.buffer_sequences.iter().map(|seq| seq.element_id));
         ids
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CandidateTypeMask {
-    allow_column: bool,
-    allow_girder: bool,
-}
-
-impl CandidateTypeMask {
-    const COLUMN_ONLY: Self = Self {
-        allow_column: true,
-        allow_girder: false,
-    };
-
-    const GIRDER_ONLY: Self = Self {
-        allow_column: false,
-        allow_girder: true,
-    };
-
-    const BOTH: Self = Self {
-        allow_column: true,
-        allow_girder: true,
-    };
-
-    fn allows(self, is_column_candidate: bool) -> bool {
-        if is_column_candidate {
-            self.allow_column
-        } else {
-            self.allow_girder
-        }
+    fn buffer_element_ids(&self) -> Vec<i32> {
+        self.buffer_sequences
+            .iter()
+            .map(|seq| seq.element_id)
+            .collect()
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BufferDecision {
-    Incomplete(CandidateTypeMask),
-    Complete(PatternType),
-    Invalid,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PatternType {
-    Col,
-    Girder,
-    ColCol,
-    ColGirder,
-    GirderGirder,
-    ColColGirder,
-    ColGirderCol,
-    ColGirderColGirder,
-    ColGirderGirder,
-    ColColGirderGirder,
-    ColColGirderColGirder,
-    Bootstrap,
-}
-
-impl PatternType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Col => "Col",
-            Self::Girder => "Girder",
-            Self::ColCol => "ColCol",
-            Self::ColGirder => "ColGirder",
-            Self::GirderGirder => "GirderGirder",
-            Self::ColColGirder => "ColColGirder",
-            Self::ColGirderCol => "ColGirderCol",
-            Self::ColGirderColGirder => "ColGirderColGirder",
-            Self::ColGirderGirder => "ColGirderGirder",
-            Self::ColColGirderGirder => "ColColGirderGirder",
-            Self::ColColGirderColGirder => "ColColGirderColGirder",
-            Self::Bootstrap => "Bootstrap",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct PatternChoice {
     element_ids: Vec<i32>,
-    pattern: PatternType,
+    pattern: StepPatternType,
 }
 
-/// A single-element candidate for seed selection.
-#[derive(Clone, Debug)]
-pub struct SingleCandidate {
-    pub element_id: i32,
-    pub connectivity: usize,
-    pub frontier_dist: f64,
-    pub is_lowest_floor: bool,
+#[derive(Clone)]
+struct SingleCandidate {
+    element_id: i32,
+    connectivity: usize,
+    frontier_dist: f64,
+    is_lowest_floor: bool,
 }
 
 impl SingleCandidate {
-    /// Score = w1×connectivity + w2×(1/(dist+1)) + 0.05×lowest_floor_bonus
-    pub fn score(&self, w1: f64, w2: f64) -> f64 {
-        let s_conn = w1 * self.connectivity as f64;
-        let s_dist = w2 * (1.0 / (self.frontier_dist + 1.0));
-        let s_floor = 0.05 * if self.is_lowest_floor { 1.0 } else { 0.0 };
-        s_conn + s_dist + s_floor
+    fn score(&self, w1: f64, w2: f64) -> f64 {
+        let connectivity_score = self.connectivity as f64;
+        let frontier_score = 1.0 / (1.0 + self.frontier_dist.max(0.0));
+        let low_floor_bonus = if self.is_lowest_floor { 0.2 } else { 0.0 };
+        (w1 * connectivity_score) + (w2 * frontier_score) + low_floor_bonus
     }
 }
 
-/// Bootstrap candidate only (first step: 3 columns + 2 girders bundle).
-#[derive(Clone, Debug)]
-pub struct Candidate {
-    pub element_ids: Vec<i32>,
-    pub member_count: usize,
-    pub connectivity: f64,
-    pub frontier_dist: f64,
-    pub is_lowest_floor: bool,
-    pub is_independent: bool,
+#[derive(Clone)]
+struct Candidate {
+    element_ids: Vec<i32>,
+    member_count: usize,
+    connectivity: f64,
+    frontier_dist: f64,
+    is_lowest_floor: bool,
+    is_independent: bool,
 }
 
 impl Candidate {
-    pub fn score(&self, w1: f64, w2: f64, w3: f64) -> f64 {
-        let s_members = w1 * (1.0 / self.member_count.max(1) as f64);
-        let s_conn = w2 * self.connectivity;
-        let s_dist = w3 * (1.0 / (self.frontier_dist + 1.0));
-        let s_floor = 0.05 * if self.is_lowest_floor { 1.0 } else { 0.0 };
-        s_members + s_conn + s_dist + s_floor
+    fn score(&self, w1: f64, w2: f64, w3: f64) -> f64 {
+        let member_score = self.member_count as f64;
+        let frontier_score = 1.0 / (1.0 + self.frontier_dist.max(0.0));
+        let floor_bonus = if self.is_lowest_floor { 0.2 } else { 0.0 };
+        let independent_bonus = if self.is_independent { 0.1 } else { 0.0 };
+        (w1 * member_score)
+            + (w2 * self.connectivity)
+            + (w3 * frontier_score)
+            + floor_bonus
+            + independent_bonus
     }
 }
 
 fn grid_dz(grid: &SimGrid) -> f64 {
-    let mut z_vals: Vec<i64> = grid
-        .nodes
-        .iter()
-        .map(|n| (n.z * 1000.0).round() as i64)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    z_vals.sort();
-    if z_vals.len() >= 2 {
-        (z_vals[1] - z_vals[0]) as f64 / 1000.0
-    } else {
-        4000.0
+    if grid.dz > 0.0 {
+        return grid.dz;
+    }
+
+    let mut z_values: Vec<f64> = grid.nodes.iter().map(|n| n.z).collect();
+    z_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    z_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+
+    for pair in z_values.windows(2) {
+        let dz = pair[1] - pair[0];
+        if dz > 0.0 {
+            return dz;
+        }
+    }
+
+    1.0
+}
+
+struct FloorTracker {
+    total_per_floor: HashMap<i32, usize>,
+    column_floor_by_element: HashMap<i32, i32>,
+}
+
+impl FloorTracker {
+    fn from_grid(grid: &SimGrid, dz: f64) -> Self {
+        let mut total_per_floor: HashMap<i32, usize> = HashMap::new();
+        let mut column_floor_by_element: HashMap<i32, i32> = HashMap::new();
+
+        for elem in grid.elements.iter().filter(|e| e.member_type == "Column") {
+            let floor = grid
+                .element_floor_by_id
+                .get(&elem.id)
+                .copied()
+                .or_else(|| {
+                    grid.node_coords(elem.node_i_id)
+                        .map(|(_, _, z)| (z / dz).round() as i32 + 1)
+                });
+
+            if let Some(floor) = floor {
+                column_floor_by_element.insert(elem.id, floor);
+                *total_per_floor.entry(floor).or_insert(0) += 1;
+            }
+        }
+
+        Self {
+            total_per_floor,
+            column_floor_by_element,
+        }
+    }
+
+    fn installed_per_floor_from(&self, installed_ids: &HashSet<i32>) -> HashMap<i32, usize> {
+        let mut installed_per_floor: HashMap<i32, usize> = HashMap::new();
+        for eid in installed_ids {
+            if let Some(floor) = self.column_floor_by_element.get(eid) {
+                *installed_per_floor.entry(*floor).or_insert(0) += 1;
+            }
+        }
+        installed_per_floor
     }
 }
 
@@ -178,7 +159,9 @@ fn build_node_pos(grid: &SimGrid) -> HashMap<i32, (usize, usize, usize)> {
 }
 
 fn get_element(grid: &SimGrid, element_id: i32) -> Option<&StabilityElement> {
-    grid.elements.iter().find(|e| e.id == element_id)
+    grid.element_index_by_id
+        .get(&element_id)
+        .and_then(|idx| grid.elements.get(*idx))
 }
 
 fn is_column(grid: &SimGrid, element_id: i32) -> bool {
@@ -191,69 +174,13 @@ fn classify_buffer(
     buffer_element_ids: &[i32],
     grid: &SimGrid,
     has_stable_structure: bool,
-) -> BufferDecision {
+) -> StepBufferDecision {
     let signature: String = buffer_element_ids
         .iter()
         .map(|eid| if is_column(grid, *eid) { 'C' } else { 'G' })
         .collect();
 
-    match signature.as_str() {
-        "" => {
-            if has_stable_structure {
-                BufferDecision::Incomplete(CandidateTypeMask::BOTH)
-            } else {
-                BufferDecision::Incomplete(CandidateTypeMask::COLUMN_ONLY)
-            }
-        }
-        "G" => {
-            if has_stable_structure {
-                BufferDecision::Complete(PatternType::Girder)
-            } else {
-                BufferDecision::Invalid
-            }
-        }
-        "C" => {
-            if has_stable_structure {
-                BufferDecision::Incomplete(CandidateTypeMask::BOTH)
-            } else {
-                BufferDecision::Incomplete(CandidateTypeMask::COLUMN_ONLY)
-            }
-        }
-        "CC" => BufferDecision::Incomplete(CandidateTypeMask::GIRDER_ONLY),
-        "CCG" => BufferDecision::Incomplete(CandidateTypeMask::BOTH),
-        "CCGC" => BufferDecision::Incomplete(CandidateTypeMask::GIRDER_ONLY),
-        "CCGG" => BufferDecision::Complete(PatternType::ColColGirderGirder),
-        "CCGCG" => {
-            if has_stable_structure {
-                BufferDecision::Complete(PatternType::ColColGirderColGirder)
-            } else {
-                BufferDecision::Complete(PatternType::Bootstrap)
-            }
-        }
-        "CG" => BufferDecision::Complete(PatternType::ColGirder),
-        "CGC" => BufferDecision::Incomplete(CandidateTypeMask::GIRDER_ONLY),
-        "CGCG" => BufferDecision::Complete(PatternType::ColGirderColGirder),
-        "CGG" => BufferDecision::Complete(PatternType::ColGirderGirder),
-        "GG" => BufferDecision::Invalid,
-        "CCC" | "CCCG" => BufferDecision::Invalid,
-        _ => BufferDecision::Invalid,
-    }
-}
-
-fn is_valid_buffer_transition(
-    current_buffer: &[i32],
-    candidate_id: i32,
-    grid: &SimGrid,
-    stable_ids: &HashSet<i32>,
-) -> bool {
-    let mut next_buffer = current_buffer.to_vec();
-    next_buffer.push(candidate_id);
-
-    match classify_buffer(&next_buffer, grid, !stable_ids.is_empty()) {
-        BufferDecision::Invalid => false,
-        BufferDecision::Incomplete(_) => true,
-        BufferDecision::Complete(_) => check_bundle_stability(&next_buffer, grid, stable_ids),
-    }
+    classify_member_signature(signature.as_str(), has_stable_structure)
 }
 
 fn reorder_bootstrap_pattern(
@@ -496,6 +423,7 @@ fn min_xy_distance_to_local_positions(
         .unwrap_or(f64::MAX)
 }
 
+#[cfg(test)]
 fn check_single_stability(element_id: i32, grid: &SimGrid, installed_ids: &HashSet<i32>) -> bool {
     let Some(elem) = get_element(grid, element_id) else {
         return false;
@@ -508,9 +436,9 @@ fn check_single_stability(element_id: i32, grid: &SimGrid, installed_ids: &HashS
     // - Girders: Need two supporting columns (handled by validate_girder_support)
 
     if elem.member_type == "Column" {
-        validate_column_support(elem, &grid.nodes, &grid.elements, installed_ids)
+        crate::stability::validate_column_support(elem, &grid.nodes, &grid.elements, installed_ids)
     } else {
-        validate_girder_support(elem, &grid.nodes, &grid.elements, installed_ids)
+        crate::stability::validate_girder_support(elem, &grid.nodes, &grid.elements, installed_ids)
     }
 }
 
@@ -519,190 +447,54 @@ fn check_bundle_stability(
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
 ) -> bool {
-    let local_stable_ids = collect_local_stable_context(element_ids, grid, installed_ids);
-    let mut combined_local_ids: HashSet<i32> = local_stable_ids.clone();
-    combined_local_ids.extend(element_ids.iter().copied());
+    check_step_bundle_stability(element_ids, &grid.elements, &grid.nodes, installed_ids)
+}
 
-    // Disconnected local case: no adjacent stable structure is involved.
-    // In this case, only a self-sufficient independent bootstrap is allowed.
-    if local_stable_ids.is_empty() {
-        let pattern_elements: Vec<_> = grid
-            .elements
-            .iter()
-            .filter(|e| element_ids.contains(&e.id))
-            .cloned()
-            .collect();
-        return has_minimum_assembly(&grid.nodes, &pattern_elements);
-    }
-
-    // Separate pattern elements into columns and girders
-    let pattern_columns: Vec<i32> = element_ids
-        .iter()
-        .filter(|eid| is_column(grid, **eid))
-        .copied()
-        .collect();
-    let pattern_girders: Vec<i32> = element_ids
-        .iter()
-        .filter(|eid| !is_column(grid, **eid))
-        .copied()
-        .collect();
-
-    // 1. Validate column support against adjacent stable context only.
-    for &col_id in &pattern_columns {
-        let Some(col) = get_element(grid, col_id) else {
-            return false;
+fn check_upper_floor_constraint_tracked(
+    element_ids: &[i32],
+    floor_tracker: &FloorTracker,
+    installed_per_floor: &HashMap<i32, usize>,
+    threshold: f64,
+) -> bool {
+    for eid in element_ids {
+        let Some(floor) = floor_tracker.column_floor_by_element.get(eid).copied() else {
+            continue;
         };
-        if !validate_column_support(col, &grid.nodes, &grid.elements, &local_stable_ids) {
+
+        if floor <= 1 {
+            continue;
+        }
+
+        let lower_floor = floor - 1;
+        let installed_lower = *installed_per_floor.get(&lower_floor).unwrap_or(&0);
+        let total_lower = *floor_tracker.total_per_floor.get(&lower_floor).unwrap_or(&0);
+
+        if total_lower == 0 {
+            continue;
+        }
+        if installed_lower >= total_lower {
+            continue;
+        }
+
+        let remaining_lower = total_lower - installed_lower;
+        if remaining_lower <= 5 && installed_lower > 0 {
             return false;
         }
-    }
 
-    // 2. Validate girder support with local stable columns + pattern columns.
-    for &gir_id in &pattern_girders {
-        let Some(gir) = get_element(grid, gir_id) else {
-            return false;
-        };
-        if !validate_girder_support(gir, &grid.nodes, &grid.elements, &combined_local_ids) {
-            return false;
-        }
-    }
-
-    // 3. Require actual adjacency to the local stable context.
-    if !pattern_girders.is_empty() {
-        let has_adjacent_connection = pattern_girders.iter().any(|&gir_id| {
-            let Some(gir) = get_element(grid, gir_id) else {
+        if installed_lower > 0 {
+            let installed_upper = *installed_per_floor.get(&floor).unwrap_or(&0) + 1;
+            let ratio = installed_upper as f64 / installed_lower as f64;
+            if ratio > threshold {
                 return false;
-            };
-            is_node_connected_to_installed_column(gir.node_i_id, grid, &local_stable_ids)
-                || is_node_connected_to_installed_column(gir.node_j_id, grid, &local_stable_ids)
-                || is_node_connected_to_installed_girder(gir.node_i_id, grid, &local_stable_ids)
-                || is_node_connected_to_installed_girder(gir.node_j_id, grid, &local_stable_ids)
-                || pattern_columns.iter().any(|&col_id| {
-                    let Some(col) = get_element(grid, col_id) else {
-                        return false;
-                    };
-                    let girder_touches_column_top = col.node_j_id == gir.node_i_id || col.node_j_id == gir.node_j_id;
-                    let column_is_anchored = is_node_connected_to_installed_column(col.node_i_id, grid, &local_stable_ids)
-                        || is_node_connected_to_installed_girder(col.node_i_id, grid, &local_stable_ids);
-                    girder_touches_column_top && column_is_anchored
-                })
-        });
-        if !has_adjacent_connection {
-            return false;
-        }
-    }
-
-    // 4. Parallel girder check: if 2+ girders, they must be perpendicular (90°)
-    if pattern_girders.len() >= 2 {
-        if !check_girders_perpendicular(&pattern_girders, grid) {
-            return false;
+            }
         }
     }
 
     true
 }
 
-fn collect_local_stable_context(
-    element_ids: &[i32],
-    grid: &SimGrid,
-    installed_ids: &HashSet<i32>,
-) -> HashSet<i32> {
-    let candidate_nodes: HashSet<i32> = element_ids
-        .iter()
-        .filter_map(|eid| get_element(grid, *eid))
-        .flat_map(|elem| [elem.node_i_id, elem.node_j_id])
-        .collect();
-
-    installed_ids
-        .iter()
-        .filter_map(|eid| get_element(grid, *eid).map(|elem| (*eid, elem)))
-        .filter(|(_, elem)| {
-            candidate_nodes.contains(&elem.node_i_id) || candidate_nodes.contains(&elem.node_j_id)
-        })
-        .map(|(eid, _)| eid)
-        .collect()
-}
-
-/// Check if a node is connected to an already-installed column (NOT pattern columns)
-fn is_node_connected_to_installed_column(
-    node_id: i32,
-    grid: &SimGrid,
-    installed_ids: &HashSet<i32>,
-) -> bool {
-    grid.elements
-        .iter()
-        .filter(|e| e.member_type == "Column" && installed_ids.contains(&e.id))
-        .any(|col| col.node_i_id == node_id || col.node_j_id == node_id)
-}
-
-/// Check if a node is connected to an already-installed girder
-fn is_node_connected_to_installed_girder(
-    node_id: i32,
-    grid: &SimGrid,
-    installed_ids: &HashSet<i32>,
-) -> bool {
-    grid.elements
-        .iter()
-        .filter(|e| e.member_type == "Girder" && installed_ids.contains(&e.id))
-        .any(|gir| gir.node_i_id == node_id || gir.node_j_id == node_id)
-}
-
-/// Check if all girders in the pattern are mutually perpendicular (90°)
-/// For 2 girders: dot product of direction vectors must be 0
-/// For 3+ girders: at least form perpendicular pairs (not all parallel)
-fn check_girders_perpendicular(girder_ids: &[i32], grid: &SimGrid) -> bool {
-    if girder_ids.len() < 2 {
-        return true;
-    }
-
-    // Get direction vectors for all girders
-    let mut directions: Vec<(i32, i32)> = Vec::new();
-    for &gir_id in girder_ids {
-        let Some(gir) = get_element(grid, gir_id) else {
-            return false;
-        };
-        let Some((ni_x, ni_y, _)) = grid.node_coords(gir.node_i_id) else {
-            return false;
-        };
-        let Some((nj_x, nj_y, _)) = grid.node_coords(gir.node_j_id) else {
-            return false;
-        };
-
-        let dx = nj_x - ni_x;
-        let dy = nj_y - ni_y;
-
-        // Normalize to direction signs (grid-aligned)
-        let dir = (
-            if dx.abs() > 0.001 {
-                dx.signum() as i32
-            } else {
-                0
-            },
-            if dy.abs() > 0.001 {
-                dy.signum() as i32
-            } else {
-                0
-            },
-        );
-        directions.push(dir);
-    }
-
-    // Check if any pair is perpendicular (dot product = 0)
-    // For a valid pattern, at least one perpendicular pair must exist
-    for i in 0..directions.len() {
-        for j in (i + 1)..directions.len() {
-            let dot = directions[i].0 * directions[j].0 + directions[i].1 * directions[j].1;
-            if dot == 0 {
-                return true; // Found a perpendicular pair
-            }
-        }
-    }
-
-    // All girders are parallel - invalid pattern
-    false
-}
-
-fn check_upper_floor_constraint(
+#[cfg(test)]
+fn check_upper_floor_constraint_legacy(
     element_ids: &[i32],
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
@@ -785,6 +577,19 @@ fn check_upper_floor_constraint(
     true
 }
 
+#[cfg(test)]
+fn check_upper_floor_constraint(
+    element_ids: &[i32],
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+    threshold: f64,
+) -> bool {
+    let dz = grid_dz(grid);
+    let tracker = FloorTracker::from_grid(grid, dz);
+    let installed_per_floor = tracker.installed_per_floor_from(installed_ids);
+    check_upper_floor_constraint_tracked(element_ids, &tracker, &installed_per_floor, threshold)
+}
+
 /// Find a floor that has ≤5 uninstalled elements and should be prioritized for completion.
 /// Returns the lowest such floor (1-indexed), or None if no floor needs priority completion.
 fn find_priority_completion_floor(
@@ -840,6 +645,27 @@ fn collect_single_candidates(
     node_pos: &HashMap<i32, (usize, usize, usize)>,
     priority_floor: Option<i32>,
 ) -> Vec<SingleCandidate> {
+    collect_single_candidates_optimized(
+        wf,
+        grid,
+        support_ids,
+        local_element_ids,
+        committed_ids,
+        node_pos,
+        priority_floor,
+    )
+}
+
+#[cfg(test)]
+fn collect_single_candidates_legacy(
+    wf: &SimWorkfront,
+    grid: &SimGrid,
+    support_ids: &HashSet<i32>,
+    local_element_ids: &HashSet<i32>,
+    committed_ids: &HashSet<i32>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    priority_floor: Option<i32>,
+) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions = local_xy_positions(local_element_ids, node_pos, grid);
     let local_seeded = !local_positions.is_empty();
@@ -859,6 +685,87 @@ fn collect_single_candidates(
 
         let candidate_nodes = [elem.node_i_id, elem.node_j_id];
         let dist = min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, wf);
+
+        if !dist.is_finite() {
+            continue;
+        }
+
+        if local_seeded && dist > 1.0 {
+            continue;
+        }
+
+        let structurally_possible = if elem.member_type == "Column" {
+            if let Some(&(_, _, zi)) = node_pos.get(&elem.node_i_id) {
+                if zi == 0 {
+                    true
+                } else {
+                    support_nodes.contains(&elem.node_i_id)
+                }
+            } else {
+                false
+            }
+        } else {
+            support_nodes.contains(&elem.node_i_id) || support_nodes.contains(&elem.node_j_id)
+        };
+
+        if !structurally_possible {
+            continue;
+        }
+
+        let connectivity = element_connectivity(elem.id, grid, &support_nodes);
+        result.push(SingleCandidate {
+            element_id: elem.id,
+            connectivity,
+            frontier_dist: dist,
+            is_lowest_floor: floor == 1,
+        });
+    }
+
+    result
+}
+
+fn collect_single_candidates_optimized(
+    wf: &SimWorkfront,
+    grid: &SimGrid,
+    support_ids: &HashSet<i32>,
+    local_element_ids: &HashSet<i32>,
+    committed_ids: &HashSet<i32>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    priority_floor: Option<i32>,
+) -> Vec<SingleCandidate> {
+    let support_nodes = node_set_for_elements(support_ids, grid);
+    let local_positions = local_xy_positions(local_element_ids, node_pos, grid);
+    let local_seeded = !local_positions.is_empty();
+    let mut result: Vec<SingleCandidate> = Vec::new();
+
+    let candidate_ids: &[i32] = if let Some(priority) = priority_floor {
+        grid.elements_by_floor
+            .get(&priority)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    } else {
+        grid.element_ids_in_order.as_slice()
+    };
+
+    for eid in candidate_ids {
+        if committed_ids.contains(eid) {
+            continue;
+        }
+
+        let Some(elem) = get_element(grid, *eid) else {
+            continue;
+        };
+
+        let floor = grid.element_floor_by_id.get(eid).copied().unwrap_or(0);
+        if let Some(priority) = priority_floor {
+            if floor != priority {
+                continue;
+            }
+        }
+
+        let candidate_nodes = [elem.node_i_id, elem.node_j_id];
+        let dist =
+            min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, wf);
 
         if !dist.is_finite() {
             continue;
@@ -1019,9 +926,11 @@ fn push_pattern_if_valid(
     choices: &mut Vec<PatternChoice>,
     seen: &mut HashSet<String>,
     element_ids: Vec<i32>,
-    pattern: PatternType,
+    pattern: StepPatternType,
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
+    floor_tracker: &FloorTracker,
+    installed_per_floor: &HashMap<i32, usize>,
     threshold: f64,
 ) {
     if contains_forbidden_pattern(&element_ids, grid) {
@@ -1037,7 +946,12 @@ fn push_pattern_if_valid(
     if !check_bundle_stability(&element_ids, grid, installed_ids) {
         return;
     }
-    if !check_upper_floor_constraint(&element_ids, grid, installed_ids, threshold) {
+    if !check_upper_floor_constraint_tracked(
+        &element_ids,
+        floor_tracker,
+        installed_per_floor,
+        threshold,
+    ) {
         return;
     }
 
@@ -1165,6 +1079,7 @@ fn bundle_score(
 fn try_build_pattern(
     seed_id: i32,
     grid: &SimGrid,
+    floor_tracker: &FloorTracker,
     installed_ids: &HashSet<i32>,
     installed_nodes: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
@@ -1174,20 +1089,23 @@ fn try_build_pattern(
     rng: &mut u64,
 ) -> (Vec<i32>, String) {
     let Some(seed) = get_element(grid, seed_id) else {
-        return (Vec::new(), PatternType::Col.as_str().to_string());
+        return (Vec::new(), StepPatternType::Col.as_str().to_string());
     };
 
     let mut choices: Vec<PatternChoice> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let installed_per_floor = floor_tracker.installed_per_floor_from(installed_ids);
 
     if seed.member_type == "Girder" {
         push_pattern_if_valid(
             &mut choices,
             &mut seen,
             vec![seed_id],
-            PatternType::Girder,
+            StepPatternType::Girder,
             grid,
             installed_ids,
+            floor_tracker,
+            &installed_per_floor,
             threshold,
         );
 
@@ -1209,9 +1127,11 @@ fn try_build_pattern(
                 &mut choices,
                 &mut seen,
                 vec![seed_id, g2],
-                PatternType::GirderGirder,
+                StepPatternType::GirderGirder,
                 grid,
                 installed_ids,
+                floor_tracker,
+                &installed_per_floor,
                 threshold,
             );
         }
@@ -1220,9 +1140,11 @@ fn try_build_pattern(
             &mut choices,
             &mut seen,
             vec![seed_id],
-            PatternType::Col,
+            StepPatternType::Col,
             grid,
             installed_ids,
+            floor_tracker,
+            &installed_per_floor,
             threshold,
         );
 
@@ -1233,9 +1155,11 @@ fn try_build_pattern(
                 &mut choices,
                 &mut seen,
                 vec![seed_id, col2],
-                PatternType::ColCol,
+                StepPatternType::ColCol,
                 grid,
                 installed_ids,
+                floor_tracker,
+                &installed_per_floor,
                 threshold,
             );
 
@@ -1246,9 +1170,11 @@ fn try_build_pattern(
                             &mut choices,
                             &mut seen,
                             vec![seed_id, col2, g1],
-                            PatternType::ColColGirder,
+                            StepPatternType::ColColGirder,
                             grid,
                             installed_ids,
+                            floor_tracker,
+                            &installed_per_floor,
                             threshold,
                         );
 
@@ -1270,9 +1196,11 @@ fn try_build_pattern(
                                 &mut choices,
                                 &mut seen,
                                 vec![seed_id, col2, g1, g2],
-                                PatternType::ColColGirderGirder,
+                                StepPatternType::ColColGirderGirder,
                                 grid,
                                 installed_ids,
+                                floor_tracker,
+                                &installed_per_floor,
                                 threshold,
                             );
                         }
@@ -1305,9 +1233,11 @@ fn try_build_pattern(
                                             &mut choices,
                                             &mut seen,
                                             vec![seed_id, col2, g1, col3, g2],
-                                            PatternType::ColColGirderColGirder,
+                                            StepPatternType::ColColGirderColGirder,
                                             grid,
                                             installed_ids,
+                                            floor_tracker,
+                                            &installed_per_floor,
                                             threshold,
                                         );
                                     }
@@ -1324,9 +1254,11 @@ fn try_build_pattern(
                 &mut choices,
                 &mut seen,
                 vec![seed_id, g1],
-                PatternType::ColGirder,
+                StepPatternType::ColGirder,
                 grid,
                 installed_ids,
+                floor_tracker,
+                &installed_per_floor,
                 threshold,
             );
 
@@ -1339,9 +1271,11 @@ fn try_build_pattern(
                             &mut choices,
                             &mut seen,
                             vec![seed_id, g1, col2],
-                            PatternType::ColGirderCol,
+                            StepPatternType::ColGirderCol,
                             grid,
                             installed_ids,
+                            floor_tracker,
+                            &installed_per_floor,
                             threshold,
                         );
                     }
@@ -1363,9 +1297,11 @@ fn try_build_pattern(
                             &mut choices,
                             &mut seen,
                             vec![seed_id, g1, g2],
-                            PatternType::ColGirderGirder,
+                            StepPatternType::ColGirderGirder,
                             grid,
                             installed_ids,
+                            floor_tracker,
+                            &installed_per_floor,
                             threshold,
                         );
                     }
@@ -1376,9 +1312,9 @@ fn try_build_pattern(
 
     if choices.is_empty() {
         return if seed.member_type == "Girder" {
-            (vec![seed_id], PatternType::Girder.as_str().to_string())
+            (vec![seed_id], StepPatternType::Girder.as_str().to_string())
         } else {
-            (vec![seed_id], PatternType::Col.as_str().to_string())
+            (vec![seed_id], StepPatternType::Col.as_str().to_string())
         };
     }
 
@@ -1423,13 +1359,14 @@ pub fn weighted_random_choice(scores: &[f64], rng_state: &mut u64) -> usize {
     scores.len() - 1
 }
 
-pub fn run_scenario(
+fn run_scenario_internal(
     scenario_id: usize,
     grid: &SimGrid,
     workfronts: &[SimWorkfront],
     seed: u64,
     weights: (f64, f64, f64),
     threshold: f64,
+    cancel_flag: Option<&AtomicBool>,
 ) -> SimScenario {
     let (w1, w2, w3) = weights;
     let mut rng = seed;
@@ -1444,12 +1381,20 @@ pub fn run_scenario(
     let total_elements = grid.elements.len();
     let node_pos = build_node_pos(grid);
     let dz = grid_dz(grid);
+    let floor_tracker = FloorTracker::from_grid(grid, dz);
 
     let mut consecutive_empty_cycles = 0u32;
     let mut next_sequence_start: usize = 1; // 1-based sequence numbering for from_local_steps
     let mut total_sequence_rounds: usize = 0; // for stagnation/max-iteration check
 
     let termination_reason = 'outer: loop {
+        if cancel_flag
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            break TerminationReason::Cancelled;
+        }
+
         // ── Termination checks ──────────────────────────────────────
         let committed_ids: HashSet<i32> = workfront_states.values().fold(stable_ids.clone(), |mut acc, state| {
             acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
@@ -1472,6 +1417,13 @@ pub fn run_scenario(
         let mut cycle_no_progress_count = 0u32;
 
         loop {
+            if cancel_flag
+                .map(|flag| flag.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                break 'outer TerminationReason::Cancelled;
+            }
+
             // Eligible workfronts: those that haven't completed a local step in this cycle
             let eligible_wfs: Vec<&SimWorkfront> = workfronts
                 .iter()
@@ -1487,6 +1439,7 @@ pub fn run_scenario(
                 acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
                 acc
             });
+            let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
 
             total_sequence_rounds += 1;
 
@@ -1574,9 +1527,12 @@ pub fn run_scenario(
                             .iter()
                             .filter(|candidate| !selected_this_sequence.contains(&candidate.element_id))
                             .filter(|candidate| {
-                                let mut temp_committed = wf_committed_ids.clone();
-                                temp_committed.insert(candidate.element_id);
-                                check_upper_floor_constraint(&[candidate.element_id], grid, &temp_committed, threshold)
+                                check_upper_floor_constraint_tracked(
+                                    &[candidate.element_id],
+                                    &floor_tracker,
+                                    &committed_floor_counts,
+                                    threshold,
+                                )
                             })
                             .collect();
 
@@ -1647,6 +1603,7 @@ pub fn run_scenario(
                                     let (candidate_plan, _) = try_build_pattern(
                                         seed_candidate.element_id,
                                         grid,
+                                        &floor_tracker,
                                         &support_ids,
                                         &stable_nodes,
                                         &node_pos,
@@ -1658,7 +1615,7 @@ pub fn run_scenario(
 
                                     let is_complete = matches!(
                                         classify_buffer(&candidate_plan, grid, !support_ids.is_empty()),
-                                        BufferDecision::Complete(_)
+                                        StepBufferDecision::Complete(_)
                                     );
                                     let is_available = candidate_plan.iter().all(|eid| {
                                         !wf_committed_ids.contains(eid) && !planned_reserved_ids.contains(eid)
@@ -1742,7 +1699,7 @@ pub fn run_scenario(
                 let buffer_element_ids = state.buffer_element_ids();
                 let decision = classify_buffer(&buffer_element_ids, grid, !cycle_stable_context.is_empty());
 
-                if let BufferDecision::Complete(pattern) = decision {
+                if let StepBufferDecision::Complete(pattern) = decision {
                     if check_bundle_stability(&buffer_element_ids, grid, &cycle_stable_context) {
                         let step_floor = buffer_element_ids
                             .iter()
@@ -1843,6 +1800,17 @@ pub fn run_scenario(
     }
 }
 
+pub fn run_scenario(
+    scenario_id: usize,
+    grid: &SimGrid,
+    workfronts: &[SimWorkfront],
+    seed: u64,
+    weights: (f64, f64, f64),
+    threshold: f64,
+) -> SimScenario {
+    run_scenario_internal(scenario_id, grid, workfronts, seed, weights, threshold, None)
+}
+
 pub fn run_all_scenarios(
     count: usize,
     grid: &SimGrid,
@@ -1850,11 +1818,73 @@ pub fn run_all_scenarios(
     weights: (f64, f64, f64),
     threshold: f64,
 ) -> Vec<SimScenario> {
+    run_all_scenarios_with_progress(count, grid, workfronts, weights, threshold, None)
+}
+
+pub fn run_all_scenarios_with_progress(
+    count: usize,
+    grid: &SimGrid,
+    workfronts: &[SimWorkfront],
+    weights: (f64, f64, f64),
+    threshold: f64,
+    progress_counter: Option<Arc<AtomicUsize>>,
+) -> Vec<SimScenario> {
+    run_all_scenarios_with_progress_and_cancel(
+        count,
+        grid,
+        workfronts,
+        weights,
+        threshold,
+        progress_counter,
+        None,
+    )
+}
+
+pub fn run_all_scenarios_with_progress_and_cancel(
+    count: usize,
+    grid: &SimGrid,
+    workfronts: &[SimWorkfront],
+    weights: (f64, f64, f64),
+    threshold: f64,
+    progress_counter: Option<Arc<AtomicUsize>>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Vec<SimScenario> {
     let mut scenarios: Vec<SimScenario> = (1..=count)
         .into_par_iter()
         .map(|i| {
+            if cancel_flag
+                .as_ref()
+                .map(|flag| flag.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                return SimScenario {
+                    id: i,
+                    seed: i as u64 * 2654435761,
+                    steps: Vec::new(),
+                    metrics: ScenarioMetrics {
+                        avg_members_per_step: 0.0,
+                        avg_connectivity: 0.0,
+                        total_steps: 0,
+                        total_members_installed: 0,
+                        termination_reason: TerminationReason::Cancelled,
+                    },
+                };
+            }
+
             let seed = i as u64 * 2654435761;
-            run_scenario(i, grid, workfronts, seed, weights, threshold)
+            let scenario = run_scenario_internal(
+                i,
+                grid,
+                workfronts,
+                seed,
+                weights,
+                threshold,
+                cancel_flag.as_deref(),
+            );
+            if let Some(counter) = &progress_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            scenario
         })
         .collect();
     scenarios.sort_by_key(|s| s.id);
@@ -1964,6 +1994,56 @@ mod tests {
         for s in &scenarios {
             assert!(s.id >= 1, "scenario id should be >= 1");
         }
+    }
+
+    #[test]
+    fn test_ab_run_all_scenarios_legacy_vs_with_progress() {
+        let grid = make_grid_2x2x2();
+        let wfs = make_workfronts_2x2();
+
+        let legacy = run_all_scenarios(4, &grid, &wfs, (0.5, 0.3, 0.2), 0.3);
+        let progress = Arc::new(AtomicUsize::new(0));
+        let with_progress = run_all_scenarios_with_progress(
+            4,
+            &grid,
+            &wfs,
+            (0.5, 0.3, 0.2),
+            0.3,
+            Some(progress.clone()),
+        );
+
+        assert_eq!(progress.load(Ordering::Relaxed), 4);
+        assert_eq!(legacy.len(), with_progress.len());
+
+        let legacy_sig: Vec<(usize, usize, usize, String)> = legacy
+            .iter()
+            .map(|s| {
+                (
+                    s.id,
+                    s.metrics.total_steps,
+                    s.metrics.total_members_installed,
+                    format!("{:?}", s.metrics.termination_reason),
+                )
+            })
+            .collect();
+        let progress_sig: Vec<(usize, usize, usize, String)> = with_progress
+            .iter()
+            .map(|s| {
+                (
+                    s.id,
+                    s.metrics.total_steps,
+                    s.metrics.total_members_installed,
+                    format!("{:?}", s.metrics.termination_reason),
+                )
+            })
+            .collect();
+        assert_eq!(legacy_sig, progress_sig);
+    }
+
+    #[test]
+    fn test_grid_dz_uses_cached_config_value() {
+        let grid = SimGrid::new(2, 2, 3, 6000.0, 6000.0, 4250.0);
+        assert!((grid_dz(&grid) - 4250.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2321,6 +2401,238 @@ mod tests {
                 "Upper floor should be allowed when lower is 100% complete"
             );
         }
+    }
+
+    #[test]
+    fn test_ab_upper_floor_constraint_legacy_vs_tracked_single_column() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let dz = grid_dz(&grid);
+        let tracker = FloorTracker::from_grid(&grid, dz);
+
+        let floor1_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| z.abs() < 0.001)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .collect();
+
+        let floor2_col = grid
+            .elements
+            .iter()
+            .find(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| ((z / dz).round() as i32 + 1) == 2)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .expect("floor2 column should exist");
+
+        for installed_count in 0..=floor1_cols.len() {
+            let installed: HashSet<i32> = floor1_cols
+                .iter()
+                .take(installed_count)
+                .copied()
+                .collect();
+            let installed_per_floor = tracker.installed_per_floor_from(&installed);
+
+            let legacy =
+                check_upper_floor_constraint_legacy(&[floor2_col], &grid, &installed, 0.3);
+            let tracked = check_upper_floor_constraint_tracked(
+                &[floor2_col],
+                &tracker,
+                &installed_per_floor,
+                0.3,
+            );
+
+            assert_eq!(
+                legacy, tracked,
+                "mismatch at installed_count={} for floor2_col={}",
+                installed_count, floor2_col
+            );
+        }
+    }
+
+    #[test]
+    fn test_ab_upper_floor_constraint_legacy_vs_tracked_multiple_candidates() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let dz = grid_dz(&grid);
+        let tracker = FloorTracker::from_grid(&grid, dz);
+
+        let floor1_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| z.abs() < 0.001)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .collect();
+
+        let floor2_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| ((z / dz).round() as i32 + 1) == 2)
+                        .unwrap_or(false)
+            })
+            .take(3)
+            .map(|e| e.id)
+            .collect();
+
+        let installed: HashSet<i32> = floor1_cols.iter().take(7).copied().collect();
+        let installed_per_floor = tracker.installed_per_floor_from(&installed);
+
+        let legacy = check_upper_floor_constraint_legacy(&floor2_cols, &grid, &installed, 0.3);
+        let tracked =
+            check_upper_floor_constraint_tracked(&floor2_cols, &tracker, &installed_per_floor, 0.3);
+
+        assert_eq!(legacy, tracked);
+    }
+
+    #[test]
+    fn test_ab_collect_single_candidates_legacy_vs_optimized_no_priority() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let wf = SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        };
+        let node_pos = build_node_pos(&grid);
+
+        let support_ids: HashSet<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| e.member_type == "Column")
+            .take(6)
+            .map(|e| e.id)
+            .collect();
+
+        let local_element_ids: HashSet<i32> = support_ids.iter().take(3).copied().collect();
+        let committed_ids: HashSet<i32> = support_ids.iter().take(4).copied().collect();
+
+        let legacy = collect_single_candidates_legacy(
+            &wf,
+            &grid,
+            &support_ids,
+            &local_element_ids,
+            &committed_ids,
+            &node_pos,
+            None,
+        );
+        let optimized = collect_single_candidates_optimized(
+            &wf,
+            &grid,
+            &support_ids,
+            &local_element_ids,
+            &committed_ids,
+            &node_pos,
+            None,
+        );
+
+        let legacy_sig: Vec<(i32, usize, i32, bool)> = legacy
+            .iter()
+            .map(|c| {
+                (
+                    c.element_id,
+                    c.connectivity,
+                    (c.frontier_dist * 1000.0).round() as i32,
+                    c.is_lowest_floor,
+                )
+            })
+            .collect();
+        let optimized_sig: Vec<(i32, usize, i32, bool)> = optimized
+            .iter()
+            .map(|c| {
+                (
+                    c.element_id,
+                    c.connectivity,
+                    (c.frontier_dist * 1000.0).round() as i32,
+                    c.is_lowest_floor,
+                )
+            })
+            .collect();
+
+        assert_eq!(legacy_sig, optimized_sig);
+    }
+
+    #[test]
+    fn test_ab_collect_single_candidates_legacy_vs_optimized_with_priority_floor() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let wf = SimWorkfront {
+            id: 1,
+            grid_x: 0,
+            grid_y: 0,
+        };
+        let node_pos = build_node_pos(&grid);
+
+        let support_ids: HashSet<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| e.member_type == "Column")
+            .take(10)
+            .map(|e| e.id)
+            .collect();
+
+        let local_element_ids: HashSet<i32> = support_ids.iter().take(2).copied().collect();
+        let committed_ids: HashSet<i32> = support_ids.iter().take(5).copied().collect();
+
+        let legacy = collect_single_candidates_legacy(
+            &wf,
+            &grid,
+            &support_ids,
+            &local_element_ids,
+            &committed_ids,
+            &node_pos,
+            Some(2),
+        );
+        let optimized = collect_single_candidates_optimized(
+            &wf,
+            &grid,
+            &support_ids,
+            &local_element_ids,
+            &committed_ids,
+            &node_pos,
+            Some(2),
+        );
+
+        let legacy_sig: Vec<(i32, usize, i32, bool)> = legacy
+            .iter()
+            .map(|c| {
+                (
+                    c.element_id,
+                    c.connectivity,
+                    (c.frontier_dist * 1000.0).round() as i32,
+                    c.is_lowest_floor,
+                )
+            })
+            .collect();
+        let optimized_sig: Vec<(i32, usize, i32, bool)> = optimized
+            .iter()
+            .map(|c| {
+                (
+                    c.element_id,
+                    c.connectivity,
+                    (c.frontier_dist * 1000.0).round() as i32,
+                    c.is_lowest_floor,
+                )
+            })
+            .collect();
+
+        assert_eq!(legacy_sig, optimized_sig);
     }
 
     #[test]

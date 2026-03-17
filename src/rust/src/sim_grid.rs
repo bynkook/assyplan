@@ -30,11 +30,23 @@ pub struct SimGrid {
     pub elements: Vec<StabilityElement>,
     /// Fast lookup: (xi, yi, zi) -> node_id
     pub node_index: HashMap<(usize, usize, usize), i32>,
+    /// Fast lookup: node_id -> coordinates
+    pub node_coords_by_id: HashMap<i32, (f64, f64, f64)>,
+    /// Fast lookup: element_id -> index in `elements`
+    pub element_index_by_id: HashMap<i32, usize>,
+    /// Element IDs in deterministic iteration order
+    pub element_ids_in_order: Vec<i32>,
+    /// Cached floor lookup: element_id -> floor
+    pub element_floor_by_id: HashMap<i32, i32>,
+    /// Cached floor buckets preserving element order per floor
+    pub elements_by_floor: HashMap<i32, Vec<i32>>,
     /// nx, ny, nz dimensions from the config
     pub nx: usize,
     pub ny: usize,
     /// Number of floor levels (z_levels from GridConfig)
     pub nz: usize,
+    /// Floor interval cached from grid config (z spacing)
+    pub dz: f64,
 }
 
 impl SimGrid {
@@ -78,6 +90,8 @@ impl SimGrid {
             node_index.insert((xi, yi, zi), id);
             nodes.push(StabilityNode { id, x, y, z });
         }
+        let node_coords_by_id: HashMap<i32, (f64, f64, f64)> =
+            nodes.iter().map(|n| (n.id, (n.x, n.y, n.z))).collect();
 
         // ── 2. Generate elements ─────────────────────────────────────────────
         // Columns: (xi,yi,zi) → (xi,yi,zi+1)  for zi in 0..nz-1
@@ -149,13 +163,40 @@ impl SimGrid {
             elements.push(gdr);
         }
 
+        let element_index_by_id: HashMap<i32, usize> = elements
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| (e.id, idx))
+            .collect();
+        let element_ids_in_order: Vec<i32> = elements.iter().map(|e| e.id).collect();
+
+        let mut element_floor_by_id: HashMap<i32, i32> = HashMap::new();
+        let mut elements_by_floor: HashMap<i32, Vec<i32>> = HashMap::new();
+        for elem in &elements {
+            if let Some((_, _, z)) = node_coords_by_id.get(&elem.node_i_id).copied() {
+                let floor = if elem.member_type == "Column" {
+                    (z / dz).round() as i32 + 1
+                } else {
+                    ((z / dz).round() as i32).max(1)
+                };
+                element_floor_by_id.insert(elem.id, floor);
+                elements_by_floor.entry(floor).or_default().push(elem.id);
+            }
+        }
+
         Self {
             nodes,
             elements,
             node_index,
+            node_coords_by_id,
+            element_index_by_id,
+            element_ids_in_order,
+            element_floor_by_id,
+            elements_by_floor,
             nx,
             ny,
             nz,
+            dz,
         }
     }
 
@@ -217,10 +258,7 @@ impl SimGrid {
 
     /// Return the node coordinates by node ID.
     pub fn node_coords(&self, id: i32) -> Option<(f64, f64, f64)> {
-        self.nodes
-            .iter()
-            .find(|n| n.id == id)
-            .map(|n| (n.x, n.y, n.z))
+        self.node_coords_by_id.get(&id).copied()
     }
 
     /// Return columns adjacent (sharing a node) to an already-installed column.

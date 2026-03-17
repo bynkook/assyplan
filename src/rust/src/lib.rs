@@ -7,7 +7,11 @@ use eframe::egui;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
+use crate::graphics::ui::SimScenario;
 use std::fs;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 // ============================================================================
 // Python-compatible data structures (pyclass)
@@ -180,6 +184,34 @@ impl Default for PyStepTable {
 // eframe Application
 // ============================================================================
 
+#[derive(Debug)]
+struct SimulationTaskResult {
+    grid: sim_grid::SimGrid,
+    scenarios: Vec<SimScenario>,
+    best_idx: Option<usize>,
+}
+
+#[derive(Debug)]
+enum SimulationTaskMessage {
+    Completed(SimulationTaskResult),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct DevelopmentTaskResult {
+    table_result: stability::TableGenerationResult,
+    step_table_rendering: Vec<(i32, usize, String)>,
+    step_elements: Vec<Vec<(i32, String, i32)>>,
+    floor_data: Vec<(i32, usize)>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+enum DevelopmentTaskMessage {
+    Completed(DevelopmentTaskResult),
+    Failed(String),
+}
+
 pub struct AssyPlanApp {
     ui_state: graphics::UiState,
     render_data: Option<graphics::RenderData>,
@@ -195,6 +227,18 @@ pub struct AssyPlanApp {
     sim_grid: Option<sim_grid::SimGrid>,
     // RenderData built once from sim_grid (cached to avoid per-frame fit recalculation)
     sim_render_data: Option<graphics::RenderData>,
+    // Background simulation task communication + progress
+    sim_task_rx: Option<mpsc::Receiver<SimulationTaskMessage>>,
+    sim_progress_done: Option<Arc<AtomicUsize>>,
+    sim_progress_total: usize,
+    sim_progress_stage: Option<Arc<AtomicUsize>>,
+    sim_cancel_flag: Option<Arc<AtomicBool>>,
+    // Background development recalc task communication + progress
+    dev_task_rx: Option<mpsc::Receiver<DevelopmentTaskMessage>>,
+    dev_progress_done: Option<Arc<AtomicUsize>>,
+    dev_progress_total: usize,
+    dev_progress_stage: Option<Arc<AtomicUsize>>,
+    dev_cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for AssyPlanApp {
@@ -210,11 +254,292 @@ impl Default for AssyPlanApp {
             stability_element_data: Vec::new(),
             sim_grid: None,
             sim_render_data: None,
+            sim_task_rx: None,
+            sim_progress_done: None,
+            sim_progress_total: 0,
+            sim_progress_stage: None,
+            sim_cancel_flag: None,
+            dev_task_rx: None,
+            dev_progress_done: None,
+            dev_progress_total: 0,
+            dev_progress_stage: None,
+            dev_cancel_flag: None,
         }
     }
 }
 
 impl AssyPlanApp {
+    fn has_background_task_running(&self) -> bool {
+        self.ui_state.sim_running || self.dev_task_rx.is_some()
+    }
+
+    fn run_development_calculation(
+        nodes: &[stability::StabilityNode],
+        elements: &[stability::StabilityElement],
+        element_data: &[(String, Option<String>)],
+        output_dir: Option<std::path::PathBuf>,
+        progress_counter: Option<Arc<AtomicUsize>>,
+        progress_stage: Option<Arc<AtomicUsize>>,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> DevelopmentTaskResult {
+        let cancelled = || {
+            cancel_flag
+                .as_ref()
+                .map(|f| f.load(Ordering::Relaxed))
+                .unwrap_or(false)
+        };
+
+        if let Some(counter) = &progress_counter {
+            counter.store(0, Ordering::Relaxed);
+        }
+        if let Some(stage) = &progress_stage {
+            stage.store(1, Ordering::Relaxed);
+        }
+
+        if cancelled() {
+            return DevelopmentTaskResult {
+                table_result: stability::TableGenerationResult::default(),
+                step_table_rendering: Vec::new(),
+                step_elements: Vec::new(),
+                floor_data: Vec::new(),
+                warnings: vec!["cancelled by user".to_string()],
+            };
+        }
+
+        let table_result = stability::generate_all_tables(nodes, elements, element_data);
+        if let Some(counter) = &progress_counter {
+            counter.store(1, Ordering::Relaxed);
+        }
+        if let Some(stage) = &progress_stage {
+            stage.store(2, Ordering::Relaxed);
+        }
+
+        if cancelled() {
+            return DevelopmentTaskResult {
+                table_result,
+                step_table_rendering: Vec::new(),
+                step_elements: Vec::new(),
+                floor_data: Vec::new(),
+                warnings: vec!["cancelled by user".to_string()],
+            };
+        }
+
+        let step_table_rendering =
+            stability::step_table_for_rendering(&table_result.step_table, elements);
+        let step_elements = stability::build_step_elements_map(&table_result.step_table, elements, nodes);
+        let floor_data = stability::get_floor_column_data(elements, nodes);
+        if let Some(counter) = &progress_counter {
+            counter.store(2, Ordering::Relaxed);
+        }
+        if let Some(stage) = &progress_stage {
+            stage.store(3, Ordering::Relaxed);
+        }
+
+        let mut warnings: Vec<String> = Vec::new();
+        if let Some(out_dir) = output_dir {
+            if let Err(e) = stability::save_all_tables(&table_result, elements, nodes, &out_dir) {
+                warnings.push(format!("Failed to save tables: {}", e));
+            }
+        }
+        if let Some(counter) = &progress_counter {
+            counter.store(4, Ordering::Relaxed);
+        }
+        if let Some(stage) = &progress_stage {
+            stage.store(4, Ordering::Relaxed);
+        }
+
+        DevelopmentTaskResult {
+            table_result,
+            step_table_rendering,
+            step_elements,
+            floor_data,
+            warnings,
+        }
+    }
+
+    fn apply_development_result(&mut self, calc: DevelopmentTaskResult) {
+        if calc
+            .warnings
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case("cancelled by user"))
+        {
+            self.ui_state.status_message = "Development recalc cancelled by user.".to_string();
+            self.ui_state.needs_recalc = false;
+            self.dev_task_rx = None;
+            self.dev_progress_done = None;
+            self.dev_progress_total = 0;
+            self.dev_progress_stage = None;
+            self.dev_cancel_flag = None;
+            return;
+        }
+
+        let table_result = calc.table_result;
+        let warnings = calc.warnings;
+
+        let errors: Vec<String> = table_result.errors.clone();
+
+        let workfront_count = table_result.workfront_count as usize;
+        let max_step = table_result.max_step as usize;
+
+        let sequence_order: Vec<usize> = if let Some(ref render_data) = self.render_data {
+            let id_to_idx: std::collections::HashMap<i32, usize> = render_data
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(idx, e)| (e.id, idx))
+                .collect();
+            table_result
+                .sequence_table
+                .iter()
+                .filter_map(|entry| id_to_idx.get(&entry.element_id).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if let Some(ref render_data) = self.render_data {
+            let mut step_render_data = graphics::StepRenderData::new(render_data.clone());
+            step_render_data.set_step_data(calc.step_table_rendering);
+            step_render_data.set_sequence_order(sequence_order);
+            self.step_render_data = Some(step_render_data);
+        } else {
+            self.step_render_data = None;
+        }
+
+        let has_sequence_data = self
+            .step_render_data
+            .as_ref()
+            .map(|s| !s.sequence_order.is_empty())
+            .unwrap_or(false);
+        let step_is_valid = !table_result.fatal && errors.is_empty() && max_step > 0;
+
+        self.ui_state.needs_recalc = false;
+        self.ui_state.validation_passed = errors.is_empty() && !table_result.fatal;
+        self.ui_state.workfront_count = workfront_count;
+        self.ui_state.has_sequence_data = has_sequence_data;
+        self.ui_state.current_step = 1;
+        self.ui_state.step_input = "1".to_string();
+        self.ui_state.current_sequence = 1;
+
+        self.ui_state.max_sequence = table_result.sequence_table.len();
+        self.ui_state.has_step_data = step_is_valid;
+        self.ui_state.max_step = if step_is_valid { max_step } else { 0 };
+
+        self.ui_state.step_elements = if step_is_valid {
+            calc.step_elements
+        } else {
+            Vec::new()
+        };
+        self.ui_state.floor_column_data = calc
+            .floor_data
+            .into_iter()
+            .map(|(floor, total)| (floor, total, 0))
+            .collect();
+
+        self.update_floor_counts_for_step();
+
+        let node_count = self.stability_nodes.len();
+        let element_count = self.stability_elements.len();
+        let mut status_msg = format!(
+            "Calculated: {} nodes, {} elements, {} sequences, {} steps, {} workfront(s)",
+            node_count,
+            element_count,
+            self.ui_state.max_sequence,
+            self.ui_state.max_step,
+            workfront_count
+        );
+        if table_result.fatal {
+            status_msg = format!(
+                "⚠ Calculation failed (fatal):\n{}\n\nSequence view is still available.",
+                errors.join("\n")
+            );
+        } else if !errors.is_empty() {
+            status_msg = format!(
+                "⚠ Calculation completed with {} error(s). Step view is disabled; Sequence view is available.\n{}",
+                errors.len(),
+                errors.join("\n")
+            );
+        }
+        if !warnings.is_empty() {
+            status_msg.push_str(&format!(" | {} warning(s)", warnings.len()));
+        }
+        self.ui_state.status_message = status_msg;
+
+        if let Some(ref mut data) = self.render_data {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+            data.calculate_transform(rect, &self.view_state);
+        }
+
+        self.dev_task_rx = None;
+        self.dev_progress_done = None;
+        self.dev_progress_total = 0;
+        self.dev_progress_stage = None;
+        self.dev_cancel_flag = None;
+    }
+
+    fn poll_development_task(&mut self, ctx: &egui::Context) {
+        let mut received: Option<DevelopmentTaskMessage> = None;
+
+        if let Some(rx) = &self.dev_task_rx {
+            match rx.try_recv() {
+                Ok(msg) => received = Some(msg),
+                Err(mpsc::TryRecvError::Empty) => {
+                    let done = self
+                        .dev_progress_done
+                        .as_ref()
+                        .map(|v| v.load(Ordering::Relaxed))
+                        .unwrap_or(0);
+                    let total = self.dev_progress_total.max(1);
+                    let stage = self
+                        .dev_progress_stage
+                        .as_ref()
+                        .map(|v| v.load(Ordering::Relaxed))
+                        .unwrap_or(1);
+                    let phase = match stage {
+                        1 => "Sequence table generation",
+                        2 => "Step mapping + floor extraction",
+                        3 => "Output table writing",
+                        4 => "Finalizing UI data",
+                        _ => "Finalizing",
+                    };
+                    self.ui_state.status_message = format!(
+                        "Development recalc running ({}/{}) | phase: {}",
+                        done.min(total),
+                        total,
+                        phase
+                    );
+                    ctx.request_repaint_after(Duration::from_millis(60));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    received = Some(DevelopmentTaskMessage::Failed(
+                        "Development worker disconnected unexpectedly".to_string(),
+                    ));
+                }
+            }
+        }
+
+        if let Some(msg) = received {
+            match msg {
+                DevelopmentTaskMessage::Completed(result) => self.apply_development_result(result),
+                DevelopmentTaskMessage::Failed(err) => {
+                    self.ui_state.needs_recalc = false;
+                    self.dev_task_rx = None;
+                    self.dev_progress_done = None;
+                    self.dev_progress_total = 0;
+                    self.dev_progress_stage = None;
+                    self.dev_cancel_flag = None;
+                    if err.eq_ignore_ascii_case("cancelled by user") {
+                        self.ui_state.status_message =
+                            "Development recalc cancelled by user.".to_string();
+                    } else {
+                        self.ui_state.status_message =
+                            format!("Error: calculation failed: {}", err);
+                    }
+                }
+            }
+        }
+    }
+
     /// Parse a coordinate value with error tracking
     fn parse_coordinate(
         value: Option<&str>,
@@ -264,7 +589,7 @@ impl AssyPlanApp {
             Ok(content) => {
                 // Validation error collection
                 let mut errors: Vec<String> = Vec::new();
-                let mut warnings: Vec<String> = Vec::new();
+                let warnings: Vec<String> = Vec::new();
 
                 // Step 1: Collect all unique coordinates from CSV
                 let mut coords_set: std::collections::HashSet<(i64, i64, i64)> =
@@ -281,7 +606,6 @@ impl AssyPlanApp {
                 let mut seen_member_ids: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 let mut workfront_count = 0usize;
-
                 let mut line_num = 0usize;
                 let mut data_line_count = 0usize;
 
@@ -547,6 +871,7 @@ impl AssyPlanApp {
                 // Update UI state
                 self.ui_state.validation_passed = error_count == 0;
                 self.ui_state.has_step_data = false;
+                self.ui_state.has_sequence_data = false;
                 self.ui_state.max_step = 0;
                 self.ui_state.current_step = 1;
                 self.ui_state.step_input = "1".to_string();
@@ -625,6 +950,12 @@ impl AssyPlanApp {
     /// Recalculate construction sequence and generate all tables
     /// This is the heavy computation that was previously done on file load
     fn recalculate(&mut self) {
+        if self.has_background_task_running() {
+            self.ui_state.status_message =
+                "A background calculation is already running. Please wait.".to_string();
+            return;
+        }
+
         if !self.ui_state.has_data
             && self.ui_state.display_mode != graphics::DisplayMode::Simulation
         {
@@ -645,182 +976,61 @@ impl AssyPlanApp {
 
         self.ui_state.status_message = "Calculating construction sequence...".to_string();
 
-        // Generate all tables using stability module
-        let table_result = stability::generate_all_tables(
-            &self.stability_nodes,
-            &self.stability_elements,
-            &self.stability_element_data,
-        );
-
-        // Check for errors from table generation
-        let mut errors: Vec<String> = Vec::new();
-        let mut warnings: Vec<String> = Vec::new();
-
-        if !table_result.errors.is_empty() {
-            for err in &table_result.errors {
-                errors.push(err.clone());
-            }
-            // If cycle detected, cannot continue
-            if table_result
-                .errors
-                .iter()
-                .any(|e| e.contains("Cycle detected"))
-            {
-                self.ui_state.status_message = format!(
-                    "⚠ Calculation failed: predecessor cycle detected.\n{}",
-                    errors.join("\n")
-                );
-                self.ui_state.validation_passed = false;
-                self.ui_state.has_step_data = false;
-                self.step_render_data = None;
-                return;
-            }
-        }
-
-        // Update workfront count from stability module result
-        let workfront_count = table_result.workfront_count as usize;
-
-        // Build step_table for StepRenderData from stability module result
-        let step_table =
-            stability::step_table_for_rendering(&table_result.step_table, &self.stability_elements);
-        let max_step = table_result.max_step as usize;
-
-        // Build sequence order: element indices into render_data.elements, in topological order
-        // sequence_table[i].element_id is 1-indexed; render_data.elements[j].id = element_id
-        let sequence_order: Vec<usize> = if let Some(ref render_data) = self.render_data {
-            // Build element_id -> index map
-            let id_to_idx: std::collections::HashMap<i32, usize> = render_data
-                .elements
-                .iter()
-                .enumerate()
-                .map(|(idx, e)| (e.id, idx))
-                .collect();
-            table_result
-                .sequence_table
-                .iter()
-                .filter_map(|entry| id_to_idx.get(&entry.element_id).copied())
-                .collect()
+        let nodes = self.stability_nodes.clone();
+        let elements = self.stability_elements.clone();
+        let element_data = self.stability_element_data.clone();
+        let output_dir = if !self.ui_state.file_path.is_empty() {
+            let input_path = std::path::Path::new(&self.ui_state.file_path);
+            input_path.parent().map(|parent| parent.join("output"))
         } else {
-            Vec::new()
+            None
         };
 
-        // Create StepRenderData
-        if let Some(ref render_data) = self.render_data {
-            let mut step_render_data = graphics::StepRenderData::new(render_data.clone());
-            step_render_data.set_step_data(step_table);
-            step_render_data.set_sequence_order(sequence_order);
-            self.step_render_data = Some(step_render_data);
-        }
+        let (tx, rx) = mpsc::channel::<DevelopmentTaskMessage>();
+        let progress = Arc::new(AtomicUsize::new(0));
+        let stage = Arc::new(AtomicUsize::new(1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.dev_task_rx = Some(rx);
+        self.dev_progress_done = Some(progress.clone());
+        self.dev_progress_total = 4;
+        self.dev_progress_stage = Some(stage.clone());
+        self.dev_cancel_flag = Some(cancel.clone());
 
-        // Save tables to output directory (CSV files)
-        if !self.ui_state.file_path.is_empty() {
-            let input_path = std::path::Path::new(&self.ui_state.file_path);
-            if let Some(parent) = input_path.parent() {
-                let output_dir = parent.join("output");
-                if let Err(e) = stability::save_all_tables(
-                    &table_result,
-                    &self.stability_elements,
-                    &self.stability_nodes,
-                    &output_dir,
-                ) {
-                    warnings.push(format!("Failed to save tables: {}", e));
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                AssyPlanApp::run_development_calculation(
+                    &nodes,
+                    &elements,
+                    &element_data,
+                    output_dir,
+                    Some(progress),
+                    Some(stage),
+                    Some(cancel),
+                )
+            });
+
+            match result {
+                Ok(calc) => {
+                    let _ = tx.send(DevelopmentTaskMessage::Completed(calc));
+                }
+                Err(_) => {
+                    let _ = tx.send(DevelopmentTaskMessage::Failed(
+                        "panic in development worker".to_string(),
+                    ));
                 }
             }
-        }
-
-        // Update UI state with step info
-        self.ui_state.needs_recalc = false; // Calculation complete
-        self.ui_state.validation_passed = errors.is_empty();
-        self.ui_state.workfront_count = workfront_count;
-        self.ui_state.current_step = 1;
-        self.ui_state.step_input = "1".to_string();
-
-        if !errors.is_empty() {
-            // Errors present — block Construction view, clear step data
-            self.ui_state.has_step_data = false;
-            self.ui_state.max_step = 0;
-            self.step_render_data = None;
-        } else {
-            self.ui_state.has_step_data = max_step > 0;
-            self.ui_state.max_step = max_step;
-        }
-
-        // Build step elements map for UI metrics
-        self.ui_state.step_elements = stability::build_step_elements_map(
-            &table_result.step_table,
-            &self.stability_elements,
-            &self.stability_nodes,
-        );
-
-        // Update floor column data - set to step 1 (first step installed)
-        let floor_data =
-            stability::get_floor_column_data(&self.stability_elements, &self.stability_nodes);
-        self.ui_state.floor_column_data = floor_data
-            .into_iter()
-            .map(|(floor, total)| (floor, total, 0)) // Start at 0, will be updated by step
-            .collect();
-
-        // Update floor counts for current step (step 1)
-        self.update_floor_counts_for_step();
-
-        // Build status message
-        let node_count = self.stability_nodes.len();
-        let element_count = self.stability_elements.len();
-        let mut status_msg = format!(
-            "Calculated: {} nodes, {} elements, {} steps, {} workfront(s)",
-            node_count, element_count, max_step, workfront_count
-        );
-        if !errors.is_empty() {
-            status_msg = format!(
-                "⚠ Calculation completed with {} error(s):\n{}",
-                errors.len(),
-                errors.join("\n")
-            );
-        }
-        if !warnings.is_empty() {
-            status_msg.push_str(&format!(" | {} warning(s)", warnings.len()));
-        }
-        self.ui_state.status_message = status_msg;
-
-        // Recalculate viewport transform
-        if let Some(ref mut data) = self.render_data {
-            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-            data.calculate_transform(rect, &self.view_state);
-        }
+        });
     }
 
-    /// Run the Simulation Mode: generate N scenarios with Monte-Carlo engine.
-    fn run_simulation(&mut self) {
-        let cfg = self.ui_state.grid_config.clone();
-        let workfronts = self.ui_state.sim_workfronts.clone();
-        let weights = self.ui_state.sim_weights;
-        let threshold = self.ui_state.upper_floor_threshold;
-        let count = self.ui_state.sim_scenario_count;
-
-        // Validate: at least one workfront must be specified by user
-        if workfronts.is_empty() {
-            self.ui_state.status_message =
-                "Error: No workfronts specified. Add at least one workfront in Settings."
-                    .to_string();
-            self.ui_state.needs_recalc = false;
-            return;
-        }
-
-        self.ui_state.sim_running = true;
-        self.ui_state.status_message = format!(
-            "Running simulation: {} scenarios ({}×{} grid, {} floors)...",
-            count, cfg.nx, cfg.ny, cfg.nz
-        );
-
-        let grid = sim_grid::SimGrid::new(cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz);
-        let scenarios =
-            sim_engine::run_all_scenarios(count, &grid, &workfronts, weights, threshold);
+    fn apply_simulation_result(&mut self, result: SimulationTaskResult) {
+        let grid = result.grid;
+        let scenarios = result.scenarios;
+        let best_idx = result.best_idx;
 
         // Store grid so the View tab can render a 3D view of installed elements
         self.sim_grid = Some(grid.clone());
 
-        // Build RenderData once from the grid (cached — avoids per-frame fit recalculation
-        // which causes zoom oscillation when orbit angle changes the projected bounding box).
+        // Build RenderData once from the grid (cached — avoids per-frame fit recalculation)
         {
             let mut rd = graphics::RenderData::new();
             for n in &grid.nodes {
@@ -842,13 +1052,6 @@ impl AssyPlanApp {
             self.sim_render_data = Some(rd);
         }
 
-        // Select best scenario: most total members installed (highest completion)
-        let best_idx = scenarios
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, s)| s.metrics.total_members_installed)
-            .map(|(i, _)| i);
-
         let scenario_count = scenarios.len();
         let total_elements = grid.elements.len();
         let best_info = best_idx
@@ -866,11 +1069,168 @@ impl AssyPlanApp {
         self.ui_state.sim_running = false;
         self.ui_state.sim_current_step = 1;
         self.ui_state.needs_recalc = false;
+        self.sim_task_rx = None;
+        self.sim_progress_done = None;
+        self.sim_progress_total = 0;
+        self.sim_progress_stage = None;
+        self.sim_cancel_flag = None;
 
         self.ui_state.status_message = format!(
             "Simulation complete: {} scenarios generated{}",
             scenario_count, best_info
         );
+    }
+
+    fn poll_simulation_task(&mut self, ctx: &egui::Context) {
+        let mut received: Option<SimulationTaskMessage> = None;
+
+        if let Some(rx) = &self.sim_task_rx {
+            match rx.try_recv() {
+                Ok(msg) => received = Some(msg),
+                Err(mpsc::TryRecvError::Empty) => {
+                    if self.ui_state.sim_running {
+                        let done = self
+                            .sim_progress_done
+                            .as_ref()
+                            .map(|v| v.load(Ordering::Relaxed))
+                            .unwrap_or(0);
+                        let total = self.sim_progress_total.max(1);
+                        let stage = self
+                            .sim_progress_stage
+                            .as_ref()
+                            .map(|v| v.load(Ordering::Relaxed))
+                            .unwrap_or(1);
+                        let phase = match stage {
+                            1 => "Grid pool building",
+                            2 => "Scenario Monte-Carlo compute",
+                            3 => "Best-scenario evaluation",
+                            _ => "Finalizing",
+                        };
+                        self.ui_state.status_message = format!(
+                            "Simulation running ({}/{} scenarios) | phase: {}",
+                            done.min(total),
+                            total,
+                            phase
+                        );
+                        ctx.request_repaint_after(Duration::from_millis(60));
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    received = Some(SimulationTaskMessage::Failed(
+                        "Simulation worker disconnected unexpectedly".to_string(),
+                    ));
+                }
+            }
+        }
+
+        if let Some(msg) = received {
+            match msg {
+                SimulationTaskMessage::Completed(result) => {
+                    self.apply_simulation_result(result);
+                }
+                SimulationTaskMessage::Failed(err) => {
+                    self.ui_state.sim_running = false;
+                    self.ui_state.needs_recalc = false;
+                    self.sim_task_rx = None;
+                    self.sim_progress_done = None;
+                    self.sim_progress_total = 0;
+                    self.sim_progress_stage = None;
+                    self.sim_cancel_flag = None;
+                    if err.eq_ignore_ascii_case("cancelled by user") {
+                        self.ui_state.status_message =
+                            "Simulation cancelled by user.".to_string();
+                    } else {
+                        self.ui_state.status_message = format!("Error: simulation failed: {}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run the Simulation Mode: generate N scenarios with Monte-Carlo engine.
+    fn run_simulation(&mut self) {
+        let cfg = self.ui_state.grid_config.clone();
+        let workfronts = self.ui_state.sim_workfronts.clone();
+        let weights = self.ui_state.sim_weights;
+        let threshold = self.ui_state.upper_floor_threshold;
+        let count = self.ui_state.sim_scenario_count;
+
+        if self.ui_state.sim_running {
+            self.ui_state.status_message =
+                "Simulation already running. Please wait for completion.".to_string();
+            return;
+        }
+
+        // Validate: at least one workfront must be specified by user
+        if workfronts.is_empty() {
+            self.ui_state.status_message =
+                "Error: No workfronts specified. Add at least one workfront in Settings."
+                    .to_string();
+            self.ui_state.needs_recalc = false;
+            return;
+        }
+
+        self.ui_state.sim_running = true;
+        self.ui_state.status_message = format!(
+            "Running simulation: {} scenarios ({}×{} grid, {} floors)...",
+            count, cfg.nx, cfg.ny, cfg.nz
+        );
+
+        let (tx, rx) = mpsc::channel::<SimulationTaskMessage>();
+        let progress = Arc::new(AtomicUsize::new(0));
+        let stage = Arc::new(AtomicUsize::new(1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.sim_task_rx = Some(rx);
+        self.sim_progress_done = Some(progress.clone());
+        self.sim_progress_total = count;
+        self.sim_progress_stage = Some(stage.clone());
+        self.sim_cancel_flag = Some(cancel.clone());
+
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                stage.store(1, Ordering::Relaxed);
+                let grid = sim_grid::SimGrid::new(cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz);
+                stage.store(2, Ordering::Relaxed);
+                let scenarios = sim_engine::run_all_scenarios_with_progress_and_cancel(
+                    count,
+                    &grid,
+                    &workfronts,
+                    weights,
+                    threshold,
+                    Some(progress),
+                    Some(cancel.clone()),
+                );
+                stage.store(3, Ordering::Relaxed);
+                let best_idx = scenarios
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, s)| s.metrics.total_members_installed)
+                    .map(|(i, _)| i);
+
+                SimulationTaskResult {
+                    grid,
+                    scenarios,
+                    best_idx,
+                }
+            });
+
+            match result {
+                Ok(task_result) => {
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = tx.send(SimulationTaskMessage::Failed(
+                            "cancelled by user".to_string(),
+                        ));
+                    } else {
+                        let _ = tx.send(SimulationTaskMessage::Completed(task_result));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(SimulationTaskMessage::Failed(
+                        "panic in simulation worker".to_string(),
+                    ));
+                }
+            }
+        });
     }
 
     /// Export simulation debug files (all scenarios → simulation_debug/ folder).
@@ -1046,6 +1406,12 @@ impl AssyPlanApp {
 
     /// Reset all state
     fn reset(&mut self) {
+        if let Some(flag) = &self.sim_cancel_flag {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(flag) = &self.dev_cancel_flag {
+            flag.store(true, Ordering::Relaxed);
+        }
         self.ui_state.reset();
         self.render_data = None;
         self.step_render_data = None;
@@ -1057,11 +1423,24 @@ impl AssyPlanApp {
         // Clear simulation grid
         self.sim_grid = None;
         self.sim_render_data = None;
+        self.sim_task_rx = None;
+        self.sim_progress_done = None;
+        self.sim_progress_total = 0;
+        self.sim_progress_stage = None;
+        self.sim_cancel_flag = None;
+        self.dev_task_rx = None;
+        self.dev_progress_done = None;
+        self.dev_progress_total = 0;
+        self.dev_progress_stage = None;
+        self.dev_cancel_flag = None;
     }
 }
 
 impl eframe::App for AssyPlanApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_simulation_task(ctx);
+        self.poll_development_task(ctx);
+
         // Top panel - Header with buttons
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1082,6 +1461,7 @@ impl eframe::App for AssyPlanApp {
                 // Simulation mode doesn't require CSV data (generates its own grid)
                 let recalc_enabled = self.ui_state.has_data
                     || self.ui_state.display_mode == graphics::DisplayMode::Simulation;
+                let recalc_enabled = recalc_enabled && !self.has_background_task_running();
                 let recalc_button = if self.ui_state.needs_recalc && recalc_enabled {
                     // Yellow border highlight to draw user attention
                     egui::Button::new("🔄 Recalc")
@@ -1096,6 +1476,24 @@ impl eframe::App for AssyPlanApp {
                 // Reset button
                 if ui.button("🗑 Reset").clicked() {
                     self.reset();
+                }
+
+                // Stop button (cooperative cancellation for background tasks)
+                if ui
+                    .add_enabled(
+                        self.has_background_task_running(),
+                        egui::Button::new("⏹ Stop"),
+                    )
+                    .clicked()
+                {
+                    if let Some(flag) = &self.sim_cancel_flag {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    if let Some(flag) = &self.dev_cancel_flag {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    self.ui_state.status_message =
+                        "Stopping calculation... waiting for worker to exit.".to_string();
                 }
 
                 ui.separator();
@@ -1360,6 +1758,40 @@ impl eframe::App for AssyPlanApp {
                     );
                 } else {
                     ui.label(&self.ui_state.status_message);
+                }
+
+                if self.ui_state.sim_running {
+                    ui.add_space(6.0);
+                    let total = self.sim_progress_total.max(1);
+                    let done = self
+                        .sim_progress_done
+                        .as_ref()
+                        .map(|v| v.load(Ordering::Relaxed))
+                        .unwrap_or(0)
+                        .min(total);
+                    let ratio = done as f32 / total as f32;
+                    ui.add(
+                        egui::ProgressBar::new(ratio)
+                            .show_percentage()
+                            .text(format!("Simulation progress: {}/{}", done, total)),
+                    );
+                }
+
+                if self.dev_task_rx.is_some() {
+                    ui.add_space(6.0);
+                    let total = self.dev_progress_total.max(1);
+                    let done = self
+                        .dev_progress_done
+                        .as_ref()
+                        .map(|v| v.load(Ordering::Relaxed))
+                        .unwrap_or(0)
+                        .min(total);
+                    let ratio = done as f32 / total as f32;
+                    ui.add(
+                        egui::ProgressBar::new(ratio)
+                            .show_percentage()
+                            .text(format!("Development recalc progress: {}/{}", done, total)),
+                    );
                 }
 
                 if self.ui_state.has_data {
@@ -2193,8 +2625,8 @@ impl eframe::App for AssyPlanApp {
                                 }
                             }
                             graphics::DisplayMode::Construction => {
-                                // Construction view - only render if step data is ready
-                                if !self.ui_state.has_step_data {
+                                // Construction view: sequence rendering is independent from step validity.
+                                if !self.ui_state.has_step_data && !self.ui_state.has_sequence_data {
                                     let msg = if self.ui_state.needs_recalc {
                                         "Press Recalc to calculate construction sequence.".to_string()
                                     } else if !self.ui_state.validation_passed {
@@ -2212,9 +2644,18 @@ impl eframe::App for AssyPlanApp {
                                 } else {
                                 match self.ui_state.construction_view_mode {
                                     graphics::ConstructionViewMode::Sequence => {
-                                        // Sequence mode: render elements 1 to current_sequence
-                                        // Uses step_render_data.base for transform (same as Step mode)
-                                        if let Some(ref mut data) = self.render_data {
+                                        if !self.ui_state.has_sequence_data {
+                                            painter.text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "No sequence data available.",
+                                                egui::FontId::proportional(16.0),
+                                                egui::Color32::from_rgb(200, 200, 100),
+                                            );
+                                        } else {
+                                            // Sequence mode: render elements 1 to current_sequence
+                                            // Uses step_render_data.base for transform (same as Step mode)
+                                            if let Some(ref mut data) = self.render_data {
                                             data.calculate_transform(rect, &self.view_state);
                                             let mut shown_element_ids =
                                                 std::collections::HashSet::new();
@@ -2350,11 +2791,19 @@ impl eframe::App for AssyPlanApp {
                                                     }
                                                 }
                                             }
+                                            }
                                         }
                                     }
                                     graphics::ConstructionViewMode::Step => {
-                                        // Step mode: show step-by-step with coloring
-                                        if let Some(ref mut step_data) = self.step_render_data {
+                                        if !self.ui_state.has_step_data {
+                                            painter.text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "⚠ Step generation failed.\nSwitch to Sequence mode to inspect input order.",
+                                                egui::FontId::proportional(16.0),
+                                                egui::Color32::from_rgb(255, 180, 50),
+                                            );
+                                        } else if let Some(ref mut step_data) = self.step_render_data {
                                             // Sync current step from UI state to step_render_data
                                             step_data.set_current_step(self.ui_state.current_step);
                                             let cumulative_indices =
@@ -2631,6 +3080,16 @@ fn render_data(data: &PyRenderData) -> PyResult<()> {
                 stability_element_data: Vec::new(),
                 sim_grid: None,
                 sim_render_data: None,
+                sim_task_rx: None,
+                sim_progress_done: None,
+                sim_progress_total: 0,
+                sim_progress_stage: None,
+                sim_cancel_flag: None,
+                dev_task_rx: None,
+                dev_progress_done: None,
+                dev_progress_total: 0,
+                dev_progress_stage: None,
+                dev_cancel_flag: None,
             }) as Box<dyn eframe::App>
         }),
     )
@@ -2684,6 +3143,13 @@ fn assyplan(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::sim_grid::SimGrid;
+
+    use super::AssyPlanApp;
+
     #[test]
     fn test_app_struct_exists() {
         assert!(true);
@@ -2759,5 +3225,62 @@ mod tests {
         assert_eq!(table.entries[0].0, 3);
         assert_eq!(table.entries[1].0, 1);
         assert_eq!(table.entries[2].0, 2);
+    }
+
+    #[test]
+    fn test_ab_development_calc_with_progress_matches_without_progress() {
+        let grid = SimGrid::new(3, 3, 3, 6000.0, 6000.0, 4000.0);
+        let nodes = grid.nodes.clone();
+        let elements = grid.elements.clone();
+
+        let mut element_data = Vec::new();
+        for (idx, element) in elements.iter().enumerate() {
+            let member_id = format!("E{}", element.id);
+            let predecessor = if idx == 0 {
+                None
+            } else {
+                Some(format!("E{}", elements[idx - 1].id))
+            };
+            element_data.push((member_id, predecessor));
+        }
+
+        let no_progress = AssyPlanApp::run_development_calculation(
+            &nodes,
+            &elements,
+            &element_data,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let progress = Arc::new(AtomicUsize::new(0));
+        let with_progress = AssyPlanApp::run_development_calculation(
+            &nodes,
+            &elements,
+            &element_data,
+            None,
+            Some(progress.clone()),
+            None,
+            None,
+        );
+
+        assert_eq!(progress.load(Ordering::Relaxed), 4);
+
+        assert_eq!(
+            no_progress.table_result.sequence_table.len(),
+            with_progress.table_result.sequence_table.len()
+        );
+        assert_eq!(
+            no_progress.table_result.step_table.len(),
+            with_progress.table_result.step_table.len()
+        );
+        assert_eq!(no_progress.table_result.max_step, with_progress.table_result.max_step);
+        assert_eq!(
+            no_progress.step_table_rendering.len(),
+            with_progress.step_table_rendering.len()
+        );
+        assert_eq!(no_progress.step_elements, with_progress.step_elements);
+        assert_eq!(no_progress.floor_data, with_progress.floor_data);
     }
 }

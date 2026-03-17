@@ -27,7 +27,7 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 ├── assyplan.exe                           ← 릴리즈 빌드 결과물 (루트에 복사본 유지)
 ├── requirements.txt                       ← Python 의존성
 ├── pyproject.toml                         ← Python 빌드 설정 (maturin)
-├── devplandoc.md                          ← 핵심 스펙 문서 (설계 의도 파악 시 먼저 읽기)
+├── devplandoc.md                          ← 핵심 스펙 문서 (설계 의도 + 용어/안정성 정본)
 │
 ├── .sisyphus/plans/
 │   ├── dev-phase1.md                      ← Phase 1 계획서 (완료)
@@ -74,6 +74,8 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 │       ├── test_element_table.py
 │       ├── test_validators.py
 │       └── test_phase2.py                 ← Phase 2 E2E 통합 테스트
+├── src/rust/tests/
+│   └── regression_compare.rs              ← Dev/Sim fingerprint 회귀 테스트
 │
 └── data/                                  ← 테스트용 CSV 입력 데이터
     └── (샘플 구조물 데이터 파일들)
@@ -159,6 +161,11 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 - `generate_all_tables(nodes, elements)` → TableGenerationResult
 - `get_floor_column_data(...)` → Vec<(i32, usize, usize)>: (floor, total, installed)
 
+현재 역할 주의:
+- `stability.rs` 는 Development Mode 테이블 생성의 본체다.
+- 동시에 Dev/Sim 이 함께 쓰는 공통 패턴 판정 코어를 가진다.
+- 공통 규칙 예: `classify_member_signature`, `check_step_bundle_stability`
+
 ### `src/rust/src/graphics/ui.rs` ← UI 전체 담당
 주요 공개 함수:
 - `render(ui_state, ctx)`: 전체 레이아웃 렌더링
@@ -198,6 +205,11 @@ Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성.
 - `try_build_pattern(seed_id, grid, installed_ids, ...)` — 패턴 확장 (금지 패턴 차단)
 - threshold 변환: `threshold * 100.0` (stability.rs는 0~100 범위 기대)
 
+현재 역할 주의:
+- `sim_engine.rs` 는 시뮬레이션 전용 오케스트레이션 파일이다.
+- 후보 생성, weighted sampling, global step cycle 집계는 여기서 수행한다.
+- 적합 안정 패턴의 공통 판정 코어는 `stability.rs` 를 재사용한다.
+
 ### `src/rust/src/graphics/sim_ui.rs` (Phase 3 신규)
 Simulation 탭 전용 UI (Settings, View, Result).
 - `render_sim_settings(ui, state)` → bool
@@ -230,7 +242,7 @@ cp target/release/assyplan.exe ../../assyplan.exe
 ### 새 기능 추가 시 순서
 1. `devplandoc.md` 에서 스펙 확인
 2. `.opencode/skills/dev-phase3/SKILLS.md` 에서 관련 패턴 확인
-3. `stability.rs` 또는 `ui.rs` 수정
+3. Development Mode/공통 판정 규칙이면 `stability.rs`, Simulation orchestration 이면 `sim_engine.rs`, UI면 `ui.rs` 또는 `sim_ui.rs` 수정
 4. `lsp_diagnostics` 로 오류 확인
 5. `cargo build --release` 빌드
 6. `target/release/assyplan.exe` → 루트 복사
@@ -239,11 +251,20 @@ cp target/release/assyplan.exe ../../assyplan.exe
 ### 디버깅 순서
 1. LSP diagnostics 확인 (`lsp_diagnostics` 도구)
 2. `cargo build` 컴파일 오류 확인
-3. 런타임: `stability.rs` 테스트 (`cargo test`)
+3. Rust 단위 테스트 확인 (`cargo test --lib`)
+4. Dev/Sim 회귀 확인이 필요하면 `cargo test --test regression_compare`
 
 ---
 
-## 8. 알려진 Gotcha 및 주의사항
+## 8-A. 문서 기준점
+
+- 안정성/패턴/용어의 현재 정본은 `devplandoc.md` 내부 `용어 및 Step 적합 안정 조건 정본` 절이다.
+- 기존 `STABILITY_ANALYSIS.md` 는 `devplandoc.md` 로 통합되어 삭제되었다.
+- 작업 전 문서 기준이 필요하면 먼저 `devplandoc.md`, 그 다음 이 문서를 본다.
+
+---
+
+## 9. 알려진 Gotcha 및 주의사항
 
 ### Windows 개발환경
 - **Git Bash + `> nul` 리다이렉션**: Git Bash에서 `> nul`은 실제 `nul` 파일을 생성함. `SHELL=cmd.exe` 환경변수로 방지됨.
@@ -269,7 +290,7 @@ cp target/release/assyplan.exe ../../assyplan.exe
 
 ---
 
-## 9. 향후 대규모 모델 성능 향상 계획
+## 10. 향후 대규모 모델 성능 향상 계획
 
 Phase 3 이후 구조물 규모가 커질 때를 대비한 최적화 포인트:
 
@@ -305,7 +326,7 @@ fn build_z_level_map(nodes: &[StabilityNode]) -> HashMap<i64, i32> { ... }
 
 ---
 
-## 10. Skills 문서 규칙
+## 11. Skills 문서 규칙
 
 ```
 .opencode/skills/
@@ -321,7 +342,7 @@ fn build_z_level_map(nodes: &[StabilityNode]) -> HashMap<i64, i32> { ... }
 
 ---
 
-## 11. Git 커밋 원칙
+## 12. Git 커밋 원칙
 
 ### 커밋 워크플로우 (반드시 준수)
 

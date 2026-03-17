@@ -51,6 +51,7 @@ pub struct SimWorkfront {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TerminationReason {
     Completed,
+    Cancelled,
     UpperFloorViolation,
     NoProgress,
     IndependentOveruse,
@@ -62,6 +63,7 @@ impl std::fmt::Display for TerminationReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TerminationReason::Completed => write!(f, "Completed"),
+            TerminationReason::Cancelled => write!(f, "Cancelled"),
             TerminationReason::UpperFloorViolation => write!(f, "Upper Floor Violation"),
             TerminationReason::NoProgress => write!(f, "No Progress"),
             TerminationReason::IndependentOveruse => write!(f, "Independent Overuse"),
@@ -318,6 +320,8 @@ pub struct UiState {
     pub display_mode: DisplayMode,
     /// Whether step data has been calculated
     pub has_step_data: bool,
+    /// Whether sequence data has been calculated and can be visualized
+    pub has_sequence_data: bool,
     /// Construction view mode: Sequence (individual) or Step (groups)
     pub construction_view_mode: ConstructionViewMode,
     /// Current sequence index (1-indexed, for Sequence mode)
@@ -406,6 +410,7 @@ impl UiState {
             show_hidden: true,
             display_mode: DisplayMode::Model,
             has_step_data: false,
+            has_sequence_data: false,
             construction_view_mode: ConstructionViewMode::Sequence,
             current_sequence: 1,
             max_sequence: 0,
