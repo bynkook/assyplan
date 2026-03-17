@@ -29,6 +29,30 @@ const CHART_LEGEND_W: f32 = 70.0;
 pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     let mut changed = false;
 
+    let add_usize_input =
+        |ui: &mut Ui, value: &mut usize, min: usize, max: usize, width: f32| -> bool {
+            ui.add_sized(
+                [width, 0.0],
+                egui::DragValue::new(value)
+                    .clamp_range(min..=max)
+                    .speed(1.0)
+                    .fixed_decimals(0),
+            )
+            .changed()
+        };
+
+    let add_f64_input =
+        |ui: &mut Ui, value: &mut f64, min: f64, max: f64, width: f32| -> bool {
+            ui.add_sized(
+                [width, 0.0],
+                egui::DragValue::new(value)
+                    .clamp_range(min..=max)
+                    .speed(0.1)
+                    .fixed_decimals(2),
+            )
+            .changed()
+        };
+
     ui.heading("Simulation — Grid Configuration");
     ui.separator();
 
@@ -39,11 +63,20 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             // nx
             ui.label("X Grid Lines:");
             let prev_nx = state.grid_config.nx;
-            ui.add(
-                egui::Slider::new(&mut state.grid_config.nx, 2..=20)
-                    .text("")
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                if ui.small_button("◀").clicked() {
+                    state.grid_config.nx = state.grid_config.nx.saturating_sub(1).max(2);
+                }
+                ui.add(
+                    egui::Slider::new(&mut state.grid_config.nx, 2..=20)
+                        .text("")
+                        .clamp_to_range(true),
+                );
+                if ui.small_button("▶").clicked() {
+                    state.grid_config.nx = (state.grid_config.nx + 1).min(20);
+                }
+                let _ = add_usize_input(ui, &mut state.grid_config.nx, 2, 20, 56.0);
+            });
             if state.grid_config.nx != prev_nx {
                 changed = true;
             }
@@ -52,11 +85,20 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             // ny
             ui.label("Y Grid Lines:");
             let prev_ny = state.grid_config.ny;
-            ui.add(
-                egui::Slider::new(&mut state.grid_config.ny, 2..=100)
-                    .text("")
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                if ui.small_button("◀").clicked() {
+                    state.grid_config.ny = state.grid_config.ny.saturating_sub(1).max(2);
+                }
+                ui.add(
+                    egui::Slider::new(&mut state.grid_config.ny, 2..=100)
+                        .text("")
+                        .clamp_to_range(true),
+                );
+                if ui.small_button("▶").clicked() {
+                    state.grid_config.ny = (state.grid_config.ny + 1).min(100);
+                }
+                let _ = add_usize_input(ui, &mut state.grid_config.ny, 2, 100, 56.0);
+            });
             if state.grid_config.ny != prev_ny {
                 changed = true;
             }
@@ -65,11 +107,20 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             // nz (floor levels including ground)
             ui.label("Z Levels (incl. ground):");
             let prev_nz = state.grid_config.nz;
-            ui.add(
-                egui::Slider::new(&mut state.grid_config.nz, 1..=20)
-                    .text("")
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                if ui.small_button("◀").clicked() {
+                    state.grid_config.nz = state.grid_config.nz.saturating_sub(1).max(1);
+                }
+                ui.add(
+                    egui::Slider::new(&mut state.grid_config.nz, 1..=20)
+                        .text("")
+                        .clamp_to_range(true),
+                );
+                if ui.small_button("▶").clicked() {
+                    state.grid_config.nz = (state.grid_config.nz + 1).min(20);
+                }
+                let _ = add_usize_input(ui, &mut state.grid_config.nz, 1, 20, 56.0);
+            });
             if state.grid_config.nz != prev_nz {
                 changed = true;
             }
@@ -78,12 +129,15 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             // dx
             ui.label("X Spacing (mm):");
             let prev_dx = state.grid_config.dx;
-            ui.add(
-                egui::Slider::new(&mut state.grid_config.dx, 1000.0..=20000.0)
-                    .text("")
-                    .fixed_decimals(0)
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(&mut state.grid_config.dx, 1000.0..=20000.0)
+                        .text("")
+                        .fixed_decimals(0)
+                        .clamp_to_range(true),
+                );
+                let _ = add_f64_input(ui, &mut state.grid_config.dx, 1000.0, 20000.0, 72.0);
+            });
             if (state.grid_config.dx - prev_dx).abs() > 1e-6 {
                 changed = true;
             }
@@ -92,12 +146,15 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             // dy
             ui.label("Y Spacing (mm):");
             let prev_dy = state.grid_config.dy;
-            ui.add(
-                egui::Slider::new(&mut state.grid_config.dy, 1000.0..=20000.0)
-                    .text("")
-                    .fixed_decimals(0)
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(&mut state.grid_config.dy, 1000.0..=20000.0)
+                        .text("")
+                        .fixed_decimals(0)
+                        .clamp_to_range(true),
+                );
+                let _ = add_f64_input(ui, &mut state.grid_config.dy, 1000.0, 20000.0, 72.0);
+            });
             if (state.grid_config.dy - prev_dy).abs() > 1e-6 {
                 changed = true;
             }
@@ -106,12 +163,15 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             // dz
             ui.label("Z Interval / Floor height (mm):");
             let prev_dz = state.grid_config.dz;
-            ui.add(
-                egui::Slider::new(&mut state.grid_config.dz, 1000.0..=10000.0)
-                    .text("")
-                    .fixed_decimals(0)
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(&mut state.grid_config.dz, 1000.0..=10000.0)
+                        .text("")
+                        .fixed_decimals(0)
+                        .clamp_to_range(true),
+                );
+                let _ = add_f64_input(ui, &mut state.grid_config.dz, 1000.0, 10000.0, 72.0);
+            });
             if (state.grid_config.dz - prev_dz).abs() > 1e-6 {
                 changed = true;
             }
@@ -162,6 +222,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 .fixed_decimals(2)
                 .clamp_to_range(true),
         );
+        let _ = add_f64_input(ui, &mut state.upper_floor_threshold, 0.0, 1.0, 64.0);
         ui.label(format!("{:.0}%", state.upper_floor_threshold * 100.0));
     });
 
@@ -177,30 +238,39 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         .spacing([20.0, 6.0])
         .show(ui, |ui| {
             ui.label("w1 — Min. members (0.5):");
-            ui.add(
-                egui::Slider::new(w1, 0.0..=1.0)
-                    .text("")
-                    .fixed_decimals(2)
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(w1, 0.0..=1.0)
+                        .text("")
+                        .fixed_decimals(2)
+                        .clamp_to_range(true),
+                );
+                let _ = add_f64_input(ui, w1, 0.0, 1.0, 64.0);
+            });
             ui.end_row();
 
             ui.label("w2 — Connectivity (0.3):");
-            ui.add(
-                egui::Slider::new(w2, 0.0..=1.0)
-                    .text("")
-                    .fixed_decimals(2)
-                    .clamp_to_range(true),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(w2, 0.0..=1.0)
+                        .text("")
+                        .fixed_decimals(2)
+                        .clamp_to_range(true),
+                );
+                let _ = add_f64_input(ui, w2, 0.0, 1.0, 64.0);
+            });
             ui.end_row();
 
-            ui.label("w3 — Distance (0.15):");
-            ui.add(
-                egui::Slider::new(w3, 0.0..=1.0)
-                    .text("")
-                    .fixed_decimals(2)
-                    .clamp_to_range(true),
-            );
+            ui.label("w3 — Distance / Closure (0.20):");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Slider::new(w3, 0.0..=1.0)
+                        .text("")
+                        .fixed_decimals(2)
+                        .clamp_to_range(true),
+                );
+                let _ = add_f64_input(ui, w3, 0.0, 1.0, 64.0);
+            });
             ui.end_row();
         });
 
@@ -217,6 +287,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 .text("")
                 .clamp_to_range(true),
         );
+        let _ = add_usize_input(ui, &mut state.sim_scenario_count, 1, 200, 56.0);
     });
 
     ui.add_space(12.0);

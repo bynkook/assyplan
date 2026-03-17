@@ -1033,6 +1033,24 @@ fn uninstalled_girders_touching_node(
     result
 }
 
+fn installed_girders_touching_node(
+    node_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+) -> Vec<i32> {
+    let mut result: Vec<i32> = grid
+        .elements
+        .iter()
+        .filter(|e| e.member_type == "Girder")
+        .filter(|e| installed_ids.contains(&e.id))
+        .filter(|e| e.node_i_id == node_id || e.node_j_id == node_id)
+        .map(|e| e.id)
+        .collect();
+    result.sort();
+    result.dedup();
+    result
+}
+
 fn uninstalled_columns_ending_at_node(
     node_id: i32,
     grid: &SimGrid,
@@ -1051,13 +1069,73 @@ fn uninstalled_columns_ending_at_node(
     result
 }
 
+fn girder_direction(element: &StabilityElement, grid: &SimGrid) -> Option<(i32, i32)> {
+    let ni = grid.node_coords(element.node_i_id)?;
+    let nj = grid.node_coords(element.node_j_id)?;
+    let dx = nj.0 - ni.0;
+    let dy = nj.1 - ni.1;
+
+    Some((
+        if dx.abs() > 0.001 {
+            dx.signum() as i32
+        } else {
+            0
+        },
+        if dy.abs() > 0.001 {
+            dy.signum() as i32
+        } else {
+            0
+        },
+    ))
+}
+
+fn is_perpendicular(dir1: (i32, i32), dir2: (i32, i32)) -> bool {
+    let dot = dir1.0 * dir2.0 + dir1.1 * dir2.1;
+    dot == 0 && (dir1.0 != 0 || dir1.1 != 0) && (dir2.0 != 0 || dir2.1 != 0)
+}
+
+fn cross_girder_bonus(element_ids: &[i32], grid: &SimGrid, installed_ids: &HashSet<i32>) -> f64 {
+    let mut bonus = 0.0;
+
+    for eid in element_ids {
+        let Some(elem) = get_element(grid, *eid) else {
+            continue;
+        };
+        if elem.member_type != "Girder" {
+            continue;
+        }
+
+        let Some(dir) = girder_direction(elem, grid) else {
+            continue;
+        };
+
+        for node_id in [elem.node_i_id, elem.node_j_id] {
+            let touching = installed_girders_touching_node(node_id, grid, installed_ids);
+            let has_perpendicular = touching.iter().any(|gid| {
+                get_element(grid, *gid)
+                    .and_then(|g| girder_direction(g, grid))
+                    .map(|other_dir| is_perpendicular(dir, other_dir))
+                    .unwrap_or(false)
+            });
+
+            if has_perpendicular {
+                bonus += 1.0;
+            }
+        }
+    }
+
+    bonus
+}
+
 fn bundle_score(
     element_ids: &[i32],
     grid: &SimGrid,
     installed_nodes: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
+    installed_ids: &HashSet<i32>,
     w1: f64,
     w2: f64,
+    w3: f64,
 ) -> f64 {
     let connectivity_sum: usize = element_ids
         .iter()
@@ -1073,7 +1151,8 @@ fn bundle_score(
         0.0
     };
     let size_bonus = element_ids.len() as f64 * 0.75;
-    w1 * connectivity_sum as f64 + dist_score + size_bonus
+    let closure_score = (4.0 * w3) * cross_girder_bonus(element_ids, grid, installed_ids);
+    w1 * connectivity_sum as f64 + dist_score + size_bonus + closure_score
 }
 
 fn try_build_pattern(
@@ -1086,6 +1165,7 @@ fn try_build_pattern(
     threshold: f64,
     w1: f64,
     w2: f64,
+    w3: f64,
     rng: &mut u64,
 ) -> (Vec<i32>, String) {
     let Some(seed) = get_element(grid, seed_id) else {
@@ -1329,7 +1409,18 @@ fn try_build_pattern(
         .collect();
     let scores: Vec<f64> = longest
         .iter()
-        .map(|choice| bundle_score(&choice.element_ids, grid, installed_nodes, node_pos, w1, w2))
+        .map(|choice| {
+            bundle_score(
+                &choice.element_ids,
+                grid,
+                installed_nodes,
+                node_pos,
+                installed_ids,
+                w1,
+                w2,
+                w3,
+            )
+        })
         .collect();
     let chosen = longest[weighted_random_choice(&scores, rng)];
     (
@@ -1561,7 +1652,16 @@ fn run_scenario_internal(
                                 let seed_is_column = is_column(grid, seed_id);
 
                                 if !seed_is_column && check_bundle_stability(&[seed_id], grid, &support_ids) {
-                                    let score = bundle_score(&[seed_id], grid, &support_nodes, &node_pos, w1, w2);
+                                    let score = bundle_score(
+                                        &[seed_id],
+                                        grid,
+                                        &support_nodes,
+                                        &node_pos,
+                                        &support_ids,
+                                        w1,
+                                        w2,
+                                        w3,
+                                    );
                                     complete_plans.push((vec![seed_id], score));
                                 }
 
@@ -1580,7 +1680,16 @@ fn run_scenario_internal(
                                     for &g1 in &touching_girders {
                                         let plan = vec![seed_id, g1];
                                         if check_bundle_stability(&plan, grid, &support_ids) {
-                                            let score = bundle_score(&plan, grid, &support_nodes, &node_pos, w1, w2);
+                                            let score = bundle_score(
+                                                &plan,
+                                                grid,
+                                                &support_nodes,
+                                                &node_pos,
+                                                &support_ids,
+                                                w1,
+                                                w2,
+                                                w3,
+                                            );
                                             complete_plans.push((plan, score));
                                         }
                                     }
@@ -1589,7 +1698,16 @@ fn run_scenario_internal(
                                         for j in (i + 1)..touching_girders.len() {
                                             let plan = vec![seed_id, touching_girders[i], touching_girders[j]];
                                             if check_bundle_stability(&plan, grid, &support_ids) {
-                                                let score = bundle_score(&plan, grid, &support_nodes, &node_pos, w1, w2);
+                                                let score = bundle_score(
+                                                    &plan,
+                                                    grid,
+                                                    &support_nodes,
+                                                    &node_pos,
+                                                    &support_ids,
+                                                    w1,
+                                                    w2,
+                                                    w3,
+                                                );
                                                 complete_plans.push((plan, score));
                                             }
                                         }
@@ -1625,6 +1743,7 @@ fn run_scenario_internal(
                                         threshold,
                                         w1,
                                         w2,
+                                        w3,
                                         &mut plan_rng,
                                     );
 

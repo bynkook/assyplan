@@ -6,9 +6,9 @@ use assyplan::sim_engine::run_all_scenarios;
 use assyplan::sim_grid::SimGrid;
 use assyplan::stability::{build_step_elements_map, generate_all_tables, get_floor_column_data};
 
-// Sim fingerprint changed after bootstrap anchor-priority update
-// (first-cycle candidate selection prefers each workfront's anchor column).
-const EXPECTED_SIM_FINGERPRINT_V2: u64 = 428175403154935975;
+// Sim fingerprint changed after closure-aware scoring update
+// (w3 now biases toward cross-girder bay closure in bundle scoring).
+const EXPECTED_SIM_FINGERPRINT_V3: u64 = 2091212190232840390;
 // Dev fingerprint changed after canonical Dev step generation update
 // (local-step completion + global-cycle merge semantics).
 const EXPECTED_DEV_FINGERPRINT_V2: u64 = 7561072595717411788;
@@ -128,12 +128,12 @@ fn dev_fingerprint() -> u64 {
 }
 
 #[test]
-fn regression_guard_sim_fingerprint_v2() {
+fn regression_guard_sim_fingerprint_v3() {
     let actual = sim_fingerprint();
     assert_eq!(
-        actual, EXPECTED_SIM_FINGERPRINT_V2,
+        actual, EXPECTED_SIM_FINGERPRINT_V3,
         "SIM fingerprint mismatch. expected={}, actual={}",
-        EXPECTED_SIM_FINGERPRINT_V2, actual
+        EXPECTED_SIM_FINGERPRINT_V3, actual
     );
 }
 
