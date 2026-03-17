@@ -323,6 +323,19 @@ FAIL → 패턴 확장 또는 롤백
 5. **상층 확장 연결 보정**
     - 새 거더가 직접 stable endpoint 에 닿지 않더라도, stable 에 anchor 된 새 기둥 상단을 통해 연결되는 경우는 extension 으로 허용한다.
 
+6. **Global Step Cycle 집계 + LocalStep 병합 반영**
+    - Step 생성은 workfront별 즉시 방출이 아니라 cycle 집계 방식으로 변경되었다.
+    - 각 cycle 내부 sequence round 에서 workfront 당 최대 1개 부재만 선택한다.
+    - workfront 버퍼가 완성 패턴 + 안정 조건 pass 를 만족하면 `LocalStep` 으로 cycle 수집 버퍼에 기록한다.
+    - 같은 cycle 내에서 local step 생성 성공 workfront 는 남은 라운드에서 제외한다.
+    - cycle 종료 시 수집된 `LocalStep` 들을 1개의 `SimStep` 으로 병합한다 (`local_steps` 보존).
+
+7. **Sequence 번호 부여 규칙 고정 (Round-Robin Collation)**
+    - sequence 번호는 1부터 시작하는 global 연속 번호를 사용한다.
+    - 하나의 global step 내부에서는 round-robin collation 으로 sequence 를 구성한다.
+    - 같은 round 에 설치된 부재들은 동일 sequence 번호를 공유한다.
+    - 결과적으로 `Sequence != Step` 가정이 유지되며, multi-workfront 에서 step 수는 sequence 수보다 작아야 정상이다.
+
 ---
 
 ## 10. 구현 원칙 요약
@@ -331,7 +344,8 @@ FAIL → 패턴 확장 또는 롤백
 2. **신규 부재만 검사도 금지**: 신규 패턴만 떼어 검사하면 인접 안정구조를 고려할 수 없다.
 3. **정답은 국소 문맥 평가**: 신규 패턴 + 실제 인접 stable 부재만 합쳐서 평가한다.
 4. **Disconnected case 예외**: 국소 문맥이 비어 있으면 독립 bootstrap 규칙으로 판정한다.
-5. **Step 방출 조건**: 완성 패턴 + 적합 안정 조건 PASS 일 때만 Step 생성한다.
+5. **Step 방출 조건**: 완성 패턴 + 적합 안정 조건 PASS 일 때만 LocalStep 생성하고, cycle 종료 시 병합 SimStep 을 방출한다.
+6. **Sequence 규칙 유지**: sequence 는 global 1-based 연속 번호를 유지하고 round 동시 설치는 동일 번호를 공유한다.
 
 ---
 

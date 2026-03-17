@@ -11,6 +11,14 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Stroke, Ui, Vec2};
 
 use crate::graphics::ui::{SimWorkfront, UiState};
 
+// Shared chart layout constants (aligned with Development mode visuals)
+const CHART_PADDING_LEFT: f32 = 50.0;
+const CHART_PADDING_RIGHT: f32 = 20.0;
+const CHART_PADDING_TOP: f32 = 10.0;
+const CHART_PADDING_BOTTOM: f32 = 24.0;
+const CHART_MARGIN_H: f32 = 12.0;
+const CHART_LEGEND_W: f32 = 70.0;
+
 // ============================================================================
 // Settings tab (Grid config + algorithm weights + workfront list)
 // ============================================================================
@@ -662,6 +670,12 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
             // ── XY Plot: Members-per-step ──────────────────────────────────
             render_members_per_step_plot(ui, scenario);
 
+            // ── Floor chart (Dev Chart 2 equivalent) ───────────────────────
+            render_floor_column_installation_rate_chart(ui, state, scenario);
+
+            // ── Upper-floor ratio chart (Dev Chart 3 equivalent) ───────────
+            render_upper_floor_column_rate_chart(ui, state, scenario);
+
             // ── Scenario comparison chart ──────────────────────────────────
             render_scenario_comparison_chart(ui, state);
 
@@ -741,154 +755,508 @@ fn render_members_per_step_plot(ui: &mut Ui, scenario: &crate::graphics::ui::Sim
     ui.add_space(4.0);
 
     // Desired plot dimensions
-    let plot_w = (ui.available_width()).max(200.0);
-    let plot_h = 140.0f32;
-    let margin = egui::vec2(42.0, 18.0); // left/bottom margin for axis labels
+    let plot_h = 150.0f32;
 
-    let total_rect = ui
-        .allocate_space(Vec2::new(plot_w, plot_h + margin.y + 8.0))
-        .1;
-    let painter = ui.painter_at(total_rect);
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(CHART_MARGIN_H, 0.0))
+        .show(ui, |ui| {
+            let (chart_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), plot_h),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(chart_rect);
+            painter.rect_filled(chart_rect, 2.0, Color32::from_rgb(30, 30, 40));
 
-    // Plot area (inside margins)
-    let plot_rect = Rect::from_min_size(
-        pos2(total_rect.left() + margin.x, total_rect.top()),
-        Vec2::new(plot_w - margin.x - 4.0, plot_h),
-    );
+            let plot_rect = Rect::from_min_max(
+                pos2(
+                    chart_rect.left() + CHART_PADDING_LEFT,
+                    chart_rect.top() + CHART_PADDING_TOP,
+                ),
+                pos2(
+                    chart_rect.right() - CHART_PADDING_RIGHT - CHART_LEGEND_W,
+                    chart_rect.bottom() - CHART_PADDING_BOTTOM,
+                ),
+            );
 
-    // Background
-    painter.rect_filled(plot_rect, 2.0, Color32::from_gray(22));
-    painter.rect_stroke(plot_rect, 2.0, Stroke::new(1.0, Color32::from_gray(60)));
+            painter.rect_stroke(plot_rect, 2.0, Stroke::new(1.0, Color32::from_gray(60)));
 
-    let n = steps.len();
-    let counts: Vec<usize> = steps.iter().map(|s| s.element_ids.len()).collect();
-    let max_count = counts.iter().copied().max().unwrap_or(1).max(1);
-    let y_max = (max_count as f32 * 1.25).max(5.0);
+            let n = steps.len();
+            let counts: Vec<usize> = steps.iter().map(|s| s.element_ids.len()).collect();
+            let max_count = counts.iter().copied().max().unwrap_or(1).max(1);
+            let y_max = (max_count as f32 * 1.25).max(5.0);
 
     // Helper: data coords → screen coords
-    let to_screen = |step_i: f32, count: f32| -> Pos2 {
-        let x = plot_rect.left() + (step_i / (n as f32).max(1.0)) * plot_rect.width();
-        let y = plot_rect.bottom() - (count / y_max) * plot_rect.height();
-        pos2(x, y)
-    };
+            let to_screen = |step_i: f32, count: f32| -> Pos2 {
+                let x = plot_rect.left() + (step_i / (n as f32).max(1.0)) * plot_rect.width();
+                let y = plot_rect.bottom() - (count / y_max) * plot_rect.height();
+                pos2(x, y)
+            };
 
     // ── Target band (1.8 ~ 2.4) ───────────────────────────────────────────
-    let y_band_lo = plot_rect.bottom() - (1.8 / y_max) * plot_rect.height();
-    let y_band_hi = plot_rect.bottom() - (2.4 / y_max) * plot_rect.height();
-    let band_rect = Rect::from_min_max(
-        pos2(plot_rect.left(), y_band_hi),
-        pos2(plot_rect.right(), y_band_lo),
-    );
-    painter.rect_filled(
-        band_rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(80, 200, 80, 28),
-    );
+            let y_band_lo = plot_rect.bottom() - (1.8 / y_max) * plot_rect.height();
+            let y_band_hi = plot_rect.bottom() - (2.4 / y_max) * plot_rect.height();
+            let band_rect = Rect::from_min_max(
+                pos2(plot_rect.left(), y_band_hi),
+                pos2(plot_rect.right(), y_band_lo),
+            );
+            painter.rect_filled(
+                band_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(80, 200, 80, 28),
+            );
 
     // ── Y-axis grid lines & labels (0, y_max/2, y_max) ───────────────────
-    let y_ticks = [0.0f32, y_max * 0.5, y_max];
-    for &yv in &y_ticks {
-        let sy = plot_rect.bottom() - (yv / y_max) * plot_rect.height();
-        // grid line (dashed)
-        let dash = 5.0f32;
-        let gap = 4.0f32;
-        let mut x = plot_rect.left();
-        while x < plot_rect.right() {
-            let x_end = (x + dash).min(plot_rect.right());
-            painter.line_segment(
-                [pos2(x, sy), pos2(x_end, sy)],
-                Stroke::new(0.5, Color32::from_gray(50)),
-            );
-            x += dash + gap;
-        }
-        // label
-        painter.text(
-            pos2(plot_rect.left() - 4.0, sy),
-            egui::Align2::RIGHT_CENTER,
-            format!("{:.0}", yv),
-            FontId::proportional(9.0),
-            Color32::from_gray(140),
-        );
-    }
+            let y_ticks = [0.0f32, y_max * 0.5, y_max];
+            for &yv in &y_ticks {
+                let sy = plot_rect.bottom() - (yv / y_max) * plot_rect.height();
+                let dash = 5.0f32;
+                let gap = 4.0f32;
+                let mut x = plot_rect.left();
+                while x < plot_rect.right() {
+                    let x_end = (x + dash).min(plot_rect.right());
+                    painter.line_segment(
+                        [pos2(x, sy), pos2(x_end, sy)],
+                        Stroke::new(0.5, Color32::from_gray(50)),
+                    );
+                    x += dash + gap;
+                }
+                painter.text(
+                    pos2(plot_rect.left() - 4.0, sy),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("{:.0}", yv),
+                    FontId::proportional(9.0),
+                    Color32::from_gray(140),
+                );
+            }
 
     // ── Data line ─────────────────────────────────────────────────────────
-    let line_color = Color32::from_rgb(100, 180, 255);
-    let mut points: Vec<Pos2> = Vec::with_capacity(n);
-    for (i, &count) in counts.iter().enumerate() {
-        // Center of each step's x interval
-        let xi = (i as f32 + 0.5) / n as f32 * n as f32;
-        points.push(to_screen(xi, count as f32));
-    }
+            let line_color = Color32::from_rgb(100, 180, 255);
+            let mut points: Vec<Pos2> = Vec::with_capacity(n);
+            for (i, &count) in counts.iter().enumerate() {
+                let xi = (i as f32 + 0.5) / n as f32 * n as f32;
+                points.push(to_screen(xi, count as f32));
+            }
 
-    for w in points.windows(2) {
-        painter.line_segment([w[0], w[1]], Stroke::new(1.5, line_color));
-    }
-    // Dots at each step
-    for &p in &points {
-        painter.circle_filled(p, 2.5, line_color);
-    }
+            for w in points.windows(2) {
+                painter.line_segment([w[0], w[1]], Stroke::new(1.5, line_color));
+            }
+            for &p in &points {
+                painter.circle_filled(p, 2.5, line_color);
+            }
 
     // ── Mean line (red dashed) ────────────────────────────────────────────
-    let mean = scenario.metrics.avg_members_per_step as f32;
-    let y_mean = plot_rect.bottom() - (mean / y_max) * plot_rect.height();
-    let dash = 6.0f32;
-    let gap = 4.0f32;
-    let mut x = plot_rect.left();
-    while x < plot_rect.right() {
-        let x_end = (x + dash).min(plot_rect.right());
-        painter.line_segment(
-            [pos2(x, y_mean), pos2(x_end, y_mean)],
-            Stroke::new(1.5, Color32::from_rgb(255, 100, 100)),
-        );
-        x += dash + gap;
-    }
-    painter.text(
-        pos2(plot_rect.right() + 2.0, y_mean),
-        egui::Align2::LEFT_CENTER,
-        format!("avg {:.1}", mean),
-        FontId::proportional(9.0),
-        Color32::from_rgb(255, 120, 120),
-    );
+            let mean = scenario.metrics.avg_members_per_step as f32;
+            let y_mean = plot_rect.bottom() - (mean / y_max) * plot_rect.height();
+            let dash = 6.0f32;
+            let gap = 4.0f32;
+            let mut x = plot_rect.left();
+            while x < plot_rect.right() {
+                let x_end = (x + dash).min(plot_rect.right());
+                painter.line_segment(
+                    [pos2(x, y_mean), pos2(x_end, y_mean)],
+                    Stroke::new(1.5, Color32::from_rgb(255, 100, 100)),
+                );
+                x += dash + gap;
+            }
+            painter.text(
+                pos2(plot_rect.right() + 2.0, y_mean),
+                egui::Align2::LEFT_CENTER,
+                format!("avg {:.1}", mean),
+                FontId::proportional(9.0),
+                Color32::from_rgb(255, 120, 120),
+            );
 
     // ── X-axis label ──────────────────────────────────────────────────────
-    painter.text(
-        pos2(plot_rect.center_top().x, total_rect.bottom() - 2.0),
-        egui::Align2::CENTER_BOTTOM,
-        "Step",
-        FontId::proportional(9.0),
-        Color32::from_gray(140),
-    );
+            painter.text(
+                pos2(plot_rect.center_top().x, chart_rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Step",
+                FontId::proportional(9.0),
+                Color32::from_gray(140),
+            );
 
     // ── Legend ────────────────────────────────────────────────────────────
-    let legend_x = plot_rect.right() - 90.0;
-    let legend_y = plot_rect.top() + 6.0;
-    painter.line_segment(
-        [
-            pos2(legend_x, legend_y + 4.0),
-            pos2(legend_x + 14.0, legend_y + 4.0),
-        ],
-        Stroke::new(1.5, line_color),
+            let legend_x = plot_rect.right() + 6.0;
+            let legend_y = plot_rect.top() + 6.0;
+            painter.line_segment(
+                [
+                    pos2(legend_x, legend_y + 4.0),
+                    pos2(legend_x + 14.0, legend_y + 4.0),
+                ],
+                Stroke::new(1.5, line_color),
+            );
+            painter.text(
+                pos2(legend_x + 16.0, legend_y + 4.0),
+                egui::Align2::LEFT_CENTER,
+                "members/step",
+                FontId::proportional(8.0),
+                Color32::from_gray(180),
+            );
+            let legend_y2 = legend_y + 14.0;
+            painter.rect_filled(
+                Rect::from_min_size(pos2(legend_x, legend_y2), Vec2::new(14.0, 6.0)),
+                0.0,
+                Color32::from_rgba_unmultiplied(80, 200, 80, 60),
+            );
+            painter.text(
+                pos2(legend_x + 16.0, legend_y2 + 3.0),
+                egui::Align2::LEFT_CENTER,
+                "target 1.8~2.4",
+                FontId::proportional(8.0),
+                Color32::from_gray(160),
+            );
+
+            ui.add_space(8.0);
+        });
+}
+
+fn render_floor_column_installation_rate_chart(
+    ui: &mut Ui,
+    state: &UiState,
+    scenario: &crate::graphics::ui::SimScenario,
+) {
+    use eframe::egui::pos2;
+
+    let floors = state.grid_config.nz.saturating_sub(1);
+    if floors == 0 || scenario.steps.is_empty() {
+        return;
+    }
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.heading("Floor Column Installation Rate by Step");
+    ui.add_space(4.0);
+
+    let columns_per_floor = state.grid_config.nx * state.grid_config.ny;
+    let total_columns = columns_per_floor * floors;
+    let n_steps = scenario.steps.len();
+
+    // In SimGrid, column element IDs come first in ascending order.
+    let is_column = |eid: i32| -> bool { eid >= 1 && (eid as usize) <= total_columns };
+
+    let mut floor_rates: Vec<Vec<f32>> = vec![Vec::with_capacity(n_steps); floors];
+    let mut cum_cols_by_floor: Vec<usize> = vec![0; floors];
+
+    for step in &scenario.steps {
+        for local_step in &step.local_steps {
+            let floor_idx = (local_step.floor.saturating_sub(1) as usize).min(floors - 1);
+            let cols_in_local = local_step
+                .element_ids
+                .iter()
+                .filter(|&&eid| is_column(eid))
+                .count();
+            cum_cols_by_floor[floor_idx] += cols_in_local;
+        }
+
+        for floor_idx in 0..floors {
+            let rate = (cum_cols_by_floor[floor_idx] as f32 / columns_per_floor.max(1) as f32)
+                .min(1.0);
+            floor_rates[floor_idx].push(rate);
+        }
+    }
+
+    let floor_colors = [
+        Color32::from_rgb(255, 100, 100),
+        Color32::from_rgb(255, 180, 60),
+        Color32::from_rgb(100, 220, 100),
+        Color32::from_rgb(80, 180, 255),
+        Color32::from_rgb(200, 100, 255),
+        Color32::from_rgb(255, 120, 200),
+        Color32::from_rgb(100, 240, 220),
+        Color32::from_rgb(255, 240, 100),
+    ];
+
+    let chart_h = 180.0f32;
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(CHART_MARGIN_H, 0.0))
+        .show(ui, |ui| {
+            let (chart_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), chart_h),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(chart_rect);
+            painter.rect_filled(chart_rect, 2.0, Color32::from_rgb(30, 30, 40));
+
+            let plot_rect = Rect::from_min_max(
+                pos2(
+                    chart_rect.left() + CHART_PADDING_LEFT,
+                    chart_rect.top() + CHART_PADDING_TOP,
+                ),
+                pos2(
+                    chart_rect.right() - CHART_PADDING_RIGHT - CHART_LEGEND_W,
+                    chart_rect.bottom() - CHART_PADDING_BOTTOM,
+                ),
+            );
+
+            let axis_color = Color32::from_rgb(160, 160, 160);
+            let grid_color = Color32::from_rgb(60, 60, 70);
+            let font_id = FontId::proportional(10.0);
+
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.left_top()],
+                Stroke::new(1.0, axis_color),
+            );
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                Stroke::new(1.0, axis_color),
+            );
+
+            for (frac, label) in &[(0.0f32, "0%"), (0.5, "50%"), (1.0, "100%")] {
+                let y = plot_rect.bottom() - frac * plot_rect.height();
+                painter.line_segment(
+                    [pos2(plot_rect.left(), y), pos2(plot_rect.right(), y)],
+                    Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
+                );
+                painter.text(
+                    pos2(chart_rect.left(), y),
+                    egui::Align2::LEFT_CENTER,
+                    *label,
+                    font_id.clone(),
+                    axis_color,
+                );
+            }
+
+            let max_step_f = n_steps as f32;
+            let to_screen = |step: f32, rate: f32| -> Pos2 {
+                let x = plot_rect.left()
+                    + (step - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                let y = plot_rect.bottom() - rate * plot_rect.height();
+                pos2(x, y)
+            };
+
+            for (fi, rates) in floor_rates.iter().enumerate() {
+                let color = floor_colors[fi % floor_colors.len()];
+                if rates.len() >= 2 {
+                    let points: Vec<Pos2> = rates
+                        .iter()
+                        .enumerate()
+                        .map(|(i, rate)| to_screen(i as f32 + 1.0, *rate))
+                        .collect();
+                    painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+                }
+
+                let legend_x = plot_rect.right() + 6.0;
+                let legend_y = chart_rect.top() + CHART_PADDING_TOP + fi as f32 * 14.0;
+                painter.line_segment(
+                    [pos2(legend_x, legend_y + 5.0), pos2(legend_x + 14.0, legend_y + 5.0)],
+                    Stroke::new(2.0, color),
+                );
+                painter.text(
+                    pos2(legend_x + 17.0, legend_y + 5.0),
+                    egui::Align2::LEFT_CENTER,
+                    format!("F{}", fi + 1),
+                    font_id.clone(),
+                    color,
+                );
+            }
+
+            let label_step = (n_steps / 10).max(1);
+            for s in (1..=n_steps).step_by(label_step) {
+                let x = plot_rect.left()
+                    + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                painter.text(
+                    pos2(x, chart_rect.bottom() - 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("{}", s),
+                    font_id.clone(),
+                    axis_color,
+                );
+            }
+        });
+}
+
+fn render_upper_floor_column_rate_chart(
+    ui: &mut Ui,
+    state: &UiState,
+    scenario: &crate::graphics::ui::SimScenario,
+) {
+    use eframe::egui::pos2;
+
+    let floors = state.grid_config.nz.saturating_sub(1);
+    if floors < 2 || scenario.steps.is_empty() {
+        return;
+    }
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.heading("Upper-Floor Column Installation Rate");
+    ui.add_space(3.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "Threshold: {:.0}%  —  each line F{{N+1}}/F{{N}}",
+            state.upper_floor_threshold * 100.0
+        ))
+        .weak()
+        .small(),
     );
-    painter.text(
-        pos2(legend_x + 16.0, legend_y + 4.0),
-        egui::Align2::LEFT_CENTER,
-        "members/step",
-        FontId::proportional(8.0),
-        Color32::from_gray(180),
-    );
-    let legend_y2 = legend_y + 14.0;
-    painter.rect_filled(
-        Rect::from_min_size(pos2(legend_x, legend_y2), Vec2::new(14.0, 6.0)),
-        0.0,
-        Color32::from_rgba_unmultiplied(80, 200, 80, 60),
-    );
-    painter.text(
-        pos2(legend_x + 16.0, legend_y2 + 3.0),
-        egui::Align2::LEFT_CENTER,
-        "target 1.8~2.4",
-        FontId::proportional(8.0),
-        Color32::from_gray(160),
-    );
+    ui.add_space(4.0);
+
+    let columns_per_floor = state.grid_config.nx * state.grid_config.ny;
+    let total_columns = columns_per_floor * floors;
+    let n_steps = scenario.steps.len();
+    let lower_floor_count = floors - 1;
+    let is_column = |eid: i32| -> bool { eid >= 1 && (eid as usize) <= total_columns };
+
+    let mut ratios: Vec<Vec<f32>> = vec![Vec::with_capacity(n_steps); lower_floor_count];
+    let mut cum_cols_by_floor: Vec<usize> = vec![0; floors];
+
+    for step in &scenario.steps {
+        for local_step in &step.local_steps {
+            let floor_idx = (local_step.floor.saturating_sub(1) as usize).min(floors - 1);
+            let cols_in_local = local_step
+                .element_ids
+                .iter()
+                .filter(|&&eid| is_column(eid))
+                .count();
+            cum_cols_by_floor[floor_idx] += cols_in_local;
+        }
+
+        for floor_idx in 0..lower_floor_count {
+            let lower = cum_cols_by_floor[floor_idx] as f32;
+            let upper = cum_cols_by_floor[floor_idx + 1] as f32;
+            let ratio = if lower <= 0.0 { 0.0 } else { upper / lower };
+            ratios[floor_idx].push(ratio);
+        }
+    }
+
+    let y_max = ratios
+        .iter()
+        .flat_map(|series| series.iter().copied())
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+
+    let floor_colors = [
+        Color32::from_rgb(255, 100, 100),
+        Color32::from_rgb(255, 180, 60),
+        Color32::from_rgb(100, 220, 100),
+        Color32::from_rgb(80, 180, 255),
+        Color32::from_rgb(200, 100, 255),
+        Color32::from_rgb(255, 120, 200),
+        Color32::from_rgb(100, 240, 220),
+        Color32::from_rgb(255, 240, 100),
+    ];
+
+    let chart_h = 180.0f32;
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(CHART_MARGIN_H, 0.0))
+        .show(ui, |ui| {
+            let (chart_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), chart_h),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(chart_rect);
+            painter.rect_filled(chart_rect, 2.0, Color32::from_rgb(30, 30, 40));
+
+            let plot_rect = Rect::from_min_max(
+                pos2(
+                    chart_rect.left() + CHART_PADDING_LEFT,
+                    chart_rect.top() + CHART_PADDING_TOP,
+                ),
+                pos2(
+                    chart_rect.right() - CHART_PADDING_RIGHT - CHART_LEGEND_W,
+                    chart_rect.bottom() - CHART_PADDING_BOTTOM,
+                ),
+            );
+
+            let axis_color = Color32::from_rgb(160, 160, 160);
+            let grid_color = Color32::from_rgb(60, 60, 70);
+            let font_id = FontId::proportional(10.0);
+
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.left_top()],
+                Stroke::new(1.0, axis_color),
+            );
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                Stroke::new(1.0, axis_color),
+            );
+
+            for (frac, label) in &[
+                (0.0f32, "0".to_string()),
+                (0.5f32, format!("{:.1}", y_max * 0.5)),
+                (1.0f32, format!("{:.1}", y_max)),
+            ] {
+                let y = plot_rect.bottom() - frac * plot_rect.height();
+                painter.line_segment(
+                    [pos2(plot_rect.left(), y), pos2(plot_rect.right(), y)],
+                    Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
+                );
+                painter.text(
+                    pos2(chart_rect.left(), y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    font_id.clone(),
+                    axis_color,
+                );
+            }
+
+            let max_step_f = n_steps as f32;
+            let to_screen = |step: f32, ratio: f32| -> Pos2 {
+                let x = plot_rect.left()
+                    + (step - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                let y = plot_rect.bottom() - (ratio / y_max) * plot_rect.height();
+                pos2(x, y)
+            };
+
+            // Threshold line (0~1 scale on ratio axis)
+            let threshold_ratio = state.upper_floor_threshold as f32;
+            let threshold_y = plot_rect.bottom() - (threshold_ratio / y_max) * plot_rect.height();
+            let mut x = plot_rect.left();
+            while x < plot_rect.right() {
+                let x_end = (x + 6.0).min(plot_rect.right());
+                painter.line_segment(
+                    [pos2(x, threshold_y), pos2(x_end, threshold_y)],
+                    Stroke::new(1.5, Color32::from_rgb(255, 80, 80)),
+                );
+                x += 10.0;
+            }
+            painter.text(
+                pos2(plot_rect.right() + 3.0, threshold_y),
+                egui::Align2::LEFT_CENTER,
+                format!("{:.0}%", state.upper_floor_threshold * 100.0),
+                font_id.clone(),
+                Color32::from_rgb(255, 80, 80),
+            );
+
+            for (fi, series) in ratios.iter().enumerate() {
+                let color = floor_colors[fi % floor_colors.len()];
+                if series.len() >= 2 {
+                    let points: Vec<Pos2> = series
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ratio)| to_screen(i as f32 + 1.0, *ratio))
+                        .collect();
+                    painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+                }
+
+                let legend_x = plot_rect.right() + 6.0;
+                let legend_y = chart_rect.top() + CHART_PADDING_TOP + fi as f32 * 14.0;
+                painter.line_segment(
+                    [pos2(legend_x, legend_y + 5.0), pos2(legend_x + 14.0, legend_y + 5.0)],
+                    Stroke::new(2.0, color),
+                );
+                painter.text(
+                    pos2(legend_x + 17.0, legend_y + 5.0),
+                    egui::Align2::LEFT_CENTER,
+                    format!("F{}/F{}", fi + 2, fi + 1),
+                    font_id.clone(),
+                    color,
+                );
+            }
+
+            let label_step = (n_steps / 10).max(1);
+            for s in (1..=n_steps).step_by(label_step) {
+                let x = plot_rect.left()
+                    + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                painter.text(
+                    pos2(x, chart_rect.bottom() - 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("{}", s),
+                    font_id.clone(),
+                    axis_color,
+                );
+            }
+        });
 }
 
 // ============================================================================
@@ -955,75 +1323,74 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
         .collect();
 
     // ── Layout ────────────────────────────────────────────────────────────
-    let plot_w = (ui.available_width()).max(200.0);
-    let plot_h = 160.0f32;
-    let margin_l = 48.0f32; // space for y-axis labels
-    let margin_b = 20.0f32; // space for x-axis label
-    let margin_t = 8.0f32;
-    let legend_w = 60.0f32; // space for scenario legend on right
+    let plot_h = 170.0f32;
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(CHART_MARGIN_H, 0.0))
+        .show(ui, |ui| {
+            let (total_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), plot_h),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(total_rect);
+            painter.rect_filled(total_rect, 2.0, Color32::from_rgb(30, 30, 40));
 
-    let total_rect = ui
-        .allocate_space(Vec2::new(plot_w, plot_h + margin_b + margin_t + 4.0))
-        .1;
-    let painter = ui.painter_at(total_rect);
-    painter.rect_filled(total_rect, 2.0, Color32::from_gray(22));
+            let plot_rect = Rect::from_min_max(
+                pos2(
+                    total_rect.left() + CHART_PADDING_LEFT,
+                    total_rect.top() + CHART_PADDING_TOP,
+                ),
+                pos2(
+                    total_rect.right() - CHART_PADDING_RIGHT - CHART_LEGEND_W,
+                    total_rect.bottom() - CHART_PADDING_BOTTOM,
+                ),
+            );
 
-    let plot_rect = Rect::from_min_max(
-        pos2(total_rect.left() + margin_l, total_rect.top() + margin_t),
-        pos2(
-            total_rect.right() - legend_w - 4.0,
-            total_rect.bottom() - margin_b,
-        ),
-    );
-
-    // Axis lines
-    let axis_color = Color32::from_gray(120);
-    painter.line_segment(
-        [plot_rect.left_bottom(), plot_rect.left_top()],
-        Stroke::new(1.0, axis_color),
-    );
-    painter.line_segment(
-        [plot_rect.left_bottom(), plot_rect.right_bottom()],
-        Stroke::new(1.0, axis_color),
-    );
+            // Axis lines
+            let axis_color = Color32::from_gray(120);
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.left_top()],
+                Stroke::new(1.0, axis_color),
+            );
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                Stroke::new(1.0, axis_color),
+            );
 
     // ── Y-axis tick labels (0, 50%, 100%) ────────────────────────────────
-    let font_id = FontId::proportional(9.0);
-    for frac in [0.0f32, 0.5, 1.0] {
-        let val = frac * max_members as f32;
-        let sy = plot_rect.bottom() - frac * plot_rect.height();
-        // Dashed grid line
-        let dash = 5.0f32;
-        let gap = 4.0f32;
-        let mut x = plot_rect.left();
-        while x < plot_rect.right() {
-            let x_end = (x + dash).min(plot_rect.right());
-            painter.line_segment(
-                [pos2(x, sy), pos2(x_end, sy)],
-                Stroke::new(0.4, Color32::from_gray(45)),
-            );
-            x += dash + gap;
-        }
-        // Label
-        painter.text(
-            pos2(plot_rect.left() - 4.0, sy),
-            egui::Align2::RIGHT_CENTER,
-            format!("{:.0}", val),
-            font_id.clone(),
-            Color32::from_gray(130),
-        );
-    }
+            let font_id = FontId::proportional(9.0);
+            for frac in [0.0f32, 0.5, 1.0] {
+                let val = frac * max_members as f32;
+                let sy = plot_rect.bottom() - frac * plot_rect.height();
+                let dash = 5.0f32;
+                let gap = 4.0f32;
+                let mut x = plot_rect.left();
+                while x < plot_rect.right() {
+                    let x_end = (x + dash).min(plot_rect.right());
+                    painter.line_segment(
+                        [pos2(x, sy), pos2(x_end, sy)],
+                        Stroke::new(0.4, Color32::from_gray(45)),
+                    );
+                    x += dash + gap;
+                }
+                painter.text(
+                    pos2(plot_rect.left() - 4.0, sy),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("{:.0}", val),
+                    font_id.clone(),
+                    Color32::from_gray(130),
+                );
+            }
 
     // ── Data → screen coordinate helper ───────────────────────────────────
-    let to_screen = |step: f32, members: f32| -> Pos2 {
-        let x =
-            plot_rect.left() + (step - 1.0) / (max_steps as f32 - 1.0).max(1.0) * plot_rect.width();
-        let y = plot_rect.bottom() - (members / max_members as f32) * plot_rect.height();
-        pos2(x, y)
-    };
+            let to_screen = |step: f32, members: f32| -> Pos2 {
+                let x = plot_rect.left()
+                    + (step - 1.0) / (max_steps as f32 - 1.0).max(1.0) * plot_rect.width();
+                let y = plot_rect.bottom() - (members / max_members as f32) * plot_rect.height();
+                pos2(x, y)
+            };
 
     // ── Per-scenario line colors ──────────────────────────────────────────
-    let line_colors: [Color32; 10] = [
+            let line_colors: [Color32; 10] = [
         Color32::from_rgb(100, 200, 255), // sky blue
         Color32::from_rgb(100, 255, 150), // mint green
         Color32::from_rgb(255, 200, 80),  // amber
@@ -1034,52 +1401,52 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
         Color32::from_rgb(80, 240, 220),  // teal
         Color32::from_rgb(200, 180, 255), // lilac
         Color32::from_rgb(255, 160, 80),  // orange
-    ];
+            ];
 
     // ── Draw lines ────────────────────────────────────────────────────────
-    for (rank, (scenario, series)) in sorted_refs.iter().zip(cum_data.iter()).enumerate() {
-        let color = line_colors[rank % line_colors.len()];
-        if series.len() >= 2 {
-            let points: Vec<Pos2> = series.iter().map(|&(s, m)| to_screen(s, m)).collect();
-            painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
-        } else if series.len() == 1 {
-            let p = to_screen(series[0].0, series[0].1);
-            painter.circle_filled(p, 2.0, color);
-        }
+            for (rank, (scenario, series)) in sorted_refs.iter().zip(cum_data.iter()).enumerate() {
+                let color = line_colors[rank % line_colors.len()];
+                if series.len() >= 2 {
+                    let points: Vec<Pos2> = series.iter().map(|&(s, m)| to_screen(s, m)).collect();
+                    painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+                } else if series.len() == 1 {
+                    let p = to_screen(series[0].0, series[0].1);
+                    painter.circle_filled(p, 2.0, color);
+                }
 
-        // Legend swatch on the right
-        let lx = plot_rect.right() + 6.0;
-        let ly = total_rect.top() + margin_t + rank as f32 * 14.0;
-        if ly + 10.0 < total_rect.bottom() {
-            painter.line_segment(
-                [pos2(lx, ly + 4.0), pos2(lx + 12.0, ly + 4.0)],
-                Stroke::new(1.5, color),
-            );
-            painter.text(
-                pos2(lx + 14.0, ly + 4.0),
-                egui::Align2::LEFT_CENTER,
-                format!("#{}", scenario.id),
-                font_id.clone(),
-                color,
-            );
-        }
-    }
+                let lx = plot_rect.right() + 6.0;
+                let ly = total_rect.top() + CHART_PADDING_TOP + rank as f32 * 14.0;
+                if ly + 10.0 < total_rect.bottom() {
+                    painter.line_segment(
+                        [pos2(lx, ly + 4.0), pos2(lx + 12.0, ly + 4.0)],
+                        Stroke::new(1.5, color),
+                    );
+                    painter.text(
+                        pos2(lx + 14.0, ly + 4.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("#{}", scenario.id),
+                        font_id.clone(),
+                        color,
+                    );
+                }
+            }
 
     // ── Axis labels ───────────────────────────────────────────────────────
-    painter.text(
-        pos2(plot_rect.center().x, total_rect.bottom() - 2.0),
-        egui::Align2::CENTER_BOTTOM,
-        "Step",
-        font_id.clone(),
-        Color32::from_gray(130),
-    );
+            painter.text(
+                pos2(plot_rect.center().x, total_rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Step",
+                font_id.clone(),
+                Color32::from_gray(130),
+            );
 
     // Y-axis label (rotated text not available in egui; place abbreviated label at top)
-    painter.text(
-        pos2(total_rect.left() + 2.0, plot_rect.top()),
-        egui::Align2::LEFT_TOP,
-        "Members",
-        font_id,
-        Color32::from_gray(130),
-    );
+            painter.text(
+                pos2(total_rect.left() + 2.0, plot_rect.top()),
+                egui::Align2::LEFT_TOP,
+                "Members",
+                font_id,
+                Color32::from_gray(130),
+            );
+        });
 }

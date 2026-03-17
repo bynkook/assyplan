@@ -240,6 +240,16 @@ Sequence-driven Monte-Carlo + 강한 Pruning + Workfront-local Weighted Sampling
   - 같은 Sequence 내에서 동일 부재를 두 workfront 가 동시에 선택하면 안 된다.
   - Step 은 Sequence 와 별개이며, Sequence 1회마다 Step 1개를 기계적으로 만들지 않는다.
 
+2-1. Global Step Cycle aggregation (최신 반영)
+  - 시뮬레이션 루프는 `global step cycle` 단위로 동작한다.
+  - cycle 내부에서 각 workfront 는 sequence round 마다 최대 1개 부재만 선택한다.
+  - workfront 로컬 버퍼가 완성 패턴 + 안정 조건 pass 를 만족하면 `LocalStep` 으로 cycle 수집 버퍼에 저장한다.
+  - 같은 cycle 에서 local step 생성에 성공한 workfront 는 해당 cycle 남은 라운드에서 제외된다.
+  - cycle 이 종료되면 수집된 여러 `LocalStep` 을 1개의 `SimStep` 으로 병합한다.
+  - 병합된 global step 의 `element_ids` 는 local step 들의 union 이며, 디버깅/표시를 위해 `local_steps` 원본 구조를 유지한다.
+  - sequence 번호는 1부터 시작하는 global 연속 번호를 사용한다.
+  - global step 내부 sequence 는 round-robin collation 으로 구성되며, 같은 round 는 동일 sequence 번호를 공유한다.
+
 3. Workfront-local candidate search
   - 각 workfront 는 자신의 `(x, y)` 시작점과 현재까지 형성된 로컬 프론티어 근처에서만 다음 후보를 탐색한다.
   - 후보 위치는 전역 frontier 전체보다 **해당 workfront 인접성** 을 우선한다.
@@ -360,6 +370,10 @@ step:
 
 - step 은 부재 개수 기준으로 강제 완료하지 않는다. 최근 구현 수정으로 **count-based 조기 완료 규칙은 제거**되었고, 안정 조건 pass 시에만 step 이 완료된다.
 
+- 최신 시뮬레이션 구현에서 step 은 단일 workfront 결과가 아니라 **여러 workfront local step 을 병합한 global step** 이 될 수 있다.
+
+- step 내부에는 local_steps(workfront별 하위 step)가 보존되며, 결과 화면과 export 는 이를 함께 보여준다.
+
 - 1개의 workfront 의 1개의 Step 에서 새로 생성되는 부재의 갯수는 최소 단위 조립 앗세이의 총 부재 갯수 합계(기둥 3개, 거더 2개)를 초과할 수 없다.
 
 - 정상적인 결과에서는 Step 수가 Sequence 수보다 현저히 적어야 한다. Step 수가 Sequence 수와 거의 1:1이면 패턴 판정 로직 오류로 본다.
@@ -369,6 +383,8 @@ sequence:
 - sequence 는 단위 시간이다.
 
 - N개의 workfront 가 있으면 각 sequence 에서 각 workfront 가 1개씩 부재를 설치하여 보통 초기에 N개, 종료 직전에는 1개, 마지막에는 0개로 감소하는 흐름이 되어야 한다.
+
+- sequence 번호는 global 1-based 연속 번호이며, 같은 라운드에서 동시에 설치된 부재들은 동일 sequence 번호를 공유한다.
 
 시공단계 : step 과 같은 의미
 

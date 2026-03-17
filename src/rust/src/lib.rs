@@ -946,7 +946,7 @@ impl AssyPlanApp {
             );
         }
 
-        let summary_path = out_dir.join("simulation_summary.txt");
+        let summary_path = out_dir.join("sim_summary.txt");
         let mut summary_errors = 0usize;
         if let Ok(mut f) = fs::File::create(&summary_path) {
             if f.write_all(summary.as_bytes()).is_err() {
@@ -959,7 +959,7 @@ impl AssyPlanApp {
         // ── 2. Per-scenario CSV files ────────────────────────────────────
         let mut csv_errors = 0usize;
         for scenario in scenarios {
-            let csv_path = out_dir.join(format!("scenario_{:04}_steps.csv", scenario.id));
+            let csv_path = out_dir.join(format!("sim_scenario_{:04}_steps.csv", scenario.id));
             let mut csv = String::new();
             let _ = writeln!(csv, "step,workfront_ids,floor,member_count,local_step_count,element_ids");
             for (step_idx, step) in scenario.steps.iter().enumerate() {

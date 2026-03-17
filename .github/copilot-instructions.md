@@ -163,15 +163,28 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - 상층부 기둥 설치율 제약 threshold 기본값은 `0.3` 이다.
 - 어떤 층의 미설치 부재가 5개 이하이면 그 층을 우선 마감하는 방향을 유지한다.
 
+### Current canonical behavior (2026-03-17)
+
+- 시뮬레이션 엔진의 Step 생성은 workfront 독립 방출이 아니라 **global step cycle 집계 방식**을 따른다.
+- 한 global step cycle 내부에서 각 workfront 는 sequence round 마다 최대 1개 부재를 선택한다.
+- workfront 로컬 버퍼가 완성 패턴 + 안정 조건 PASS 에 도달하면 `LocalStep` 으로 cycle 수집 버퍼에 저장한다.
+- 같은 cycle 에서 local step 생성에 성공한 workfront 는 해당 cycle 의 남은 라운드에서 제외한다.
+- cycle 종료 시 수집된 여러 `LocalStep` 을 1개의 `SimStep` 으로 병합한다 (`local_steps: Vec<LocalStep>` 보존).
+- global step 의 `element_ids` 는 모든 local step element union 이며, `sequences` 는 **round-robin collation** 으로 구성한다.
+- sequence 번호는 1부터 시작하고 global step 단위로 연속 증가한다. 같은 round 는 동일 sequence 번호를 공유한다.
+- 따라서 `Sequence != Step` 가정은 유지되며, multi-workfront 상황에서 Step 수는 Sequence 수보다 작아야 정상이다.
+
 ## 8) Known Current Risk
 
-`sim_engine.rs` 의 핵심 위험은 Step 생성이 패턴 기반이 아니라 개별 요소 단위로 흘러갈 수 있다는 점이다.
+`sim_engine.rs` 의 핵심 위험은 Step 생성의 집계 규칙이 깨져 `Sequence` 와 `Step` 이 다시 1:1에 가까워지는 회귀다.
 
 수정 시 반드시 지켜야 할 점:
 
 - workfront 별로 sequence 를 버퍼링한 뒤 패턴 완성 여부를 검사한다.
-- 완성 패턴 + 안정 조건 PASS 일 때만 Step 을 방출한다.
+- 완성 패턴 + 안정 조건 PASS 일 때만 `LocalStep` 을 생성한다.
+- global step cycle 끝에서만 `LocalStep` 들을 병합하여 최종 `SimStep` 을 방출한다.
 - Sub pattern 단계에서는 Step 을 생성하지 않는다.
+- sequence 번호는 1-based + global 연속성을 유지하고, 동일 round 동시 설치는 동일 sequence 번호를 공유해야 한다.
 - Step 생성 로직을 바꿀 때 UI, metrics, scenario summary 가 모두 여전히 `Sequence != Step` 가정을 유지하는지 함께 확인한다.
 
 ## 9) Editing Rules
