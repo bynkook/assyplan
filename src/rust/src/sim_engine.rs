@@ -1489,13 +1489,28 @@ fn run_scenario_internal(
                         if bootstrap_candidates.is_empty() {
                             Vec::new()
                         } else {
-                            let scores: Vec<f64> = bootstrap_candidates
+                            let anchor_col = grid.column_starting_at(wf.grid_x, wf.grid_y, 0);
+                            let preferred: Vec<&Candidate> = if let Some(anchor_id) = anchor_col {
+                                let hits: Vec<&Candidate> = bootstrap_candidates
+                                    .iter()
+                                    .filter(|candidate| candidate.element_ids.contains(&anchor_id))
+                                    .collect();
+                                if hits.is_empty() {
+                                    bootstrap_candidates.iter().collect()
+                                } else {
+                                    hits
+                                }
+                            } else {
+                                bootstrap_candidates.iter().collect()
+                            };
+
+                            let scores: Vec<f64> = preferred
                                 .iter()
                                 .map(|candidate| candidate.score(w1, w2, w3))
                                 .collect();
                             let chosen_idx = weighted_random_choice(&scores, &mut rng);
                             reorder_bootstrap_pattern(
-                                &bootstrap_candidates[chosen_idx].element_ids,
+                                &preferred[chosen_idx].element_ids,
                                 grid,
                                 &node_pos,
                                 wf,

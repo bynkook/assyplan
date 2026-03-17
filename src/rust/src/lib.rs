@@ -2102,7 +2102,13 @@ impl eframe::App for AssyPlanApp {
                                                 .flat_map(|step| {
                                                     step.sequences.iter().filter_map(move |seq| {
                                                         if seq.sequence_number == cur_seq {
-                                                            Some((step.workfront_id, step.floor, seq.element_id))
+                                                            let (wf_id, floor) = step
+                                                                .local_steps
+                                                                .iter()
+                                                                .find(|ls| ls.element_ids.contains(&seq.element_id))
+                                                                .map(|ls| (ls.workfront_id, ls.floor))
+                                                                .unwrap_or((step.workfront_id, step.floor));
+                                                            Some((wf_id, floor, seq.element_id))
                                                         } else {
                                                             None
                                                         }
