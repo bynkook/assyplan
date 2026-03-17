@@ -493,6 +493,14 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
         return;
     }
 
+    if state
+        .sim_selected_scenario
+        .map(|idx| idx >= state.sim_scenarios.len())
+        .unwrap_or(true)
+    {
+        state.sim_selected_scenario = Some(0);
+    }
+
     // ── Scenario list ──────────────────────────────────────────────────────
     ui.heading("Scenarios");
     ui.add_space(4.0);
@@ -694,7 +702,7 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
             ui.heading("Export Debug Files");
             ui.add_space(4.0);
             ui.label(
-                "Save scenario steps and summary to CSV/text files in the same folder as the executable.",
+                "Save simulation review CSV files to the output folder.",
             );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -703,12 +711,11 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
                         !state.sim_export_requested,
                         egui::Button::new("💾 Export All Scenarios"),
                     )
-                    .on_hover_text(
-                        "Export all scenario steps + summary to simulation_debug/ folder",
-                    )
+                    .on_hover_text("Export all scenario review CSV files to output/ folder")
                     .clicked()
                 {
                     state.sim_export_requested = true;
+                    state.sim_export_selected_index = None;
                     state.sim_export_status = "Exporting…".to_string();
                 }
                 if ui
@@ -719,11 +726,8 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
                     .on_hover_text("Export only the currently selected scenario")
                     .clicked()
                 {
-                    // Use negative index trick: store selected-only flag via a sentinel
-                    // We encode "export selected only" as usize::MAX sentinel in sim_current_step
-                    // Actually: simpler — use a dedicated field. We reuse sim_export_requested
-                    // and pass selected info through sim_export_status prefix.
                     state.sim_export_requested = true;
+                    state.sim_export_selected_index = state.sim_selected_scenario;
                     let sel_id = state
                         .sim_selected_scenario
                         .and_then(|i| state.sim_scenarios.get(i))

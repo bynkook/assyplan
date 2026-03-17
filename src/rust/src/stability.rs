@@ -1562,6 +1562,39 @@ pub fn save_all_tables(
     Ok(())
 }
 
+/// Save development-mode review tables to output directory.
+/// Always saves: dev_node_table.csv, dev_element_table.csv, dev_sequence_table.csv
+/// Saves conditionally: dev_step_table.csv, dev_metric_table.csv (skipped when errors exist)
+pub fn save_development_review_tables(
+    result: &TableGenerationResult,
+    elements: &[StabilityElement],
+    nodes: &[StabilityNode],
+    output_dir: &std::path::Path,
+) -> std::io::Result<Vec<String>> {
+    std::fs::create_dir_all(output_dir)?;
+
+    let node_path = output_dir.join("dev_node_table.csv");
+    let element_path = output_dir.join("dev_element_table.csv");
+    let sequence_path = output_dir.join("dev_sequence_table.csv");
+    let step_path = output_dir.join("dev_step_table.csv");
+    let metric_path = output_dir.join("dev_metric_table.csv");
+
+    save_node_table(nodes, &node_path)?;
+    save_element_table(elements, &element_path)?;
+    save_sequence_table(&result.sequence_table, elements, &sequence_path)?;
+
+    let mut notes: Vec<String> = Vec::new();
+    let has_step_error = result.fatal || !result.errors.is_empty();
+    if has_step_error {
+        notes.push("Step/Metric table export skipped due to step-generation errors.".to_string());
+    } else {
+        save_step_table(&result.step_table, &step_path)?;
+        save_metric_table(&result.step_table, elements, nodes, &metric_path)?;
+    }
+
+    Ok(notes)
+}
+
 /// Get floor column data for UI display
 /// Returns Vec of (floor_level, total_columns) sorted by floor
 pub fn get_floor_column_data(

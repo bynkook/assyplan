@@ -337,8 +337,10 @@ impl AssyPlanApp {
 
         let mut warnings: Vec<String> = Vec::new();
         if let Some(out_dir) = output_dir {
-            if let Err(e) = stability::save_all_tables(&table_result, elements, nodes, &out_dir) {
-                warnings.push(format!("Failed to save tables: {}", e));
+            match stability::save_development_review_tables(&table_result, elements, nodes, &out_dir)
+            {
+                Ok(mut notes) => warnings.append(&mut notes),
+                Err(e) => warnings.push(format!("Failed to save tables: {}", e)),
             }
         }
         if let Some(counter) = &progress_counter {
@@ -1065,7 +1067,11 @@ impl AssyPlanApp {
             .unwrap_or_default();
 
         self.ui_state.sim_scenarios = scenarios;
-        self.ui_state.sim_selected_scenario = best_idx;
+        self.ui_state.sim_selected_scenario = if self.ui_state.sim_scenarios.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
         self.ui_state.sim_running = false;
         self.ui_state.sim_current_step = 1;
         self.ui_state.needs_recalc = false;
@@ -1233,103 +1239,120 @@ impl AssyPlanApp {
         });
     }
 
-    /// Export simulation debug files (all scenarios → simulation_debug/ folder).
-    /// Returns a status message for display in the UI.
-    fn export_simulation_debug(&self) -> String {
-        use std::fmt::Write as FmtWrite;
+    fn resolve_output_dir(&self) -> std::path::PathBuf {
+        if !self.ui_state.file_path.is_empty() {
+            let input_path = std::path::Path::new(&self.ui_state.file_path);
+            if let Some(parent) = input_path.parent() {
+                return parent.join("output");
+            }
+        }
+
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("output")
+    }
+
+    /// Export simulation review files to output folder.
+    /// selected_idx=None exports all scenarios, otherwise exports selected scenario only.
+    fn export_simulation_debug(&self, selected_idx: Option<usize>) -> String {
+        use std::collections::{HashMap, HashSet};
         use std::fs;
         use std::io::Write;
+
+        let Some(grid) = self.sim_grid.as_ref() else {
+            return "❌ No simulation grid to export. Run simulation first.".to_string();
+        };
 
         let scenarios = &self.ui_state.sim_scenarios;
         if scenarios.is_empty() {
             return "❌ No scenarios to export. Run simulation first.".to_string();
         }
 
-        // Determine output directory: next to executable, subfolder "simulation_debug"
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let out_dir = exe_dir.join("simulation_debug");
-
+        let out_dir = self.resolve_output_dir();
         if let Err(e) = fs::create_dir_all(&out_dir) {
             return format!("❌ Failed to create output dir: {}", e);
         }
 
-        let cfg = &self.ui_state.grid_config;
-
-        // ── 1. Summary text file ─────────────────────────────────────────
-        let mut summary = String::new();
-        let _ = writeln!(summary, "AssyPlan Simulation Debug Export");
-        let _ = writeln!(
-            summary,
-            "Generated: {} seconds since UNIX epoch",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        );
-        let _ = writeln!(summary, "");
-        let _ = writeln!(
-            summary,
-            "Grid: {}×{} (nx×ny), {} z-levels, dx={:.0}mm, dy={:.0}mm, dz={:.0}mm",
-            cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz
-        );
-        let _ = writeln!(
-            summary,
-            "Upper-floor threshold: {:.1}%",
-            self.ui_state.upper_floor_threshold * 100.0
-        );
-        let _ = writeln!(summary, "Scenarios: {}", scenarios.len());
-        let _ = writeln!(
-            summary,
-            "Weights: w1(member_count)={:.2}, w2(connectivity)={:.2}, w3(distance)={:.2}",
-            self.ui_state.sim_weights.0, self.ui_state.sim_weights.1, self.ui_state.sim_weights.2
-        );
-        let _ = writeln!(summary, "");
-        let _ = writeln!(
-            summary,
-            "{:<6} {:<8} {:<10} {:<12} {:<12} {:<20}",
-            "ID", "Steps", "Members", "Avg/Step", "Connectivity", "Termination"
-        );
-        let _ = writeln!(summary, "{}", "-".repeat(70));
-        for s in scenarios {
-            let _ = writeln!(
-                summary,
-                "{:<6} {:<8} {:<10} {:<12.2} {:<12.2} {:<20}",
-                s.id,
-                s.metrics.total_steps,
-                s.metrics.total_members_installed,
-                s.metrics.avg_members_per_step,
-                s.metrics.avg_connectivity,
-                format!("{}", s.metrics.termination_reason)
-            );
-        }
-
-        let summary_path = out_dir.join("sim_summary.txt");
-        let mut summary_errors = 0usize;
-        if let Ok(mut f) = fs::File::create(&summary_path) {
-            if f.write_all(summary.as_bytes()).is_err() {
-                summary_errors += 1;
+        let mut export_indices: Vec<usize> = if let Some(idx) = selected_idx {
+            if idx >= scenarios.len() {
+                return "❌ Selected scenario is out of range.".to_string();
             }
+            vec![idx]
         } else {
-            summary_errors += 1;
+            (0..scenarios.len()).collect()
+        };
+        export_indices.sort_unstable();
+
+        // Base tables (once)
+        let node_path = out_dir.join("sim_node_table.csv");
+        let element_path = out_dir.join("sim_element_table.csv");
+        if let Err(e) = stability::save_node_table(&grid.nodes, &node_path) {
+            return format!("❌ Failed to write sim_node_table.csv: {}", e);
+        }
+        if let Err(e) = stability::save_element_table(&grid.elements, &element_path) {
+            return format!("❌ Failed to write sim_element_table.csv: {}", e);
         }
 
-        // ── 2. Per-scenario CSV files ────────────────────────────────────
-        let mut csv_errors = 0usize;
-        for scenario in scenarios {
-            let csv_path = out_dir.join(format!("sim_scenario_{:04}_steps.csv", scenario.id));
-            let mut csv = String::new();
-            let _ = writeln!(csv, "step,workfront_ids,floor,member_count,local_step_count,element_ids");
+        let element_by_id: HashMap<i32, &stability::StabilityElement> =
+            grid.elements.iter().map(|e| (e.id, e)).collect();
+
+        let mut errors = 0usize;
+
+        for idx in export_indices {
+            let Some(scenario) = scenarios.get(idx) else {
+                continue;
+            };
+            let scene = scenario.id;
+
+            let seq_path = out_dir.join(format!("sim_sequence_table_scene_{:04}.csv", scene));
+            let step_path = out_dir.join(format!("sim_step_table.csv_scene_{:04}.csv", scene));
+            let metric_path = out_dir.join(format!("sim_metric_table.csv_scene_{:04}.csv", scene));
+
+            // sequence table
+            let mut seq_csv = String::new();
+            seq_csv.push_str("sequence_order,workfront_id,element_id,member_type,step\n");
+            let mut seq_rows: Vec<(usize, i32, i32, String, usize)> = Vec::new();
             for (step_idx, step) in scenario.steps.iter().enumerate() {
-                let ids_str = step
-                    .element_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
-                let wf_ids_str = if step.local_steps.len() > 1 {
+                for seq in &step.sequences {
+                    let wf_id = step
+                        .local_steps
+                        .iter()
+                        .find(|ls| ls.element_ids.contains(&seq.element_id))
+                        .map(|ls| ls.workfront_id)
+                        .unwrap_or(step.workfront_id);
+                    let member_type = element_by_id
+                        .get(&seq.element_id)
+                        .map(|e| e.member_type.clone())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    seq_rows.push((
+                        seq.sequence_number,
+                        wf_id,
+                        seq.element_id,
+                        member_type,
+                        step_idx + 1,
+                    ));
+                }
+            }
+            seq_rows.sort_by_key(|row| (row.0, row.2));
+            for (seq_no, wf_id, elem_id, member_type, step_no) in seq_rows {
+                seq_csv.push_str(&format!(
+                    "{},{},{},{},{}\n",
+                    seq_no, wf_id, elem_id, member_type, step_no
+                ));
+            }
+
+            if fs::File::create(&seq_path)
+                .and_then(|mut f| f.write_all(seq_csv.as_bytes()))
+                .is_err()
+            {
+                errors += 1;
+            }
+
+            // step table
+            let mut step_csv = String::new();
+            step_csv.push_str("workfront_id,step,pattern,floor,element_count,element_ids\n");
+            for (step_idx, step) in scenario.steps.iter().enumerate() {
+                let wf_ids = if step.local_steps.len() > 1 {
                     step.local_steps
                         .iter()
                         .map(|ls| ls.workfront_id.to_string())
@@ -1338,36 +1361,110 @@ impl AssyPlanApp {
                 } else {
                     step.workfront_id.to_string()
                 };
-                let _ = writeln!(
-                    csv,
-                    "{},{},{},{},{},{}",
-                    step_idx + 1, // 1-indexed
-                    wf_ids_str,
+                let ids = step
+                    .element_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                step_csv.push_str(&format!(
+                    "\"{}\",{},\"{}\",{},{},\"{}\"\n",
+                    wf_ids,
+                    step_idx + 1,
+                    step.pattern,
                     step.floor,
                     step.element_ids.len(),
-                    step.local_steps.len(),
-                    ids_str
-                );
+                    ids
+                ));
             }
-            if let Ok(mut f) = fs::File::create(&csv_path) {
-                if f.write_all(csv.as_bytes()).is_err() {
-                    csv_errors += 1;
+
+            if fs::File::create(&step_path)
+                .and_then(|mut f| f.write_all(step_csv.as_bytes()))
+                .is_err()
+            {
+                errors += 1;
+            }
+
+            // metric table (cumulative)
+            let mut metric_csv = String::new();
+            let mut floor_totals: HashMap<i32, usize> = HashMap::new();
+            for e in &grid.elements {
+                if e.member_type == "Column" {
+                    if let Some(floor) = grid.element_floor_by_id.get(&e.id) {
+                        *floor_totals.entry(*floor).or_insert(0) += 1;
+                    }
                 }
-            } else {
-                csv_errors += 1;
+            }
+            let mut floors: Vec<i32> = floor_totals.keys().cloned().collect();
+            floors.sort_unstable();
+
+            metric_csv.push_str("step,cumulative_elements,cumulative_columns,cumulative_girders");
+            for floor in &floors {
+                metric_csv.push_str(&format!(",floor_{}_columns,floor_{}_rate", floor, floor));
+            }
+            metric_csv.push('\n');
+
+            let mut installed_ids: HashSet<i32> = HashSet::new();
+            for (step_idx, step) in scenario.steps.iter().enumerate() {
+                for id in &step.element_ids {
+                    installed_ids.insert(*id);
+                }
+
+                let mut total_columns = 0usize;
+                let mut total_girders = 0usize;
+                let mut installed_floor_columns: HashMap<i32, usize> = HashMap::new();
+                for id in &installed_ids {
+                    if let Some(elem) = element_by_id.get(id) {
+                        if elem.member_type == "Column" {
+                            total_columns += 1;
+                            if let Some(floor) = grid.element_floor_by_id.get(id) {
+                                *installed_floor_columns.entry(*floor).or_insert(0) += 1;
+                            }
+                        } else if elem.member_type == "Girder" {
+                            total_girders += 1;
+                        }
+                    }
+                }
+                let total_elements = total_columns + total_girders;
+
+                metric_csv.push_str(&format!(
+                    "{},{},{},{}",
+                    step_idx + 1,
+                    total_elements,
+                    total_columns,
+                    total_girders
+                ));
+                for floor in &floors {
+                    let installed = installed_floor_columns.get(floor).copied().unwrap_or(0);
+                    let total = floor_totals.get(floor).copied().unwrap_or(0);
+                    let rate = if total > 0 {
+                        (installed as f64 / total as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    metric_csv.push_str(&format!(",{},{:.1}", installed, rate));
+                }
+                metric_csv.push('\n');
+            }
+
+            if fs::File::create(&metric_path)
+                .and_then(|mut f| f.write_all(metric_csv.as_bytes()))
+                .is_err()
+            {
+                errors += 1;
             }
         }
 
-        if summary_errors + csv_errors == 0 {
-            format!(
-                "✅ Exported {} scenario(s) + summary to: {}",
-                scenarios.len(),
-                out_dir.display()
-            )
+        if errors == 0 {
+            if selected_idx.is_some() {
+                format!("✅ Exported selected scenario files to: {}", out_dir.display())
+            } else {
+                format!("✅ Exported all scenario files to: {}", out_dir.display())
+            }
         } else {
             format!(
                 "❌ Export completed with {} error(s). Output: {}",
-                summary_errors + csv_errors,
+                errors,
                 out_dir.display()
             )
         }
@@ -1844,7 +1941,8 @@ impl eframe::App for AssyPlanApp {
         // Handle pending export request (outside UI builder to avoid borrow conflict)
         if self.ui_state.sim_export_requested {
             self.ui_state.sim_export_requested = false;
-            let status = self.export_simulation_debug();
+            let selected = self.ui_state.sim_export_selected_index.take();
+            let status = self.export_simulation_debug(selected);
             self.ui_state.sim_export_status = status;
         }
 
@@ -1869,6 +1967,11 @@ impl eframe::App for AssyPlanApp {
                 "Settings" => {
                     ui.heading("Settings");
                     ui.separator();
+
+                    egui::ScrollArea::vertical()
+                        .id_source("settings_tab_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
 
                     ui.label("Show Model Info:");
                     ui.indent("model_info_opts", |ui| {
@@ -1937,6 +2040,7 @@ impl eframe::App for AssyPlanApp {
                             ));
                         });
                     }
+                        });
                 }
                 "View" => {
                     // Simulation mode has its own view (grid plan), independent of render_data

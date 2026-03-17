@@ -378,6 +378,8 @@ pub struct UiState {
     pub sim_scenario_count: usize,
     /// Flag: export debug files requested (set by UI button, consumed by app update loop)
     pub sim_export_requested: bool,
+    /// Optional selected scenario index for export. None means export all scenarios.
+    pub sim_export_selected_index: Option<usize>,
     /// Last export status message (shown in UI after export)
     pub sim_export_status: String,
     /// Navigation mode in sim 3D view: true = Sequence mode, false = Step mode
@@ -436,6 +438,7 @@ impl UiState {
             sim_running: false,
             sim_scenario_count: 2,
             sim_export_requested: false,
+            sim_export_selected_index: None,
             sim_export_status: String::new(),
             sim_nav_sequence_mode: false,
             sim_current_sequence: 1,
@@ -484,6 +487,7 @@ impl UiState {
         self.sim_play_timer = 0.0;
         self.sim_running = false;
         self.sim_export_requested = false;
+        self.sim_export_selected_index = None;
         self.sim_export_status.clear();
         self.sim_nav_sequence_mode = false;
         self.sim_current_sequence = 1;
