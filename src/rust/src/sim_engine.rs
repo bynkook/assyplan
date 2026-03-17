@@ -376,17 +376,30 @@ fn node_set_for_elements(element_ids: &HashSet<i32>, grid: &SimGrid) -> HashSet<
         .collect()
 }
 
-fn local_xy_positions(
+fn local_xy_positions_by_floor(
     element_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
     grid: &SimGrid,
-) -> HashSet<(usize, usize)> {
-    element_ids
-        .iter()
-        .filter_map(|eid| get_element(grid, *eid))
-        .flat_map(|e| [e.node_i_id, e.node_j_id])
-        .filter_map(|node_id| node_pos.get(&node_id).map(|&(xi, yi, _)| (xi, yi)))
-        .collect()
+) -> HashMap<i32, HashSet<(usize, usize)>> {
+    let mut by_floor: HashMap<i32, HashSet<(usize, usize)>> = HashMap::new();
+
+    for eid in element_ids {
+        let Some(floor) = grid.element_floor_by_id.get(eid).copied() else {
+            continue;
+        };
+        let Some(elem) = get_element(grid, *eid) else {
+            continue;
+        };
+
+        let positions = by_floor.entry(floor).or_default();
+        for node_id in [elem.node_i_id, elem.node_j_id] {
+            if let Some(&(xi, yi, _)) = node_pos.get(&node_id) {
+                positions.insert((xi, yi));
+            }
+        }
+    }
+
+    by_floor
 }
 
 fn min_xy_distance_to_local_positions(
@@ -407,8 +420,7 @@ fn min_xy_distance_to_local_positions(
             .unwrap_or(f64::MAX);
     }
 
-    // Distance to existing local positions
-    let local_dist = candidate_nodes
+    candidate_nodes
         .iter()
         .filter_map(|node_id| node_pos.get(node_id))
         .map(|&(xi, yi, _)| {
@@ -421,20 +433,7 @@ fn min_xy_distance_to_local_positions(
                 .unwrap_or(f64::MAX)
         })
         .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(f64::MAX);
-
-    // Always blend workfront origin as virtual anchor — ensures upper floors
-    // still prefer candidates near the workfront (x,y) start position.
-    let wf_dist = candidate_nodes
-        .iter()
-        .filter_map(|node_id| node_pos.get(node_id))
-        .map(|&(xi, yi, _)| {
-            ((xi as i32 - wf.grid_x as i32).abs() + (yi as i32 - wf.grid_y as i32).abs()) as f64
-        })
-        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(f64::MAX);
-
-    local_dist.min(wf_dist)
+        .unwrap_or(f64::MAX)
 }
 
 #[cfg(test)]
@@ -681,8 +680,8 @@ fn collect_single_candidates_legacy(
     priority_floor: Option<i32>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
-    let local_positions = local_xy_positions(local_element_ids, node_pos, grid);
-    let local_seeded = !local_positions.is_empty();
+    let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
+    let empty_positions: HashSet<(usize, usize)> = HashSet::new();
     let mut result: Vec<SingleCandidate> = Vec::new();
 
     for elem in &grid.elements {
@@ -697,11 +696,27 @@ fn collect_single_candidates_legacy(
             }
         }
 
+        let local_positions = local_positions_by_floor
+            .get(&floor)
+            .unwrap_or(&empty_positions);
+        let local_seeded = !local_positions.is_empty();
+
         let candidate_nodes = [elem.node_i_id, elem.node_j_id];
         let dist = min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, wf);
 
         if !dist.is_finite() {
             continue;
+        }
+
+        // If this workfront has no local footprint yet on the target floor,
+        // force the first seed to start from the workfront anchor column.
+        if !local_seeded && elem.member_type == "Column" {
+            let Some(&(xi, yi, _)) = node_pos.get(&elem.node_i_id) else {
+                continue;
+            };
+            if xi != wf.grid_x || yi != wf.grid_y {
+                continue;
+            }
         }
 
         if local_seeded && dist > 1.0 {
@@ -748,8 +763,8 @@ fn collect_single_candidates_optimized(
     priority_floor: Option<i32>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
-    let local_positions = local_xy_positions(local_element_ids, node_pos, grid);
-    let local_seeded = !local_positions.is_empty();
+    let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
+    let empty_positions: HashSet<(usize, usize)> = HashSet::new();
     let mut result: Vec<SingleCandidate> = Vec::new();
 
     let candidate_ids: &[i32] = if let Some(priority) = priority_floor {
@@ -777,12 +792,28 @@ fn collect_single_candidates_optimized(
             }
         }
 
+        let local_positions = local_positions_by_floor
+            .get(&floor)
+            .unwrap_or(&empty_positions);
+        let local_seeded = !local_positions.is_empty();
+
         let candidate_nodes = [elem.node_i_id, elem.node_j_id];
         let dist =
-            min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, wf);
+            min_xy_distance_to_local_positions(&candidate_nodes, node_pos, local_positions, wf);
 
         if !dist.is_finite() {
             continue;
+        }
+
+        // If this workfront has no local footprint yet on the target floor,
+        // force the first seed to start from the workfront anchor column.
+        if !local_seeded && elem.member_type == "Column" {
+            let Some(&(xi, yi, _)) = node_pos.get(&elem.node_i_id) else {
+                continue;
+            };
+            if xi != wf.grid_x || yi != wf.grid_y {
+                continue;
+            }
         }
 
         if local_seeded && dist > 1.0 {

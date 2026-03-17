@@ -9,7 +9,7 @@ use assyplan::stability::{build_step_elements_map, generate_all_tables, get_floo
 // Sim fingerprint changed after workfront anchor fix:
 // min_xy_distance now always blends workfront (x,y) origin so upper floors
 // prefer candidates near the workfront start position.
-const EXPECTED_SIM_FINGERPRINT_V3: u64 = 12439245621222632079;
+const EXPECTED_SIM_FINGERPRINT_V3: u64 = 11076596406045293265;
 // Dev fingerprint changed after canonical Dev step generation update
 // (local-step completion + global-cycle merge semantics).
 const EXPECTED_DEV_FINGERPRINT_V2: u64 = 7561072595717411788;
