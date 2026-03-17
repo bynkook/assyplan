@@ -117,10 +117,29 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
   - Phase 2에서는 **시각화(Chart 3)만** — 실제 시공 순서 제약은 Phase 3에서 구현
 
 ### Phase 3 (Simulation Mode)
+
+#### ⚠️ 핵심 용어 정의 (Sequence vs Step) — 반드시 숙지
+
+| 용어 | 정의 | 설명 |
+|------|------|------|
+| **Sequence** | **단위 시간 (Time Unit)** | 각 Sequence에서 N개 workfront가 각각 1개씩 부재를 **동시에** 설치. Sequence 1, 2, 3... = 시간 흐름. **N workfront = N개 부재/Sequence** |
+| **Step** | **구조 안정 조건을 만족하는 시공 완료 부재 그룹** | 패턴 기반 (Col, ColCol, ColGirder 등). 여러 Sequence의 결과물이 모여 하나의 안정적인 Step을 구성 |
+
+**예시** (workfront 2개 = 작업조 2조):
+```
+Sequence 1: WF-A → Col1, WF-B → Col2  (동시 2개 설치)
+Sequence 2: WF-A → Col3, WF-B → Girder1  (동시 2개 설치)
+Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
+...
+마지막 Sequence: 남은 부재 1개 → 1개만 설치
+종료: 모든 부재 설치 완료 → 0개
+```
+
+#### 기술 구현
 - **sim_grid.rs**: 격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성
 - **sim_engine.rs**: Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성
-  - `SimSequence`: 개별 부재 단위 (1-indexed global sequence_number)
-  - `SimStep`: 패턴 기반 설치 단위 (`pattern` 필드 포함)
+  - `SimSequence`: 단위 시간에 설치되는 부재 기록 (1-indexed global sequence_number)
+  - `SimStep`: 구조 안정 조건을 만족하는 패턴 기반 부재 그룹 (`pattern` 필드 포함)
   - 허용 패턴: `Col`, `Girder`, `ColCol`, `ColGirder`, `GirderGirder`, `ColColGirder`, `ColGirderCol`, `ColGirderGirder`, `ColColGirderGirder`, `ColColGirderColGirder`
   - **금지 패턴**: `Col→Col→Col`, `Col→Col→Col→Girder` (3개 연속 Column 금지)
 - **upper_floor_threshold**: `sim_engine.rs`에서 `threshold * 100.0`으로 변환 후 `stability.rs`에 전달
@@ -156,8 +175,8 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 **중요 패턴**: `floor_colors` 배열은 `render_result_tab_inner` 함수 스코프에 정의됨 (Chart 2/3 공유). 절대 chart 클로저 안에 넣지 말 것.
 
 **Phase 3 신규 타입** (ui.rs):
-- `SimSequence { element_id: i32, sequence_number: usize }` — 개별 부재 단위 (1-indexed globally)
-- `SimStep { workfront_id, element_ids, sequences: Vec<SimSequence>, floor, pattern: String }` — 패턴 기반 설치 단위
+- `SimSequence { element_id: i32, sequence_number: usize }` — 단위 시간에 설치되는 부재 (1-indexed globally)
+- `SimStep { workfront_id, element_ids, sequences: Vec<SimSequence>, floor, pattern: String }` — 구조 안정 조건을 만족하는 패턴 기반 부재 그룹
 - `SimStep::from_elements(workfront_id, element_ids, floor, pattern, start_seq)` — 헬퍼
 
 ### `src/rust/src/lib.rs`

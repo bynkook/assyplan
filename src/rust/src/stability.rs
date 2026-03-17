@@ -709,14 +709,6 @@ fn step_is_complete(
         return false;
     }
 
-    // RULE: Maximum 5 elements per step (3 columns + 2 girders = minimum assembly unit)
-    // Per devplandoc.md line 188: "1개의 workfront 의 1개의 Step 에서 새로 생성되는
-    // 부재의 갯수는 최소 단위 조립 앗세이의 총 부재 갯수 합계(기둥 3개, 거더 2개)를 초과할 수 없다"
-    const MAX_ELEMENTS_PER_STEP: usize = 5;
-    if current_step_members.len() >= MAX_ELEMENTS_PER_STEP {
-        return true; // Force step completion at 5 elements
-    }
-
     // Get current step elements
     let current_elements: Vec<StabilityElement> = current_step_members
         .iter()

@@ -607,6 +607,10 @@ impl AssyPlanApp {
                 self.view_state = graphics::ViewState::new();
                 self.view_state.set_view_mode(graphics::ViewMode::Orbit3D);
 
+                // Always switch to Development mode when a file is opened
+                self.ui_state.display_mode = graphics::DisplayMode::Model;
+                self.ui_state.mode = "Development".to_string();
+
                 // Ensure fit is recalculated for the new data
                 if let Some(ref mut data) = self.render_data {
                     data.invalidate_fit();
@@ -793,17 +797,14 @@ impl AssyPlanApp {
         let threshold = self.ui_state.upper_floor_threshold;
         let count = self.ui_state.sim_scenario_count;
 
-        // Ensure at least one workfront
-        let workfronts = if workfronts.is_empty() {
-            // Default: corner (0,0)
-            vec![graphics::ui::SimWorkfront {
-                id: 1,
-                grid_x: 0,
-                grid_y: 0,
-            }]
-        } else {
-            workfronts
-        };
+        // Validate: at least one workfront must be specified by user
+        if workfronts.is_empty() {
+            self.ui_state.status_message =
+                "Error: No workfronts specified. Add at least one workfront in Settings."
+                    .to_string();
+            self.ui_state.needs_recalc = false;
+            return;
+        }
 
         self.ui_state.sim_running = true;
         self.ui_state.status_message = format!(
@@ -960,7 +961,7 @@ impl AssyPlanApp {
         for scenario in scenarios {
             let csv_path = out_dir.join(format!("scenario_{:04}_steps.csv", scenario.id));
             let mut csv = String::new();
-            let _ = writeln!(csv, "step,workfront_id,floor,member_count,element_ids");
+            let _ = writeln!(csv, "step,workfront_ids,floor,member_count,local_step_count,element_ids");
             for (step_idx, step) in scenario.steps.iter().enumerate() {
                 let ids_str = step
                     .element_ids
@@ -968,13 +969,23 @@ impl AssyPlanApp {
                     .map(|id| id.to_string())
                     .collect::<Vec<_>>()
                     .join(";");
+                let wf_ids_str = if step.local_steps.len() > 1 {
+                    step.local_steps
+                        .iter()
+                        .map(|ls| ls.workfront_id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(";")
+                } else {
+                    step.workfront_id.to_string()
+                };
                 let _ = writeln!(
                     csv,
-                    "{},{},{},{},{}",
+                    "{},{},{},{},{},{}",
                     step_idx + 1, // 1-indexed
-                    step.workfront_id,
+                    wf_ids_str,
                     step.floor,
                     step.element_ids.len(),
+                    step.local_steps.len(),
                     ids_str
                 );
             }
@@ -1521,14 +1532,27 @@ impl eframe::App for AssyPlanApp {
                                             let ms = scenario.steps.len();
                                             let step_disp = self.ui_state.sim_current_step.min(ms).max(1);
                                             let step_info = scenario.steps.get(step_disp - 1).map(|s| {
-                                                format!(
-                                                    "WF {}  •  Floor {}  •  {} member(s): {:?}  •  Pattern: {}",
-                                                    s.workfront_id,
-                                                    s.floor,
-                                                    s.element_ids.len(),
-                                                    s.element_ids,
-                                                    s.pattern,
-                                                )
+                                                if s.local_steps.len() > 1 {
+                                                    let wf_detail = s.local_steps.iter()
+                                                        .map(|ls| format!("WF {}: {} ({})", ls.workfront_id, ls.element_ids.len(), ls.pattern))
+                                                        .collect::<Vec<_>>()
+                                                        .join(", ");
+                                                    format!(
+                                                        "[{}]  •  {} member(s): {:?}",
+                                                        wf_detail,
+                                                        s.element_ids.len(),
+                                                        s.element_ids,
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "WF {}  •  Floor {}  •  {} member(s): {:?}  •  Pattern: {}",
+                                                        s.workfront_id,
+                                                        s.floor,
+                                                        s.element_ids.len(),
+                                                        s.element_ids,
+                                                        s.pattern,
+                                                    )
+                                                }
                                             });
                                             // Compute max sequence number across all steps
                                             let max_seq: usize = scenario.steps.iter()
@@ -1538,13 +1562,35 @@ impl eframe::App for AssyPlanApp {
                                                 .unwrap_or(0);
                                             // Info for current sequence position
                                             let cur_seq = self.ui_state.sim_current_sequence;
-                                            let seq_info = scenario.steps.iter()
-                                                .flat_map(|s| s.sequences.iter())
-                                                .find(|seq| seq.sequence_number == cur_seq)
-                                                .map(|seq| format!(
-                                                    "Seq {} / {}  •  Element #{}",
-                                                    cur_seq, max_seq, seq.element_id
-                                                ));
+                                            let current_seq_entries: Vec<(i32, i32, i32)> = scenario.steps.iter()
+                                                .flat_map(|step| {
+                                                    step.sequences.iter().filter_map(move |seq| {
+                                                        if seq.sequence_number == cur_seq {
+                                                            Some((step.workfront_id, step.floor, seq.element_id))
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                })
+                                                .collect();
+                                            let seq_info = if current_seq_entries.is_empty() {
+                                                None
+                                            } else {
+                                                let detail = current_seq_entries
+                                                    .iter()
+                                                    .map(|(wf_id, floor, element_id)| {
+                                                        format!("WF {}: E#{} (F{})", wf_id, element_id, floor)
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ");
+                                                Some(format!(
+                                                    "Seq {} / {}  •  {} install(s)  •  {}",
+                                                    cur_seq,
+                                                    max_seq,
+                                                    current_seq_entries.len(),
+                                                    detail
+                                                ))
+                                            };
                                             (ms, step_info, max_seq, seq_info)
                                         })
                                         .unwrap_or((0, None, 0, None))

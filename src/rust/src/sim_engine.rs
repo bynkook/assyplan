@@ -9,12 +9,69 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 
 use crate::graphics::ui::{
-    ScenarioMetrics, SimScenario, SimSequence, SimStep, SimWorkfront, TerminationReason,
+    LocalStep, ScenarioMetrics, SimScenario, SimSequence, SimStep, SimWorkfront, TerminationReason,
 };
 use crate::sim_grid::SimGrid;
 use crate::stability::{
     has_minimum_assembly, validate_column_support, validate_girder_support, StabilityElement,
 };
+
+#[derive(Clone, Debug, Default)]
+struct WorkfrontState {
+    owned_ids: HashSet<i32>,
+    buffer_sequences: Vec<SimSequence>,
+    planned_pattern: Vec<i32>,
+}
+
+impl WorkfrontState {
+    fn buffer_element_ids(&self) -> Vec<i32> {
+        self.buffer_sequences.iter().map(|seq| seq.element_id).collect()
+    }
+
+    fn all_local_ids(&self) -> HashSet<i32> {
+        let mut ids = self.owned_ids.clone();
+        ids.extend(self.buffer_sequences.iter().map(|seq| seq.element_id));
+        ids
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CandidateTypeMask {
+    allow_column: bool,
+    allow_girder: bool,
+}
+
+impl CandidateTypeMask {
+    const COLUMN_ONLY: Self = Self {
+        allow_column: true,
+        allow_girder: false,
+    };
+
+    const GIRDER_ONLY: Self = Self {
+        allow_column: false,
+        allow_girder: true,
+    };
+
+    const BOTH: Self = Self {
+        allow_column: true,
+        allow_girder: true,
+    };
+
+    fn allows(self, is_column_candidate: bool) -> bool {
+        if is_column_candidate {
+            self.allow_column
+        } else {
+            self.allow_girder
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BufferDecision {
+    Incomplete(CandidateTypeMask),
+    Complete(PatternType),
+    Invalid,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PatternType {
@@ -25,6 +82,7 @@ enum PatternType {
     GirderGirder,
     ColColGirder,
     ColGirderCol,
+    ColGirderColGirder,
     ColGirderGirder,
     ColColGirderGirder,
     ColColGirderColGirder,
@@ -41,6 +99,7 @@ impl PatternType {
             Self::GirderGirder => "GirderGirder",
             Self::ColColGirder => "ColColGirder",
             Self::ColGirderCol => "ColGirderCol",
+            Self::ColGirderColGirder => "ColGirderColGirder",
             Self::ColGirderGirder => "ColGirderGirder",
             Self::ColColGirderGirder => "ColColGirderGirder",
             Self::ColColGirderColGirder => "ColColGirderColGirder",
@@ -128,6 +187,182 @@ fn is_column(grid: &SimGrid, element_id: i32) -> bool {
         .unwrap_or(false)
 }
 
+fn classify_buffer(
+    buffer_element_ids: &[i32],
+    grid: &SimGrid,
+    has_stable_structure: bool,
+) -> BufferDecision {
+    let signature: String = buffer_element_ids
+        .iter()
+        .map(|eid| if is_column(grid, *eid) { 'C' } else { 'G' })
+        .collect();
+
+    match signature.as_str() {
+        "" => {
+            if has_stable_structure {
+                BufferDecision::Incomplete(CandidateTypeMask::BOTH)
+            } else {
+                BufferDecision::Incomplete(CandidateTypeMask::COLUMN_ONLY)
+            }
+        }
+        "G" => {
+            if has_stable_structure {
+                BufferDecision::Complete(PatternType::Girder)
+            } else {
+                BufferDecision::Invalid
+            }
+        }
+        "C" => {
+            if has_stable_structure {
+                BufferDecision::Incomplete(CandidateTypeMask::BOTH)
+            } else {
+                BufferDecision::Incomplete(CandidateTypeMask::COLUMN_ONLY)
+            }
+        }
+        "CC" => BufferDecision::Incomplete(CandidateTypeMask::GIRDER_ONLY),
+        "CCG" => BufferDecision::Incomplete(CandidateTypeMask::BOTH),
+        "CCGC" => BufferDecision::Incomplete(CandidateTypeMask::GIRDER_ONLY),
+        "CCGG" => BufferDecision::Complete(PatternType::ColColGirderGirder),
+        "CCGCG" => {
+            if has_stable_structure {
+                BufferDecision::Complete(PatternType::ColColGirderColGirder)
+            } else {
+                BufferDecision::Complete(PatternType::Bootstrap)
+            }
+        }
+        "CG" => BufferDecision::Complete(PatternType::ColGirder),
+        "CGC" => BufferDecision::Incomplete(CandidateTypeMask::GIRDER_ONLY),
+        "CGCG" => BufferDecision::Complete(PatternType::ColGirderColGirder),
+        "CGG" => BufferDecision::Complete(PatternType::ColGirderGirder),
+        "GG" => BufferDecision::Invalid,
+        "CCC" | "CCCG" => BufferDecision::Invalid,
+        _ => BufferDecision::Invalid,
+    }
+}
+
+fn is_valid_buffer_transition(
+    current_buffer: &[i32],
+    candidate_id: i32,
+    grid: &SimGrid,
+    stable_ids: &HashSet<i32>,
+) -> bool {
+    let mut next_buffer = current_buffer.to_vec();
+    next_buffer.push(candidate_id);
+
+    match classify_buffer(&next_buffer, grid, !stable_ids.is_empty()) {
+        BufferDecision::Invalid => false,
+        BufferDecision::Incomplete(_) => true,
+        BufferDecision::Complete(_) => check_bundle_stability(&next_buffer, grid, stable_ids),
+    }
+}
+
+fn reorder_bootstrap_pattern(
+    element_ids: &[i32],
+    grid: &SimGrid,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    wf: &SimWorkfront,
+) -> Vec<i32> {
+    let columns: Vec<i32> = element_ids
+        .iter()
+        .copied()
+        .filter(|eid| is_column(grid, *eid))
+        .collect();
+    let girders: Vec<i32> = element_ids
+        .iter()
+        .copied()
+        .filter(|eid| !is_column(grid, *eid))
+        .collect();
+
+    if columns.len() != 3 || girders.len() != 2 {
+        return element_ids.to_vec();
+    }
+
+    let Some(g1) = get_element(grid, girders[0]) else {
+        return element_ids.to_vec();
+    };
+    let Some(g2) = get_element(grid, girders[1]) else {
+        return element_ids.to_vec();
+    };
+
+    let shared_node = [g1.node_i_id, g1.node_j_id]
+        .into_iter()
+        .find(|node_id| *node_id == g2.node_i_id || *node_id == g2.node_j_id);
+
+    let Some(shared_node) = shared_node else {
+        return element_ids.to_vec();
+    };
+
+    let mut central_col: Option<i32> = None;
+    let mut outer_cols: Vec<i32> = Vec::new();
+    for col_id in columns {
+        if let Some(col) = get_element(grid, col_id) {
+            if col.node_j_id == shared_node {
+                central_col = Some(col_id);
+            } else {
+                outer_cols.push(col_id);
+            }
+        }
+    }
+
+    let Some(central_col) = central_col else {
+        return element_ids.to_vec();
+    };
+    if outer_cols.len() != 2 {
+        return element_ids.to_vec();
+    }
+
+    let column_distance = |col_id: i32| -> i32 {
+        get_element(grid, col_id)
+            .and_then(|col| node_pos.get(&col.node_i_id))
+            .map(|&(xi, yi, _)| {
+                (xi as i32 - wf.grid_x as i32).abs() + (yi as i32 - wf.grid_y as i32).abs()
+            })
+            .unwrap_or(i32::MAX)
+    };
+
+    let mut ordered_outer = outer_cols;
+    ordered_outer.sort_by_key(|col_id| column_distance(*col_id));
+
+    let first_col = if column_distance(central_col) <= column_distance(ordered_outer[0]) {
+        central_col
+    } else {
+        ordered_outer[0]
+    };
+
+    let remaining_outer: Vec<i32> = ordered_outer
+        .iter()
+        .copied()
+        .filter(|col_id| *col_id != first_col)
+        .collect();
+
+    let second_col = if first_col == central_col {
+        ordered_outer[0]
+    } else {
+        central_col
+    };
+
+    let third_col = if first_col == central_col {
+        ordered_outer[1]
+    } else {
+        remaining_outer[0]
+    };
+
+    let girder_between = |col_a: i32, col_b: i32| -> Option<i32> {
+        let node_a = get_element(grid, col_a)?.node_j_id;
+        let node_b = get_element(grid, col_b)?.node_j_id;
+        grid.girder_between(node_a, node_b)
+    };
+
+    let Some(first_girder) = girder_between(first_col, second_col) else {
+        return element_ids.to_vec();
+    };
+    let Some(second_girder) = girder_between(central_col, third_col) else {
+        return element_ids.to_vec();
+    };
+
+    vec![first_col, second_col, first_girder, third_col, second_girder]
+}
+
 fn other_node(element: &StabilityElement, node_id: i32) -> Option<i32> {
     if element.node_i_id == node_id {
         Some(element.node_j_id)
@@ -206,10 +441,72 @@ fn count_shared_nodes(
     cand_nodes.intersection(installed_nodes).count()
 }
 
+fn node_set_for_elements(element_ids: &HashSet<i32>, grid: &SimGrid) -> HashSet<i32> {
+    element_ids
+        .iter()
+        .filter_map(|eid| get_element(grid, *eid))
+        .flat_map(|e| [e.node_i_id, e.node_j_id])
+        .collect()
+}
+
+fn local_xy_positions(
+    element_ids: &HashSet<i32>,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    grid: &SimGrid,
+) -> HashSet<(usize, usize)> {
+    element_ids
+        .iter()
+        .filter_map(|eid| get_element(grid, *eid))
+        .flat_map(|e| [e.node_i_id, e.node_j_id])
+        .filter_map(|node_id| node_pos.get(&node_id).map(|&(xi, yi, _)| (xi, yi)))
+        .collect()
+}
+
+fn min_xy_distance_to_local_positions(
+    candidate_nodes: &[i32],
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+    local_positions: &HashSet<(usize, usize)>,
+    wf: &SimWorkfront,
+) -> f64 {
+    if local_positions.is_empty() {
+        return candidate_nodes
+            .iter()
+            .filter_map(|node_id| node_pos.get(node_id))
+            .map(|&(xi, yi, _)| {
+                ((xi as i32 - wf.grid_x as i32).abs() + (yi as i32 - wf.grid_y as i32).abs())
+                    as f64
+            })
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(f64::MAX);
+    }
+
+    candidate_nodes
+        .iter()
+        .filter_map(|node_id| node_pos.get(node_id))
+        .map(|&(xi, yi, _)| {
+            local_positions
+                .iter()
+                .map(|&(lx, ly)| {
+                    ((xi as i32 - lx as i32).abs() + (yi as i32 - ly as i32).abs()) as f64
+                })
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(f64::MAX)
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(f64::MAX)
+}
+
 fn check_single_stability(element_id: i32, grid: &SimGrid, installed_ids: &HashSet<i32>) -> bool {
     let Some(elem) = get_element(grid, element_id) else {
         return false;
     };
+
+    // NOTE: Connectivity (proximity to construction front) is handled by collect_single_candidates,
+    // which only returns elements adjacent to installed nodes. Here we only check structural stability.
+    // - Ground floor columns (z=0 base): Always stable (on ground)
+    // - Upper floor columns: Need support from below (handled by validate_column_support)
+    // - Girders: Need two supporting columns (handled by validate_girder_support)
+
     if elem.member_type == "Column" {
         validate_column_support(elem, &grid.nodes, &grid.elements, installed_ids)
     } else {
@@ -222,60 +519,187 @@ fn check_bundle_stability(
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
 ) -> bool {
-    let mut combined: HashSet<i32> = installed_ids.clone();
-    combined.extend(element_ids.iter().copied());
+    let local_stable_ids = collect_local_stable_context(element_ids, grid, installed_ids);
+    let mut combined_local_ids: HashSet<i32> = local_stable_ids.clone();
+    combined_local_ids.extend(element_ids.iter().copied());
 
-    if installed_ids.is_empty() {
-        let combined_elems: Vec<_> = grid
+    // Disconnected local case: no adjacent stable structure is involved.
+    // In this case, only a self-sufficient independent bootstrap is allowed.
+    if local_stable_ids.is_empty() {
+        let pattern_elements: Vec<_> = grid
             .elements
             .iter()
-            .filter(|e| combined.contains(&e.id))
+            .filter(|e| element_ids.contains(&e.id))
             .cloned()
             .collect();
-        return has_minimum_assembly(&grid.nodes, &combined_elems);
+        return has_minimum_assembly(&grid.nodes, &pattern_elements);
     }
 
-    // Connectivity guard: the bundle must physically connect to the existing
-    // structure. Collect all node IDs that are already "touched" by installed
-    // elements, then verify that at least one node of the bundle touches that set.
-    // Without this check, isolated ground-level columns would pass
-    // validate_column_support (z=0 → always true) even when far from the
-    // current construction front.
-    {
-        let installed_node_set: HashSet<i32> = installed_ids
-            .iter()
-            .filter_map(|&eid| get_element(grid, eid))
-            .flat_map(|e| [e.node_i_id, e.node_j_id])
-            .collect();
+    // Separate pattern elements into columns and girders
+    let pattern_columns: Vec<i32> = element_ids
+        .iter()
+        .filter(|eid| is_column(grid, **eid))
+        .copied()
+        .collect();
+    let pattern_girders: Vec<i32> = element_ids
+        .iter()
+        .filter(|eid| !is_column(grid, **eid))
+        .copied()
+        .collect();
 
-        let bundle_touches_installed = element_ids.iter().any(|&eid| {
-            get_element(grid, eid)
-                .map(|e| {
-                    installed_node_set.contains(&e.node_i_id)
-                        || installed_node_set.contains(&e.node_j_id)
+    // 1. Validate column support against adjacent stable context only.
+    for &col_id in &pattern_columns {
+        let Some(col) = get_element(grid, col_id) else {
+            return false;
+        };
+        if !validate_column_support(col, &grid.nodes, &grid.elements, &local_stable_ids) {
+            return false;
+        }
+    }
+
+    // 2. Validate girder support with local stable columns + pattern columns.
+    for &gir_id in &pattern_girders {
+        let Some(gir) = get_element(grid, gir_id) else {
+            return false;
+        };
+        if !validate_girder_support(gir, &grid.nodes, &grid.elements, &combined_local_ids) {
+            return false;
+        }
+    }
+
+    // 3. Require actual adjacency to the local stable context.
+    if !pattern_girders.is_empty() {
+        let has_adjacent_connection = pattern_girders.iter().any(|&gir_id| {
+            let Some(gir) = get_element(grid, gir_id) else {
+                return false;
+            };
+            is_node_connected_to_installed_column(gir.node_i_id, grid, &local_stable_ids)
+                || is_node_connected_to_installed_column(gir.node_j_id, grid, &local_stable_ids)
+                || is_node_connected_to_installed_girder(gir.node_i_id, grid, &local_stable_ids)
+                || is_node_connected_to_installed_girder(gir.node_j_id, grid, &local_stable_ids)
+                || pattern_columns.iter().any(|&col_id| {
+                    let Some(col) = get_element(grid, col_id) else {
+                        return false;
+                    };
+                    let girder_touches_column_top = col.node_j_id == gir.node_i_id || col.node_j_id == gir.node_j_id;
+                    let column_is_anchored = is_node_connected_to_installed_column(col.node_i_id, grid, &local_stable_ids)
+                        || is_node_connected_to_installed_girder(col.node_i_id, grid, &local_stable_ids);
+                    girder_touches_column_top && column_is_anchored
                 })
-                .unwrap_or(false)
         });
-
-        if !bundle_touches_installed {
+        if !has_adjacent_connection {
             return false;
         }
     }
 
-    for eid in element_ids {
-        let Some(elem) = get_element(grid, *eid) else {
-            return false;
-        };
-        let ok = if elem.member_type == "Column" {
-            validate_column_support(elem, &grid.nodes, &grid.elements, installed_ids)
-        } else {
-            validate_girder_support(elem, &grid.nodes, &grid.elements, &combined)
-        };
-        if !ok {
+    // 4. Parallel girder check: if 2+ girders, they must be perpendicular (90°)
+    if pattern_girders.len() >= 2 {
+        if !check_girders_perpendicular(&pattern_girders, grid) {
             return false;
         }
     }
+
     true
+}
+
+fn collect_local_stable_context(
+    element_ids: &[i32],
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+) -> HashSet<i32> {
+    let candidate_nodes: HashSet<i32> = element_ids
+        .iter()
+        .filter_map(|eid| get_element(grid, *eid))
+        .flat_map(|elem| [elem.node_i_id, elem.node_j_id])
+        .collect();
+
+    installed_ids
+        .iter()
+        .filter_map(|eid| get_element(grid, *eid).map(|elem| (*eid, elem)))
+        .filter(|(_, elem)| {
+            candidate_nodes.contains(&elem.node_i_id) || candidate_nodes.contains(&elem.node_j_id)
+        })
+        .map(|(eid, _)| eid)
+        .collect()
+}
+
+/// Check if a node is connected to an already-installed column (NOT pattern columns)
+fn is_node_connected_to_installed_column(
+    node_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+) -> bool {
+    grid.elements
+        .iter()
+        .filter(|e| e.member_type == "Column" && installed_ids.contains(&e.id))
+        .any(|col| col.node_i_id == node_id || col.node_j_id == node_id)
+}
+
+/// Check if a node is connected to an already-installed girder
+fn is_node_connected_to_installed_girder(
+    node_id: i32,
+    grid: &SimGrid,
+    installed_ids: &HashSet<i32>,
+) -> bool {
+    grid.elements
+        .iter()
+        .filter(|e| e.member_type == "Girder" && installed_ids.contains(&e.id))
+        .any(|gir| gir.node_i_id == node_id || gir.node_j_id == node_id)
+}
+
+/// Check if all girders in the pattern are mutually perpendicular (90°)
+/// For 2 girders: dot product of direction vectors must be 0
+/// For 3+ girders: at least form perpendicular pairs (not all parallel)
+fn check_girders_perpendicular(girder_ids: &[i32], grid: &SimGrid) -> bool {
+    if girder_ids.len() < 2 {
+        return true;
+    }
+
+    // Get direction vectors for all girders
+    let mut directions: Vec<(i32, i32)> = Vec::new();
+    for &gir_id in girder_ids {
+        let Some(gir) = get_element(grid, gir_id) else {
+            return false;
+        };
+        let Some((ni_x, ni_y, _)) = grid.node_coords(gir.node_i_id) else {
+            return false;
+        };
+        let Some((nj_x, nj_y, _)) = grid.node_coords(gir.node_j_id) else {
+            return false;
+        };
+
+        let dx = nj_x - ni_x;
+        let dy = nj_y - ni_y;
+
+        // Normalize to direction signs (grid-aligned)
+        let dir = (
+            if dx.abs() > 0.001 {
+                dx.signum() as i32
+            } else {
+                0
+            },
+            if dy.abs() > 0.001 {
+                dy.signum() as i32
+            } else {
+                0
+            },
+        );
+        directions.push(dir);
+    }
+
+    // Check if any pair is perpendicular (dot product = 0)
+    // For a valid pattern, at least one perpendicular pair must exist
+    for i in 0..directions.len() {
+        for j in (i + 1)..directions.len() {
+            let dot = directions[i].0 * directions[j].0 + directions[i].1 * directions[j].1;
+            if dot == 0 {
+                return true; // Found a perpendicular pair
+            }
+        }
+    }
+
+    // All girders are parallel - invalid pattern
+    false
 }
 
 fn check_upper_floor_constraint(
@@ -327,187 +751,151 @@ fn check_upper_floor_constraint(
         let installed_lower = *installed_per_floor.get(&lower_floor).unwrap_or(&0);
         let total_lower = *total_per_floor.get(&lower_floor).unwrap_or(&0);
 
-        if installed_lower == 0 {
-            continue;
-        }
-        if total_lower > 0 && installed_lower >= total_lower {
+        // If lower floor has no columns defined, allow (edge case)
+        if total_lower == 0 {
             continue;
         }
 
-        let installed_upper = *installed_per_floor.get(&floor).unwrap_or(&0) + 1;
-        let ratio = installed_upper as f64 / installed_lower as f64;
-        if ratio > threshold {
+        // If lower floor is complete (100%), no constraint needed
+        if installed_lower >= total_lower {
+            continue;
+        }
+
+        // CRITICAL RULE: If lower floor has 5 or fewer uninstalled columns,
+        // block upper floor installation until lower floor is complete.
+        // BUT: Only apply this rule if lower floor has at least SOME installation progress.
+        // If lower floor has 0 installed, we're still in early stages - allow upper floor
+        // based on ratio constraint only.
+        let remaining_lower = total_lower - installed_lower;
+        if remaining_lower <= 5 && installed_lower > 0 {
             return false;
+        }
+
+        // Standard ratio constraint for upper/lower floor balance
+        // Only apply if lower floor has some progress
+        if installed_lower > 0 {
+            let installed_upper = *installed_per_floor.get(&floor).unwrap_or(&0) + 1;
+            let ratio = installed_upper as f64 / installed_lower as f64;
+            if ratio > threshold {
+                return false;
+            }
         }
     }
 
     true
 }
 
-fn min_unstarted_floor(
-    _wf: &SimWorkfront,
+/// Find a floor that has ≤5 uninstalled elements and should be prioritized for completion.
+/// Returns the lowest such floor (1-indexed), or None if no floor needs priority completion.
+fn find_priority_completion_floor(
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
-    node_pos: &HashMap<i32, (usize, usize, usize)>,
-) -> usize {
-    for zi in 0..(grid.nz.saturating_sub(1)) {
-        let has_uninstalled_col = grid.elements.iter().any(|e| {
-            e.member_type == "Column"
-                && !installed_ids.contains(&e.id)
-                && node_pos.get(&e.node_i_id).map(|p| p.2).unwrap_or(999) == zi
-        });
-        if has_uninstalled_col {
-            return zi;
+    dz: f64,
+) -> Option<i32> {
+    // Count total and installed elements per floor
+    let mut total_per_floor: HashMap<i32, usize> = HashMap::new();
+    let mut installed_per_floor: HashMap<i32, usize> = HashMap::new();
+
+    for elem in &grid.elements {
+        let Some((_, _, z)) = grid.node_coords(elem.node_i_id) else {
+            continue;
+        };
+        let floor = if elem.member_type == "Column" {
+            (z / dz).round() as i32 + 1
+        } else {
+            // Girder floor is based on its z level
+            (z / dz).round() as i32
+        };
+
+        *total_per_floor.entry(floor).or_insert(0) += 1;
+        if installed_ids.contains(&elem.id) {
+            *installed_per_floor.entry(floor).or_insert(0) += 1;
         }
     }
 
-    let mut min_girder_floor_zi: Option<usize> = None;
-    for elem in &grid.elements {
-        if elem.member_type != "Girder" || installed_ids.contains(&elem.id) {
-            continue;
-        }
-        if let Some(&(_, _, zi_g)) = node_pos.get(&elem.node_i_id) {
-            let floor_zi = zi_g.saturating_sub(1);
-            min_girder_floor_zi = Some(match min_girder_floor_zi {
-                Option::None => floor_zi,
-                Some(prev) => prev.min(floor_zi),
-            });
+    // Find lowest floor with 1-5 remaining elements (not 0, not >5)
+    let mut floors: Vec<i32> = total_per_floor.keys().copied().collect();
+    floors.sort();
+
+    for floor in floors {
+        let total = *total_per_floor.get(&floor).unwrap_or(&0);
+        let installed = *installed_per_floor.get(&floor).unwrap_or(&0);
+        let remaining = total.saturating_sub(installed);
+
+        // Only prioritize if: has some progress AND 1-5 remaining
+        if installed > 0 && remaining >= 1 && remaining <= 5 {
+            return Some(floor);
         }
     }
-    min_girder_floor_zi.unwrap_or(grid.nz.saturating_sub(1))
+
+    None
 }
 
 fn collect_single_candidates(
     wf: &SimWorkfront,
     grid: &SimGrid,
-    installed_ids: &HashSet<i32>,
-    installed_nodes: &HashSet<i32>,
+    support_ids: &HashSet<i32>,
+    local_element_ids: &HashSet<i32>,
+    committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
+    priority_floor: Option<i32>,
 ) -> Vec<SingleCandidate> {
-    let zi_target = min_unstarted_floor(wf, grid, installed_ids, node_pos);
+    let support_nodes = node_set_for_elements(support_ids, grid);
+    let local_positions = local_xy_positions(local_element_ids, node_pos, grid);
+    let local_seeded = !local_positions.is_empty();
+    let mut result: Vec<SingleCandidate> = Vec::new();
 
-    for attempt in 0..2usize {
-        let search_zi = zi_target + attempt;
-        if search_zi >= grid.nz.saturating_sub(1) {
-            break;
+    for elem in &grid.elements {
+        if committed_ids.contains(&elem.id) {
+            continue;
         }
 
-        let mut result: Vec<SingleCandidate> = Vec::new();
-        let mut seen: HashSet<i32> = HashSet::new();
-        let is_lowest = search_zi == 0;
-
-        for &nid in installed_nodes {
-            let Some(&(xi, yi, zi)) = node_pos.get(&nid) else {
-                continue;
-            };
-            if zi != search_zi && zi != search_zi + 1 {
+        let floor = element_floor(elem.id, grid, grid_dz(grid)).unwrap_or(0);
+        if let Some(priority) = priority_floor {
+            if floor != priority {
                 continue;
             }
+        }
 
-            for &(dxi, dyi) in &[(0i32, 0i32), (-1, 0), (1, 0), (0, -1i32), (0, 1)] {
-                let nxi = xi as i32 + dxi;
-                let nyi = yi as i32 + dyi;
-                if nxi < 0 || nyi < 0 {
-                    continue;
+        let candidate_nodes = [elem.node_i_id, elem.node_j_id];
+        let dist = min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, wf);
+
+        if !dist.is_finite() {
+            continue;
+        }
+
+        if local_seeded && dist > 1.0 {
+            continue;
+        }
+
+        let structurally_possible = if elem.member_type == "Column" {
+            if let Some(&(_, _, zi)) = node_pos.get(&elem.node_i_id) {
+                if zi == 0 {
+                    true
+                } else {
+                    support_nodes.contains(&elem.node_i_id)
                 }
-                if let Some(col_id) = grid.column_starting_at(nxi as usize, nyi as usize, search_zi)
-                {
-                    if !installed_ids.contains(&col_id) && seen.insert(col_id) {
-                        let conn = element_connectivity(col_id, grid, installed_nodes);
-                        let dist = element_frontier_dist(col_id, grid, installed_nodes, node_pos);
-                        result.push(SingleCandidate {
-                            element_id: col_id,
-                            connectivity: conn,
-                            frontier_dist: dist,
-                            is_lowest_floor: is_lowest,
-                        });
-                    }
-                }
-            }
-        }
-
-        let upper_zi = search_zi + 1;
-        let mut upper_nodes: HashSet<i32> = HashSet::new();
-        for sc in &result {
-            if let Some(e) = get_element(grid, sc.element_id) {
-                upper_nodes.insert(e.node_j_id);
-            }
-        }
-        for &eid in installed_ids {
-            if let Some(e) = get_element(grid, eid) {
-                if e.member_type == "Column" {
-                    if let Some(&(_, _, zi)) = node_pos.get(&e.node_i_id) {
-                        if zi == search_zi {
-                            upper_nodes.insert(e.node_j_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        for gdr in grid.elements.iter().filter(|e| e.member_type == "Girder") {
-            if installed_ids.contains(&gdr.id) {
-                continue;
-            }
-            let zi_g = node_pos.get(&gdr.node_i_id).map(|p| p.2).unwrap_or(999);
-            if zi_g != upper_zi {
-                continue;
-            }
-            let ni_in = upper_nodes.contains(&gdr.node_i_id);
-            let nj_in = upper_nodes.contains(&gdr.node_j_id);
-            if (ni_in || nj_in) && seen.insert(gdr.id) {
-                let conn = element_connectivity(gdr.id, grid, installed_nodes);
-                let dist = element_frontier_dist(gdr.id, grid, installed_nodes, node_pos);
-                result.push(SingleCandidate {
-                    element_id: gdr.id,
-                    connectivity: conn,
-                    frontier_dist: dist,
-                    is_lowest_floor: false,
-                });
-            }
-        }
-
-        if !result.is_empty() {
-            return result;
-        }
-    }
-
-    let zi_target = min_unstarted_floor(wf, grid, installed_ids, node_pos);
-    for zi in zi_target..=(grid.nz.saturating_sub(1)) {
-        let mut result: Vec<SingleCandidate> = Vec::new();
-        let mut seen: HashSet<i32> = HashSet::new();
-
-        for elem in &grid.elements {
-            if installed_ids.contains(&elem.id) {
-                continue;
-            }
-            let elem_zi = node_pos.get(&elem.node_i_id).map(|p| p.2).unwrap_or(9999);
-            let on_this_floor = if elem.member_type == "Column" {
-                elem_zi == zi
             } else {
-                elem_zi == zi + 1
-            };
-            if !on_this_floor {
-                continue;
+                false
             }
-            if seen.insert(elem.id) {
-                let conn = element_connectivity(elem.id, grid, installed_nodes);
-                let dist = element_frontier_dist(elem.id, grid, installed_nodes, node_pos);
-                result.push(SingleCandidate {
-                    element_id: elem.id,
-                    connectivity: conn,
-                    frontier_dist: dist,
-                    is_lowest_floor: zi == 0,
-                });
-            }
+        } else {
+            support_nodes.contains(&elem.node_i_id) || support_nodes.contains(&elem.node_j_id)
+        };
+
+        if !structurally_possible {
+            continue;
         }
 
-        if !result.is_empty() {
-            return result;
-        }
+        let connectivity = element_connectivity(elem.id, grid, &support_nodes);
+        result.push(SingleCandidate {
+            element_id: elem.id,
+            connectivity,
+            frontier_dist: dist,
+            is_lowest_floor: floor == 1,
+        });
     }
 
-    Vec::new()
+    result
 }
 
 fn generate_bootstrap_candidates(
@@ -1035,14 +1423,6 @@ pub fn weighted_random_choice(scores: &[f64], rng_state: &mut u64) -> usize {
     scores.len() - 1
 }
 
-fn last_sequence_number(steps: &[SimStep]) -> usize {
-    steps
-        .last()
-        .and_then(|step| step.sequences.last())
-        .map(|seq: &SimSequence| seq.sequence_number)
-        .unwrap_or(0)
-}
-
 pub fn run_scenario(
     scenario_id: usize,
     grid: &SimGrid,
@@ -1054,211 +1434,371 @@ pub fn run_scenario(
     let (w1, w2, w3) = weights;
     let mut rng = seed;
 
-    let mut installed_ids: HashSet<i32> = HashSet::new();
-    let mut installed_nodes: HashSet<i32> = HashSet::new();
+    let mut stable_ids: HashSet<i32> = HashSet::new();
     let mut steps: Vec<SimStep> = Vec::new();
+    let mut workfront_states: HashMap<i32, WorkfrontState> = workfronts
+        .iter()
+        .map(|wf| (wf.id, WorkfrontState::default()))
+        .collect();
 
     let total_elements = grid.elements.len();
     let node_pos = build_node_pos(grid);
     let dz = grid_dz(grid);
 
-    let mut consecutive_upper_floor_violations = 0u32;
-    let mut consecutive_no_candidates = 0u32;
-    let mut global_step_count = 0u32;
-    let mut members_added_last_300: Vec<usize> = Vec::new();
+    let mut consecutive_empty_cycles = 0u32;
+    let mut next_sequence_start: usize = 1; // 1-based sequence numbering for from_local_steps
+    let mut total_sequence_rounds: usize = 0; // for stagnation/max-iteration check
 
-    let termination_reason = loop {
-        if installed_ids.len() >= total_elements {
+    let termination_reason = 'outer: loop {
+        // ── Termination checks ──────────────────────────────────────
+        let committed_ids: HashSet<i32> = workfront_states.values().fold(stable_ids.clone(), |mut acc, state| {
+            acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
+            acc
+        });
+
+        if stable_ids.len() >= total_elements {
             break TerminationReason::Completed;
         }
-
-        global_step_count += 1;
-
+        if committed_ids.len() >= total_elements && stable_ids.len() < total_elements {
+            break TerminationReason::NoCandidates;
+        }
         if workfronts.is_empty() {
             break TerminationReason::NoCandidates;
         }
 
-        // All workfronts contribute candidates every step (merged pool).
-        // Pick the workfront whose chosen candidate wins the score competition.
-        // Round-robin index is used only as tiebreak / wf_id assignment fallback.
-        let wf_idx_fallback = ((global_step_count - 1) as usize) % workfronts.len();
+        // ── Global Step Cycle: collect local steps from all workfronts ──
+        let mut cycle_local_steps: Vec<LocalStep> = Vec::new();
+        let mut cycle_completed_wf: HashSet<i32> = HashSet::new();
+        let mut cycle_no_progress_count = 0u32;
 
-        if installed_ids.is_empty() {
-            // Bootstrap: try all workfronts, merge candidates, pick best
-            let mut all_bootstrap: Vec<(usize, Candidate)> = Vec::new();
-            for (wf_idx, wf) in workfronts.iter().enumerate() {
-                for c in generate_bootstrap_candidates(wf, grid, &node_pos) {
-                    all_bootstrap.push((wf_idx, c));
-                }
-            }
-            let valid: Vec<(usize, &Candidate)> = all_bootstrap
+        loop {
+            // Eligible workfronts: those that haven't completed a local step in this cycle
+            let eligible_wfs: Vec<&SimWorkfront> = workfronts
                 .iter()
-                .filter(|(_, c)| check_bundle_stability(&c.element_ids, grid, &installed_ids))
-                .map(|(wf_idx, c)| (*wf_idx, c))
+                .filter(|wf| !cycle_completed_wf.contains(&wf.id))
                 .collect();
 
-            if valid.is_empty() {
-                consecutive_no_candidates += 1;
-                members_added_last_300.push(0);
-                if consecutive_no_candidates >= 10 {
-                    break TerminationReason::NoCandidates;
+            if eligible_wfs.is_empty() {
+                break; // All workfronts completed or excluded
+            }
+
+            // Recompute committed IDs including in-cycle installations
+            let committed_ids: HashSet<i32> = workfront_states.values().fold(stable_ids.clone(), |mut acc, state| {
+                acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
+                acc
+            });
+
+            total_sequence_rounds += 1;
+
+            let mut selected_this_sequence: HashSet<i32> = HashSet::new();
+            let mut sequence_installations: Vec<(i32, i32)> = Vec::new(); // (wf_id, element_id)
+            let priority_floor = find_priority_completion_floor(grid, &committed_ids, dz);
+
+            // Each eligible workfront selects one element
+            for wf in &eligible_wfs {
+                let Some(current_state) = workfront_states.get(&wf.id) else {
+                    continue;
+                };
+
+                let own_buffer_ids: HashSet<i32> = current_state
+                    .buffer_sequences
+                    .iter()
+                    .map(|seq| seq.element_id)
+                    .collect();
+                let planned_reserved_ids: HashSet<i32> = workfront_states
+                    .iter()
+                    .filter(|(other_wf_id, _)| **other_wf_id != wf.id)
+                    .flat_map(|(_, state)| state.planned_pattern.iter().copied())
+                    .collect();
+                let plan_has_conflict = current_state.planned_pattern.iter().any(|eid| {
+                    !own_buffer_ids.contains(eid)
+                        && (committed_ids.contains(eid)
+                            || selected_this_sequence.contains(eid)
+                            || planned_reserved_ids.contains(eid))
+                });
+
+                if current_state.planned_pattern.is_empty() || plan_has_conflict {
+                    let new_plan: Vec<i32> = if stable_ids.is_empty() && cycle_local_steps.is_empty() {
+                        let bootstrap_candidates: Vec<Candidate> = generate_bootstrap_candidates(wf, grid, &node_pos)
+                            .into_iter()
+                            .filter(|candidate| {
+                                candidate
+                                    .element_ids
+                                    .iter()
+                                    .all(|eid| {
+                                        !committed_ids.contains(eid)
+                                            && !selected_this_sequence.contains(eid)
+                                            && !planned_reserved_ids.contains(eid)
+                                    })
+                            })
+                            .collect();
+
+                        if bootstrap_candidates.is_empty() {
+                            Vec::new()
+                        } else {
+                            let scores: Vec<f64> = bootstrap_candidates
+                                .iter()
+                                .map(|candidate| candidate.score(w1, w2, w3))
+                                .collect();
+                            let chosen_idx = weighted_random_choice(&scores, &mut rng);
+                            reorder_bootstrap_pattern(
+                                &bootstrap_candidates[chosen_idx].element_ids,
+                                grid,
+                                &node_pos,
+                                wf,
+                            )
+                        }
+                    } else {
+                        let mut wf_committed_ids = committed_ids.clone();
+                        wf_committed_ids.extend(selected_this_sequence.iter().copied());
+
+                        // Use stable_ids + already-completed cycle local steps as support
+                        let mut support_ids = stable_ids.clone();
+                        for ls in &cycle_local_steps {
+                            support_ids.extend(ls.element_ids.iter().copied());
+                        }
+
+                        let local_ids = current_state.all_local_ids();
+                        let support_nodes = node_set_for_elements(&support_ids, grid);
+                        let wf_candidates = collect_single_candidates(
+                            wf,
+                            grid,
+                            &support_ids,
+                            &local_ids,
+                            &wf_committed_ids,
+                            &node_pos,
+                            priority_floor,
+                        );
+
+                        let valid_seeds: Vec<&SingleCandidate> = wf_candidates
+                            .iter()
+                            .filter(|candidate| !selected_this_sequence.contains(&candidate.element_id))
+                            .filter(|candidate| {
+                                let mut temp_committed = wf_committed_ids.clone();
+                                temp_committed.insert(candidate.element_id);
+                                check_upper_floor_constraint(&[candidate.element_id], grid, &temp_committed, threshold)
+                            })
+                            .collect();
+
+                        if valid_seeds.is_empty() {
+                            Vec::new()
+                        } else {
+                            let mut complete_plans: Vec<(Vec<i32>, f64)> = Vec::new();
+
+                            for seed_candidate in &valid_seeds {
+                                let seed_id = seed_candidate.element_id;
+                                let seed_is_column = is_column(grid, seed_id);
+
+                                if !seed_is_column && check_bundle_stability(&[seed_id], grid, &support_ids) {
+                                    let score = bundle_score(&[seed_id], grid, &support_nodes, &node_pos, w1, w2);
+                                    complete_plans.push((vec![seed_id], score));
+                                }
+
+                                if seed_is_column {
+                                    let Some(seed_elem) = get_element(grid, seed_id) else {
+                                        continue;
+                                    };
+                                    let seed_upper = seed_elem.node_j_id;
+                                    let mut touching_girders = uninstalled_girders_touching_node(
+                                        seed_upper,
+                                        grid,
+                                        &wf_committed_ids,
+                                    );
+                                    touching_girders.retain(|gid| !planned_reserved_ids.contains(gid));
+
+                                    for &g1 in &touching_girders {
+                                        let plan = vec![seed_id, g1];
+                                        if check_bundle_stability(&plan, grid, &support_ids) {
+                                            let score = bundle_score(&plan, grid, &support_nodes, &node_pos, w1, w2);
+                                            complete_plans.push((plan, score));
+                                        }
+                                    }
+
+                                    for i in 0..touching_girders.len() {
+                                        for j in (i + 1)..touching_girders.len() {
+                                            let plan = vec![seed_id, touching_girders[i], touching_girders[j]];
+                                            if check_bundle_stability(&plan, grid, &support_ids) {
+                                                let score = bundle_score(&plan, grid, &support_nodes, &node_pos, w1, w2);
+                                                complete_plans.push((plan, score));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !complete_plans.is_empty() {
+                                complete_plans.sort_by(|a, b| {
+                                    b.1.partial_cmp(&a.1)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                complete_plans[0].0.clone()
+                            } else {
+                                let stable_nodes = node_set_for_elements(&support_ids, grid);
+                                let mut seed_order: Vec<&SingleCandidate> = valid_seeds;
+                                seed_order.sort_by(|a, b| {
+                                    b.score(w1, w2)
+                                        .partial_cmp(&a.score(w1, w2))
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+
+                                let mut chosen_plan = Vec::new();
+                                for seed_candidate in seed_order {
+                                    let mut plan_rng = rng ^ seed_candidate.element_id as u64;
+                                    let (candidate_plan, _) = try_build_pattern(
+                                        seed_candidate.element_id,
+                                        grid,
+                                        &support_ids,
+                                        &stable_nodes,
+                                        &node_pos,
+                                        threshold,
+                                        w1,
+                                        w2,
+                                        &mut plan_rng,
+                                    );
+
+                                    let is_complete = matches!(
+                                        classify_buffer(&candidate_plan, grid, !support_ids.is_empty()),
+                                        BufferDecision::Complete(_)
+                                    );
+                                    let is_available = candidate_plan.iter().all(|eid| {
+                                        !wf_committed_ids.contains(eid) && !planned_reserved_ids.contains(eid)
+                                    });
+
+                                    if is_complete && is_available {
+                                        chosen_plan = candidate_plan;
+                                        break;
+                                    }
+                                }
+
+                                chosen_plan
+                            }
+                        }
+                    };
+
+                    if let Some(state) = workfront_states.get_mut(&wf.id) {
+                        if state.planned_pattern.is_empty() || plan_has_conflict {
+                            state.planned_pattern = new_plan;
+                        }
+                    }
+                }
+
+                let Some(state) = workfront_states.get(&wf.id) else {
+                    continue;
+                };
+
+                let next_element = state
+                    .planned_pattern
+                    .iter()
+                    .copied()
+                    .find(|eid| {
+                        !state.buffer_sequences.iter().any(|seq| seq.element_id == *eid)
+                            && !selected_this_sequence.contains(eid)
+                    });
+
+                let Some(chosen_eid) = next_element else {
+                    continue;
+                };
+
+                selected_this_sequence.insert(chosen_eid);
+                sequence_installations.push((wf.id, chosen_eid));
+            }
+
+            // If no workfront could select anything, this sequence round is empty
+            if sequence_installations.is_empty() {
+                cycle_no_progress_count += 1;
+                if cycle_no_progress_count >= 10 {
+                    break; // Stagnation within cycle
                 }
                 continue;
             }
-            consecutive_no_candidates = 0;
+            cycle_no_progress_count = 0;
 
-            let scores: Vec<f64> = valid.iter().map(|(_, c)| c.score(w1, w2, w3)).collect();
-            let best_idx = weighted_random_choice(&scores, &mut rng);
-            let (chosen_wf_idx, chosen) = valid[best_idx];
-            let wf = &workfronts[chosen_wf_idx];
-
-            let step_floor = chosen
-                .element_ids
-                .iter()
-                .find_map(|eid| element_floor(*eid, grid, dz))
-                .unwrap_or(1);
-
-            let step = SimStep::from_elements(
-                wf.id,
-                chosen.element_ids.clone(),
-                step_floor,
-                PatternType::Bootstrap.as_str(),
-                last_sequence_number(&steps) + 1,
-            );
-
-            for eid in &step.element_ids {
-                installed_ids.insert(*eid);
-                if let Some(e) = get_element(grid, *eid) {
-                    installed_nodes.insert(e.node_i_id);
-                    installed_nodes.insert(e.node_j_id);
+            // Add selected elements to workfront buffers
+            for &(wf_id, element_id) in &sequence_installations {
+                if let Some(state) = workfront_states.get_mut(&wf_id) {
+                    state.owned_ids.insert(element_id);
+                    state.buffer_sequences.push(SimSequence {
+                        element_id,
+                        sequence_number: 0, // placeholder — will be reassigned by from_local_steps
+                    });
                 }
             }
 
-            members_added_last_300.push(step.element_ids.len());
-            steps.push(step);
-            continue;
-        }
+            // Check each eligible workfront for pattern completion
+            // Use stable_ids + already-completed cycle local steps as context
+            let mut cycle_stable_context: HashSet<i32> = stable_ids.clone();
+            for ls in &cycle_local_steps {
+                cycle_stable_context.extend(ls.element_ids.iter().copied());
+            }
 
-        // Merge candidates from ALL workfronts — each workfront contributes its
-        // own frontier in parallel; the best seed across all of them is chosen.
-        let mut all_candidates: Vec<(usize, SingleCandidate)> = Vec::new();
-        for (wf_idx, wf) in workfronts.iter().enumerate() {
-            for c in
-                collect_single_candidates(wf, grid, &installed_ids, &installed_nodes, &node_pos)
-            {
-                all_candidates.push((wf_idx, c));
+            for wf in &eligible_wfs {
+                if cycle_completed_wf.contains(&wf.id) {
+                    continue;
+                }
+                let Some(state) = workfront_states.get_mut(&wf.id) else {
+                    continue;
+                };
+
+                let buffer_element_ids = state.buffer_element_ids();
+                let decision = classify_buffer(&buffer_element_ids, grid, !cycle_stable_context.is_empty());
+
+                if let BufferDecision::Complete(pattern) = decision {
+                    if check_bundle_stability(&buffer_element_ids, grid, &cycle_stable_context) {
+                        let step_floor = buffer_element_ids
+                            .iter()
+                            .filter_map(|eid| element_floor(*eid, grid, dz))
+                            .min()
+                            .unwrap_or(1);
+
+                        cycle_local_steps.push(LocalStep {
+                            workfront_id: wf.id,
+                            element_ids: buffer_element_ids.clone(),
+                            floor: step_floor,
+                            pattern: pattern.as_str().to_string(),
+                        });
+
+                        // Mark this workfront as completed for this cycle
+                        cycle_completed_wf.insert(wf.id);
+
+                        // Clear its buffer and plan
+                        state.buffer_sequences.clear();
+                        state.planned_pattern.clear();
+                    }
+                }
+            }
+
+            // If all workfronts either completed or are excluded, end cycle
+            if cycle_completed_wf.len() >= eligible_wfs.len() {
+                break;
+            }
+
+            // Safety: max inner iterations per cycle
+            if total_sequence_rounds as usize >= total_elements * 10 + 1000 {
+                break 'outer TerminationReason::MaxIterations;
             }
         }
-        // Deduplicate by element_id (same element reachable from multiple wf's)
-        {
-            let mut seen_eids: HashSet<i32> = HashSet::new();
-            all_candidates.retain(|(_, c)| seen_eids.insert(c.element_id));
-        }
 
-        if all_candidates.is_empty() {
-            consecutive_no_candidates += 1;
-            members_added_last_300.push(0);
-            if consecutive_no_candidates >= 10 {
+        // ── Emit Global Step from collected local steps ─────────────
+        if cycle_local_steps.is_empty() {
+            consecutive_empty_cycles += 1;
+            if consecutive_empty_cycles >= 5 {
                 break TerminationReason::NoCandidates;
             }
+            // Check absolute stagnation
+            if total_sequence_rounds as usize >= total_elements * 10 + 1000 {
+                break TerminationReason::MaxIterations;
+            }
             continue;
         }
-        consecutive_no_candidates = 0;
+        consecutive_empty_cycles = 0;
 
-        let after_stability: Vec<(usize, &SingleCandidate)> = all_candidates
-            .iter()
-            .filter(|(_, c)| check_single_stability(c.element_id, grid, &installed_ids))
-            .map(|(wf_idx, c)| (*wf_idx, c))
-            .collect();
+        let step = SimStep::from_local_steps(cycle_local_steps, next_sequence_start);
+        let round_count = step.sequence_round_count();
+        // Advance sequence counter by the number of rounds used in this step.
+        next_sequence_start += round_count;
 
-        let valid: Vec<(usize, &&SingleCandidate)> = after_stability
-            .iter()
-            .filter(|(_, c)| {
-                check_upper_floor_constraint(&[c.element_id], grid, &installed_ids, threshold)
-            })
-            .map(|(wf_idx, c)| (*wf_idx, c))
-            .collect();
-
-        if valid.is_empty() {
-            if !after_stability.is_empty() {
-                consecutive_upper_floor_violations += 1;
-                if consecutive_upper_floor_violations >= 3 {
-                    break TerminationReason::UpperFloorViolation;
-                }
-            } else {
-                consecutive_no_candidates += 1;
-                if consecutive_no_candidates >= 10 {
-                    break TerminationReason::NoCandidates;
-                }
-            }
-            members_added_last_300.push(0);
-            continue;
-        }
-        consecutive_upper_floor_violations = 0;
-
-        let scores: Vec<f64> = valid.iter().map(|(_, c)| c.score(w1, w2)).collect();
-        let best_valid_idx = weighted_random_choice(&scores, &mut rng);
-        let (chosen_wf_idx, chosen_cand) = valid[best_valid_idx];
-        let chosen_seed = chosen_cand.element_id;
-        // Use the workfront that owns the chosen seed for wf_id attribution
-        let wf = &workfronts[chosen_wf_idx];
-        let _ = wf_idx_fallback; // suppress unused warning
-
-        let (element_ids, pattern) = try_build_pattern(
-            chosen_seed,
-            grid,
-            &installed_ids,
-            &installed_nodes,
-            &node_pos,
-            threshold,
-            w1,
-            w2,
-            &mut rng,
-        );
-
-        let step_floor = element_ids
-            .iter()
-            .find(|eid| is_column(grid, **eid))
-            .and_then(|eid| element_floor(*eid, grid, dz))
-            .or_else(|| {
-                element_ids
-                    .first()
-                    .and_then(|eid| element_floor(*eid, grid, dz))
-            })
-            .unwrap_or_else(|| steps.last().map(|s| s.floor).unwrap_or(1));
-
-        let step = SimStep::from_elements(
-            wf.id,
-            element_ids,
-            step_floor,
-            pattern,
-            last_sequence_number(&steps) + 1,
-        );
-
-        for eid in &step.element_ids {
-            installed_ids.insert(*eid);
-            if let Some(e) = get_element(grid, *eid) {
-                installed_nodes.insert(e.node_i_id);
-                installed_nodes.insert(e.node_j_id);
-            }
-        }
-
-        members_added_last_300.push(step.element_ids.len());
-        if members_added_last_300.len() > 300 {
-            members_added_last_300.remove(0);
-        }
+        stable_ids.extend(step.element_ids.iter().copied());
         steps.push(step);
-
-        if global_step_count >= 300 {
-            let recent_sum: usize = members_added_last_300.iter().sum();
-            if recent_sum < 3 {
-                break TerminationReason::NoProgress;
-            }
-        }
-
-        if global_step_count as usize >= total_elements * 10 + 1000 {
-            break TerminationReason::MaxIterations;
-        }
     };
 
     let total_steps = steps.len();
@@ -1450,6 +1990,202 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_workfronts_start_near_their_positions() {
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let node_pos = build_node_pos(&grid);
+        let wfs = vec![
+            SimWorkfront {
+                id: 1,
+                grid_x: 0,
+                grid_y: 0,
+            },
+            SimWorkfront {
+                id: 2,
+                grid_x: 3,
+                grid_y: 3,
+            },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+        let mut by_sequence: Vec<(usize, i32)> = scenario
+            .steps
+            .iter()
+            .flat_map(|step| step.sequences.iter().map(|seq| (seq.sequence_number, seq.element_id)))
+            .collect();
+        by_sequence.sort_by_key(|(seq, _)| *seq);
+
+        let first_two: Vec<i32> = by_sequence.iter().take(2).map(|(_, eid)| *eid).collect();
+        assert_eq!(first_two.len(), 2, "two workfronts should install two early elements");
+
+        let positions: Vec<(usize, usize)> = first_two
+            .iter()
+            .filter_map(|eid| get_element(&grid, *eid))
+            .filter_map(|elem| node_pos.get(&elem.node_i_id).map(|&(xi, yi, _)| (xi, yi)))
+            .collect();
+
+        let has_near_first = positions.iter().any(|&(xi, yi)| {
+            (xi as i32 - 0).abs() + (yi as i32 - 0).abs() <= 1
+        });
+        let has_near_second = positions.iter().any(|&(xi, yi)| {
+            (xi as i32 - 3).abs() + (yi as i32 - 3).abs() <= 1
+        });
+
+        assert!(has_near_first, "one early element should start near workfront (0,0)");
+        assert!(has_near_second, "one early element should start near workfront (3,3)");
+    }
+
+    #[test]
+    fn test_multiple_workfronts_share_same_sequence_round() {
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront {
+                id: 1,
+                grid_x: 0,
+                grid_y: 0,
+            },
+            SimWorkfront {
+                id: 2,
+                grid_x: 3,
+                grid_y: 3,
+            },
+            SimWorkfront {
+                id: 3,
+                grid_x: 0,
+                grid_y: 3,
+            },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+        let mut per_sequence: HashMap<usize, usize> = HashMap::new();
+        for sequence_number in scenario
+            .steps
+            .iter()
+            .flat_map(|step| step.sequences.iter().map(|seq| seq.sequence_number))
+        {
+            *per_sequence.entry(sequence_number).or_insert(0) += 1;
+        }
+
+        assert!(
+            per_sequence.values().any(|count| *count >= 2),
+            "multiple workfronts should install at least two members in the same sequence round"
+        );
+    }
+
+    #[test]
+    fn test_sequence_numbers_are_round_based_and_non_decreasing() {
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront {
+                id: 1,
+                grid_x: 0,
+                grid_y: 0,
+            },
+            SimWorkfront {
+                id: 2,
+                grid_x: 3,
+                grid_y: 3,
+            },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 99, (0.5, 0.3, 0.2), 0.5);
+        let numbers: Vec<usize> = scenario
+            .steps
+            .iter()
+            .flat_map(|step| step.sequences.iter().map(|seq| seq.sequence_number))
+            .collect();
+        let mut unique_numbers = numbers.clone();
+        unique_numbers.sort_unstable();
+        unique_numbers.dedup();
+
+        assert!(!numbers.is_empty(), "scenario should contain sequence entries");
+        assert_eq!(unique_numbers[0], 1, "sequence numbering should start at 1");
+        assert!(
+            unique_numbers
+                .windows(2)
+                .all(|pair| pair[1] == pair[0] + 1),
+            "sequence round numbers should remain contiguous without gaps"
+        );
+    }
+
+    #[test]
+    fn test_steps_are_emitted_per_workfront_buffer() {
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront {
+                id: 1,
+                grid_x: 0,
+                grid_y: 0,
+            },
+            SimWorkfront {
+                id: 2,
+                grid_x: 3,
+                grid_y: 3,
+            },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 21, (0.5, 0.3, 0.2), 0.5);
+        assert!(
+            scenario.steps.iter().all(|step| step.workfront_id >= 1),
+            "steps should belong to individual workfront buffers, not a mixed shared step"
+        );
+    }
+
+    #[test]
+    fn test_disconnected_independent_bootstrap_still_passes_with_far_stable_structure() {
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+
+        let col_a = grid.column_starting_at(0, 0, 0).unwrap();
+        let col_b = grid.column_starting_at(1, 0, 0).unwrap();
+        let col_c = grid.column_starting_at(0, 1, 0).unwrap();
+        let node_a = get_element(&grid, col_a).unwrap().node_j_id;
+        let node_b = get_element(&grid, col_b).unwrap().node_j_id;
+        let node_c = get_element(&grid, col_c).unwrap().node_j_id;
+        let gir_ab = grid.girder_between(node_a, node_b).unwrap();
+        let gir_ac = grid.girder_between(node_a, node_c).unwrap();
+        let far_stable_ids: HashSet<i32> = [col_a, col_b, col_c, gir_ab, gir_ac].into_iter().collect();
+
+        let col_d = grid.column_starting_at(3, 3, 0).unwrap();
+        let col_e = grid.column_starting_at(2, 3, 0).unwrap();
+        let col_f = grid.column_starting_at(3, 2, 0).unwrap();
+        let node_d = get_element(&grid, col_d).unwrap().node_j_id;
+        let node_e = get_element(&grid, col_e).unwrap().node_j_id;
+        let node_f = get_element(&grid, col_f).unwrap().node_j_id;
+        let gir_de = grid.girder_between(node_d, node_e).unwrap();
+        let gir_df = grid.girder_between(node_d, node_f).unwrap();
+
+        let disconnected_bootstrap = vec![col_d, col_e, gir_de, col_f, gir_df];
+        assert!(
+            check_bundle_stability(&disconnected_bootstrap, &grid, &far_stable_ids),
+            "disconnected local bootstrap should still pass even when unrelated stable structure exists elsewhere"
+        );
+    }
+
+    #[test]
+    fn test_local_context_allows_connected_extension_without_global_recheck() {
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+
+        let col_a = grid.column_starting_at(0, 0, 0).unwrap();
+        let col_b = grid.column_starting_at(1, 0, 0).unwrap();
+        let col_c = grid.column_starting_at(0, 1, 0).unwrap();
+        let node_a = get_element(&grid, col_a).unwrap().node_j_id;
+        let node_b = get_element(&grid, col_b).unwrap().node_j_id;
+        let node_c = get_element(&grid, col_c).unwrap().node_j_id;
+        let gir_ab = grid.girder_between(node_a, node_b).unwrap();
+        let gir_ac = grid.girder_between(node_a, node_c).unwrap();
+        let stable_ids: HashSet<i32> = [col_a, col_b, col_c, gir_ab, gir_ac].into_iter().collect();
+
+        let new_col = grid.column_starting_at(1, 1, 0).unwrap();
+        let new_node = get_element(&grid, new_col).unwrap().node_j_id;
+        let ext_girder = grid.girder_between(node_b, new_node).unwrap();
+        let extension = vec![new_col, ext_girder];
+
+        assert!(
+            check_bundle_stability(&extension, &grid, &stable_ids),
+            "extension should pass when adjacent local stable structure provides the needed support/context"
+        );
+    }
+
+    #[test]
     fn test_run_scenario_center_workfront() {
         let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
         let wfs = vec![SimWorkfront {
@@ -1485,6 +2221,462 @@ mod tests {
             for eid in &step.element_ids {
                 assert!(*eid >= 1, "element ID must be >= 1, got {}", eid);
             }
+        }
+    }
+
+    #[test]
+    fn test_upper_floor_blocked_when_lower_nearly_complete() {
+        // Test: If lower floor has 5 or fewer uninstalled columns,
+        // upper floor installation should be blocked.
+        let grid = SimGrid::new(3, 3, 2, 6000.0, 6000.0, 4000.0);
+        // 3x3 grid = 9 columns per floor
+        // Install 5 columns on floor 1 (4 remaining <= 5) -> upper should be blocked
+
+        let floor1_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| z.abs() < 0.001)
+                        .unwrap_or(false)
+            })
+            .take(5)
+            .map(|e| e.id)
+            .collect();
+
+        let installed: HashSet<i32> = floor1_cols.into_iter().collect();
+        // 5 installed, 4 remaining -> should block upper floor
+
+        // Find a floor 2 column
+        let dz = grid_dz(&grid);
+        let floor2_col = grid
+            .elements
+            .iter()
+            .find(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| {
+                            let floor = (z / dz).round() as i32 + 1;
+                            floor == 2
+                        })
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id);
+
+        if let Some(col2_id) = floor2_col {
+            // With threshold = 0.5, upper floor should be blocked when 4 remaining
+            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.5);
+            assert!(
+                !allowed,
+                "Upper floor should be blocked when lower has 4 remaining columns (<=5)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_upper_floor_allowed_when_lower_complete() {
+        // Test: If lower floor is 100% complete, upper floor should be allowed
+        let grid = SimGrid::new(2, 2, 2, 6000.0, 6000.0, 4000.0);
+        let dz = grid_dz(&grid);
+
+        // Install ALL floor 1 columns
+        let floor1_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| z.abs() < 0.001)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .collect();
+
+        let installed: HashSet<i32> = floor1_cols.into_iter().collect();
+
+        // Find a floor 2 column
+        let floor2_col = grid
+            .elements
+            .iter()
+            .find(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| {
+                            let floor = (z / dz).round() as i32 + 1;
+                            floor == 2
+                        })
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id);
+
+        if let Some(col2_id) = floor2_col {
+            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.3);
+            assert!(
+                allowed,
+                "Upper floor should be allowed when lower is 100% complete"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ground_column_is_structurally_stable() {
+        // Test: A ground-level column (z=0 base) is always structurally stable
+        // (connectivity/proximity is handled by candidate generation, not stability check)
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+
+        // Get any ground-level column
+        let corner_col = grid.column_starting_at(3, 3, 0);
+        let installed: HashSet<i32> = HashSet::new();
+
+        if let Some(col_id) = corner_col {
+            let stable = check_single_stability(col_id, &grid, &installed);
+            assert!(
+                stable,
+                "Ground-level column should be structurally stable (z=0 base)"
+            );
+        }
+    }
+
+    // ============================================================
+    // SIMULATION COMPLETION TESTS - Critical performance tests
+    // ============================================================
+
+    #[test]
+    fn test_simulation_completes_2x2x2_all_elements() {
+        // Small grid: 2x2x2 should complete ALL elements
+        let grid = SimGrid::new(2, 2, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 0,
+            grid_y: 0,
+        }];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+        let total_elements = grid.elements.len();
+        let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+
+        assert_eq!(
+            installed, total_elements,
+            "2x2x2 grid should install ALL {} elements, got {}. Termination: {:?}",
+            total_elements, installed, scenario.metrics.termination_reason
+        );
+        assert_eq!(
+            scenario.metrics.termination_reason,
+            TerminationReason::Completed,
+            "Should terminate with Completed, not {:?}",
+            scenario.metrics.termination_reason
+        );
+    }
+
+    #[test]
+    fn test_simulation_completes_3x3x2_all_elements() {
+        // Medium grid: 3x3x2
+        let grid = SimGrid::new(3, 3, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        }];
+
+        let scenario = run_scenario(1, &grid, &wfs, 123, (0.5, 0.3, 0.2), 0.5);
+        let total_elements = grid.elements.len();
+        let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+
+        assert_eq!(
+            installed, total_elements,
+            "3x3x2 grid should install ALL {} elements, got {}. Termination: {:?}",
+            total_elements, installed, scenario.metrics.termination_reason
+        );
+    }
+
+    #[test]
+    fn test_simulation_completes_4x4x3_all_elements() {
+        // Larger grid: 4x4x3 (the default mentioned by user)
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        }];
+
+        let t0 = std::time::Instant::now();
+        let scenario = run_scenario(1, &grid, &wfs, 777, (0.5, 0.3, 0.2), 0.5);
+        let elapsed = t0.elapsed();
+
+        let total_elements = grid.elements.len();
+        let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+
+        assert_eq!(
+            installed, total_elements,
+            "4x4x3 grid should install ALL {} elements, got {}. Termination: {:?}",
+            total_elements, installed, scenario.metrics.termination_reason
+        );
+        assert!(
+            elapsed.as_secs() < 30,
+            "4x4x3 simulation should complete in <30s, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_simulation_completes_5x5x4_all_elements() {
+        // Large grid stress test: 5x5x4
+        let grid = SimGrid::new(5, 5, 4, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 2,
+            grid_y: 2,
+        }];
+
+        let t0 = std::time::Instant::now();
+        let scenario = run_scenario(1, &grid, &wfs, 999, (0.5, 0.3, 0.2), 0.5);
+        let elapsed = t0.elapsed();
+
+        let total_elements = grid.elements.len();
+        let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+
+        assert_eq!(
+            installed, total_elements,
+            "5x5x4 grid should install ALL {} elements, got {}. Termination: {:?}",
+            total_elements, installed, scenario.metrics.termination_reason
+        );
+        assert!(
+            elapsed.as_secs() < 60,
+            "5x5x4 simulation should complete in <60s, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_simulation_multiple_workfronts_completes() {
+        // Multiple workfronts should also complete all elements
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront {
+                id: 1,
+                grid_x: 0,
+                grid_y: 0,
+            },
+            SimWorkfront {
+                id: 2,
+                grid_x: 3,
+                grid_y: 3,
+            },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+        let total_elements = grid.elements.len();
+        let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+
+        assert_eq!(
+            installed, total_elements,
+            "4x4x2 with 2 workfronts should install ALL {} elements, got {}. Termination: {:?}",
+            total_elements, installed, scenario.metrics.termination_reason
+        );
+    }
+
+    #[test]
+    fn test_simulation_proceeds_beyond_bootstrap() {
+        // Critical: Simulation MUST continue after bootstrap (step 1)
+        let grid = SimGrid::new(3, 3, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        }];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+
+        // Bootstrap = 1 step with 5 elements (3 cols + 2 girders)
+        // If simulation stops at bootstrap, total_steps would be 1
+        // A 3x3x2 grid has many more elements, so we need many more steps
+        assert!(
+            scenario.metrics.total_steps > 1,
+            "Simulation MUST proceed beyond bootstrap. Got {} steps. Termination: {:?}",
+            scenario.metrics.total_steps,
+            scenario.metrics.termination_reason
+        );
+
+        let total_elements = grid.elements.len();
+        let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+        assert!(
+            installed > 5,
+            "Must install more than bootstrap (5 elements). Got {}",
+            installed
+        );
+        assert_eq!(installed, total_elements, "Should complete all elements");
+    }
+
+    #[test]
+    fn test_simulation_no_duplicate_installations() {
+        // Each element should be installed exactly once
+        let grid = SimGrid::new(3, 3, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        }];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+
+        let mut all_installed: Vec<i32> = scenario
+            .steps
+            .iter()
+            .flat_map(|s| s.element_ids.iter().copied())
+            .collect();
+        let before_dedup = all_installed.len();
+        all_installed.sort();
+        all_installed.dedup();
+        let after_dedup = all_installed.len();
+
+        assert_eq!(
+            before_dedup, after_dedup,
+            "No element should be installed twice. {} before dedup, {} after",
+            before_dedup, after_dedup
+        );
+    }
+
+    #[test]
+    fn test_parallel_scenarios_all_complete() {
+        // Multiple scenarios in parallel should all complete
+        let grid = SimGrid::new(3, 3, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        }];
+
+        let scenarios = run_all_scenarios(5, &grid, &wfs, (0.5, 0.3, 0.2), 0.5);
+        let total_elements = grid.elements.len();
+
+        for scenario in &scenarios {
+            let installed: usize = scenario.steps.iter().map(|s| s.element_ids.len()).sum();
+            assert_eq!(
+                installed, total_elements,
+                "Scenario {} should complete all {} elements, got {}. Termination: {:?}",
+                scenario.id, total_elements, installed, scenario.metrics.termination_reason
+            );
+        }
+    }
+
+    #[test]
+    fn test_local_steps_merged_into_single_global_step() {
+        // Multi-workfront scenario: each global step should collect local steps from workfronts
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront { id: 1, grid_x: 0, grid_y: 0 },
+            SimWorkfront { id: 2, grid_x: 3, grid_y: 3 },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+        assert!(
+            matches!(scenario.metrics.termination_reason, TerminationReason::Completed),
+            "Scenario should complete"
+        );
+
+        // At least some steps should have multiple local_steps (multi-workfront merge)
+        let multi_wf_steps = scenario.steps.iter()
+            .filter(|s| s.local_steps.len() > 1)
+            .count();
+        assert!(
+            multi_wf_steps > 0,
+            "With 2 workfronts, at least some steps should contain local_steps from multiple workfronts"
+        );
+
+        // Each local_step should have non-empty element_ids and valid workfront_id
+        for step in &scenario.steps {
+            for ls in &step.local_steps {
+                assert!(!ls.element_ids.is_empty(), "local_step element_ids must not be empty");
+                assert!(ls.workfront_id >= 1, "local_step workfront_id must be 1-based");
+                assert!(!ls.pattern.is_empty(), "local_step pattern must not be empty");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sequence_collation_round_robin() {
+        // Verify from_local_steps produces correct round-robin sequence collation
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront { id: 1, grid_x: 0, grid_y: 0 },
+            SimWorkfront { id: 2, grid_x: 3, grid_y: 3 },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+
+        for step in &scenario.steps {
+            if step.local_steps.len() > 1 {
+                // In round-robin collation, same round should share the same sequence_number
+                let mut seq_nums: Vec<usize> = step.sequences.iter()
+                    .map(|s| s.sequence_number)
+                    .collect();
+                seq_nums.sort();
+                seq_nums.dedup();
+
+                // Number of unique sequence numbers should equal sequence_round_count
+                let expected_rounds = step.sequence_round_count();
+                assert_eq!(
+                    seq_nums.len(), expected_rounds,
+                    "Unique sequence numbers should match round count: {} vs {}",
+                    seq_nums.len(), expected_rounds
+                );
+                break; // One verified multi-WF step is sufficient
+            }
+        }
+    }
+
+    #[test]
+    fn test_successful_workfront_excluded_from_same_cycle() {
+        // After completing a local step, a workfront should be excluded from the same global step cycle
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront { id: 1, grid_x: 0, grid_y: 0 },
+            SimWorkfront { id: 2, grid_x: 3, grid_y: 3 },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+
+        for step in &scenario.steps {
+            // Each workfront should appear at most once in local_steps of a single global step
+            let mut seen_wf: std::collections::HashSet<i32> = std::collections::HashSet::new();
+            for ls in &step.local_steps {
+                assert!(
+                    seen_wf.insert(ls.workfront_id),
+                    "Workfront {} appears multiple times in same global step — should be excluded after first completion",
+                    ls.workfront_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_global_step_element_ids_match_local_steps_union() {
+        // step.element_ids should be the union of all local_steps' element_ids
+        let grid = SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront { id: 1, grid_x: 0, grid_y: 0 },
+            SimWorkfront { id: 2, grid_x: 3, grid_y: 3 },
+        ];
+
+        let scenario = run_scenario(1, &grid, &wfs, 42, (0.5, 0.3, 0.2), 0.5);
+
+        for (i, step) in scenario.steps.iter().enumerate() {
+            let mut local_ids: Vec<i32> = step.local_steps.iter()
+                .flat_map(|ls| ls.element_ids.iter().copied())
+                .collect();
+            local_ids.sort();
+            let mut step_ids = step.element_ids.clone();
+            step_ids.sort();
+            assert_eq!(
+                step_ids, local_ids,
+                "Step {} element_ids should match union of local_steps element_ids",
+                i + 1
+            );
         }
     }
 }

@@ -90,19 +90,36 @@ pub struct SimSequence {
     pub sequence_number: usize,
 }
 
-/// A single step in a simulation scenario
+/// A single workfront's completed pattern within a global step.
+#[derive(Clone, Debug)]
+pub struct LocalStep {
+    /// Workfront ID that completed this local pattern
+    pub workfront_id: i32,
+    /// Element IDs installed by this workfront (1-indexed)
+    pub element_ids: Vec<i32>,
+    /// Floor level of this local step
+    pub floor: i32,
+    /// Pattern name (e.g. "ColGirder", "Bootstrap")
+    pub pattern: String,
+}
+
+/// A single step in a simulation scenario.
+/// May contain multiple local steps from different workfronts that were
+/// completed in the same global step cycle.
 #[derive(Clone, Debug)]
 pub struct SimStep {
-    /// Workfront ID that performed this step
+    /// Representative workfront ID (first local step's workfront)
     pub workfront_id: i32,
-    /// Element IDs installed in this step (1-indexed)
+    /// All element IDs installed in this step (union of all local steps)
     pub element_ids: Vec<i32>,
-    /// Individual sequence entries contained in this step
+    /// Collated sequence entries (round-robin across local steps)
     pub sequences: Vec<SimSequence>,
-    /// Floor level of this step
+    /// Minimum floor level across all local steps
     pub floor: i32,
-    /// Pattern name used for this grouped step
+    /// Summary pattern name
     pub pattern: String,
+    /// Individual local steps that compose this global step
+    pub local_steps: Vec<LocalStep>,
 }
 
 impl SimStep {
@@ -114,6 +131,7 @@ impl SimStep {
         pattern: impl Into<String>,
         start_seq: usize,
     ) -> Self {
+        let pat = pattern.into();
         let sequences = element_ids
             .iter()
             .enumerate()
@@ -123,13 +141,96 @@ impl SimStep {
             })
             .collect();
 
+        let local_steps = vec![LocalStep {
+            workfront_id,
+            element_ids: element_ids.clone(),
+            floor,
+            pattern: pat.clone(),
+        }];
+
         Self {
             workfront_id,
             element_ids,
             sequences,
             floor,
-            pattern: pattern.into(),
+            pattern: pat,
+            local_steps,
         }
+    }
+
+    /// Build a step from already-assigned sequence entries.
+    pub fn from_sequences(
+        workfront_id: i32,
+        sequences: Vec<SimSequence>,
+        floor: i32,
+        pattern: impl Into<String>,
+    ) -> Self {
+        let element_ids = sequences.iter().map(|seq| seq.element_id).collect::<Vec<_>>();
+        let pat = pattern.into();
+
+        let local_steps = vec![LocalStep {
+            workfront_id,
+            element_ids: element_ids.clone(),
+            floor,
+            pattern: pat.clone(),
+        }];
+
+        Self {
+            workfront_id,
+            element_ids,
+            sequences,
+            floor,
+            pattern: pat,
+            local_steps,
+        }
+    }
+
+    /// Build a global step by merging multiple local steps.
+    /// Sequences are collated round-robin: round 0 picks element[0] from each
+    /// local step, round 1 picks element[1], etc. All elements in the same
+    /// round share the same sequence_number. Shorter local steps simply have
+    /// no entry in later rounds.
+    pub fn from_local_steps(local_steps: Vec<LocalStep>, start_seq: usize) -> Self {
+        assert!(!local_steps.is_empty(), "from_local_steps requires at least one local step");
+
+        let workfront_id = local_steps[0].workfront_id;
+        let floor = local_steps.iter().map(|ls| ls.floor).min().unwrap_or(1);
+        let pattern = if local_steps.len() == 1 {
+            local_steps[0].pattern.clone()
+        } else {
+            format!("Multi({})", local_steps.len())
+        };
+
+        let max_len = local_steps.iter().map(|ls| ls.element_ids.len()).max().unwrap_or(0);
+        let mut sequences = Vec::new();
+        let mut element_ids = Vec::new();
+
+        for round in 0..max_len {
+            let seq_num = start_seq + round;
+            for ls in &local_steps {
+                if let Some(&eid) = ls.element_ids.get(round) {
+                    sequences.push(SimSequence {
+                        element_id: eid,
+                        sequence_number: seq_num,
+                    });
+                    element_ids.push(eid);
+                }
+            }
+        }
+
+        Self {
+            workfront_id,
+            element_ids,
+            sequences,
+            floor,
+            pattern,
+            local_steps,
+        }
+    }
+
+    /// Number of sequence rounds in this step (max local step member count).
+    pub fn sequence_round_count(&self) -> usize {
+        self.local_steps.iter().map(|ls| ls.element_ids.len()).max().unwrap_or(0)
     }
 }
 

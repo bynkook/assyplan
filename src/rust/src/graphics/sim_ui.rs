@@ -605,9 +605,17 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
                 ui.horizontal(|ui| {
                     ui.label(format!("Step {} / {}", step_display, max_step));
                     ui.separator();
-                    ui.label(format!("WF {}", step.workfront_id));
-                    ui.separator();
-                    ui.label(format!("Floor {}", step.floor));
+                    if step.local_steps.len() > 1 {
+                        let wf_detail = step.local_steps.iter()
+                            .map(|ls| format!("WF {}: {} ({})", ls.workfront_id, ls.element_ids.len(), ls.pattern))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.label(format!("[{}]", wf_detail));
+                    } else {
+                        ui.label(format!("WF {}", step.workfront_id));
+                        ui.separator();
+                        ui.label(format!("Floor {}", step.floor));
+                    }
                     ui.separator();
                     ui.label(format!(
                         "{} member(s): {:?}",
