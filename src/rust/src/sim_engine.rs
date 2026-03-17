@@ -1722,7 +1722,7 @@ fn run_scenario_internal(
                                         w1,
                                         w2,
                                         w3,
-                                    );
+                                    ) + seed_candidate.floor_bonus;
                                     complete_plans.push((vec![seed_id], score));
                                 }
 
@@ -1750,7 +1750,7 @@ fn run_scenario_internal(
                                                 w1,
                                                 w2,
                                                 w3,
-                                            );
+                                            ) + seed_candidate.floor_bonus;
                                             complete_plans.push((plan, score));
                                         }
                                     }
@@ -1768,7 +1768,7 @@ fn run_scenario_internal(
                                                     w1,
                                                     w2,
                                                     w3,
-                                                );
+                                                ) + seed_candidate.floor_bonus;
                                                 complete_plans.push((plan, score));
                                             }
                                         }

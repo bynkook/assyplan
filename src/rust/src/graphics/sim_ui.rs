@@ -29,30 +29,6 @@ const CHART_LEGEND_W: f32 = 70.0;
 pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     let mut changed = false;
 
-    let add_usize_input =
-        |ui: &mut Ui, value: &mut usize, min: usize, max: usize, width: f32| -> bool {
-            ui.add_sized(
-                [width, 20.0],
-                egui::DragValue::new(value)
-                    .clamp_range(min..=max)
-                    .speed(1.0)
-                    .fixed_decimals(0),
-            )
-            .changed()
-        };
-
-    let add_f64_input =
-        |ui: &mut Ui, value: &mut f64, min: f64, max: f64, width: f32| -> bool {
-            ui.add_sized(
-                [width, 20.0],
-                egui::DragValue::new(value)
-                    .clamp_range(min..=max)
-                    .speed(0.1)
-                    .fixed_decimals(2),
-            )
-            .changed()
-        };
-
     ui.heading("Simulation — Grid Configuration");
     ui.separator();
 
@@ -70,13 +46,11 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.nx, 2..=20)
                         .text("")
-                        .show_value(false)
                         .clamp_to_range(true),
                 );
                 if ui.small_button("▶").clicked() {
                     state.grid_config.nx = (state.grid_config.nx + 1).min(20);
                 }
-                let _ = add_usize_input(ui, &mut state.grid_config.nx, 2, 20, 56.0);
             });
             if state.grid_config.nx != prev_nx {
                 changed = true;
@@ -93,13 +67,11 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.ny, 2..=100)
                         .text("")
-                        .show_value(false)
                         .clamp_to_range(true),
                 );
                 if ui.small_button("▶").clicked() {
                     state.grid_config.ny = (state.grid_config.ny + 1).min(100);
                 }
-                let _ = add_usize_input(ui, &mut state.grid_config.ny, 2, 100, 56.0);
             });
             if state.grid_config.ny != prev_ny {
                 changed = true;
@@ -116,13 +88,11 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.nz, 1..=20)
                         .text("")
-                        .show_value(false)
                         .clamp_to_range(true),
                 );
                 if ui.small_button("▶").clicked() {
                     state.grid_config.nz = (state.grid_config.nz + 1).min(20);
                 }
-                let _ = add_usize_input(ui, &mut state.grid_config.nz, 1, 20, 56.0);
             });
             if state.grid_config.nz != prev_nz {
                 changed = true;
@@ -136,11 +106,9 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.dx, 1000.0..=20000.0)
                         .text("")
-                        .show_value(false)
                         .fixed_decimals(0)
                         .clamp_to_range(true),
                 );
-                let _ = add_f64_input(ui, &mut state.grid_config.dx, 1000.0, 20000.0, 72.0);
             });
             if (state.grid_config.dx - prev_dx).abs() > 1e-6 {
                 changed = true;
@@ -154,11 +122,9 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.dy, 1000.0..=20000.0)
                         .text("")
-                        .show_value(false)
                         .fixed_decimals(0)
                         .clamp_to_range(true),
                 );
-                let _ = add_f64_input(ui, &mut state.grid_config.dy, 1000.0, 20000.0, 72.0);
             });
             if (state.grid_config.dy - prev_dy).abs() > 1e-6 {
                 changed = true;
@@ -172,11 +138,9 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(&mut state.grid_config.dz, 1000.0..=10000.0)
                         .text("")
-                        .show_value(false)
                         .fixed_decimals(0)
                         .clamp_to_range(true),
                 );
-                let _ = add_f64_input(ui, &mut state.grid_config.dz, 1000.0, 10000.0, 72.0);
             });
             if (state.grid_config.dz - prev_dz).abs() > 1e-6 {
                 changed = true;
@@ -221,74 +185,65 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     ui.heading("Construction Constraints");
     ui.add_space(4.0);
     ui.label("Upper-Floor Column Rate Threshold:");
+    let prev_upper_floor_threshold = state.upper_floor_threshold;
     ui.horizontal(|ui| {
-        if ui
-            .add(
+        ui.add(
             egui::Slider::new(&mut state.upper_floor_threshold, 0.0..=1.0)
                 .text("")
-                .show_value(false)
                 .fixed_decimals(2)
                 .clamp_to_range(true),
-        )
-            .changed()
-        {
-            changed = true;
-        }
-        if add_f64_input(ui, &mut state.upper_floor_threshold, 0.0, 1.0, 64.0) {
-            changed = true;
-        }
+        );
         ui.label(format!("{:.0}%", state.upper_floor_threshold * 100.0));
     });
+    if (state.upper_floor_threshold - prev_upper_floor_threshold).abs() > 1e-9 {
+        changed = true;
+    }
 
     ui.add_space(8.0);
     ui.label("Lower-Floor Column Completion Ratio Threshold:");
+    let prev_lower_floor_completion_ratio = state.lower_floor_completion_ratio;
     ui.horizontal(|ui| {
-        if ui
-            .add(
+        ui.add(
             egui::Slider::new(&mut state.lower_floor_completion_ratio, 0.0..=1.0)
                 .text("")
-                .show_value(false)
                 .fixed_decimals(2)
                 .clamp_to_range(true),
-        )
-            .changed()
-        {
-            changed = true;
-        }
-        if add_f64_input(ui, &mut state.lower_floor_completion_ratio, 0.0, 1.0, 64.0) {
-            changed = true;
-        }
+        );
         ui.label(format!("{:.0}%", state.lower_floor_completion_ratio * 100.0));
     });
+    if (state.lower_floor_completion_ratio - prev_lower_floor_completion_ratio).abs() > 1e-9 {
+        changed = true;
+    }
 
     ui.add_space(8.0);
     ui.label("Lower-Floor Forced Completion Threshold:");
+    let prev_lower_floor_forced_completion = state.lower_floor_forced_completion;
     ui.horizontal(|ui| {
-        if add_usize_input(ui, &mut state.lower_floor_forced_completion, 0, 50, 64.0) {
-            changed = true;
-        }
+        ui.add(
+            egui::Slider::new(&mut state.lower_floor_forced_completion, 0..=50)
+                .text("")
+                .clamp_to_range(true),
+        );
         ui.label("members");
     });
+    if state.lower_floor_forced_completion != prev_lower_floor_forced_completion {
+        changed = true;
+    }
 
     ui.add_space(8.0);
     ui.label("Upper-Floor Boost Bonus (score):");
+    let prev_upper_floor_boost_bonus = state.upper_floor_boost_bonus;
     ui.horizontal(|ui| {
-        if ui
-            .add(
-                egui::Slider::new(&mut state.upper_floor_boost_bonus, 0.0..=10.0)
-                    .text("")
-                    .show_value(false)
-                    .fixed_decimals(2)
-                    .clamp_to_range(true),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if add_f64_input(ui, &mut state.upper_floor_boost_bonus, 0.0, 10.0, 64.0) {
-            changed = true;
-        }
+        ui.add(
+            egui::Slider::new(&mut state.upper_floor_boost_bonus, 0.0..=10.0)
+                .text("")
+                .fixed_decimals(2)
+                .clamp_to_range(true),
+        );
     });
+    if (state.upper_floor_boost_bonus - prev_upper_floor_boost_bonus).abs() > 1e-9 {
+        changed = true;
+    }
     ui.label(
         egui::RichText::new(
             "When lower-floor column completion reaches this threshold (default 80%), this value is added to upper-floor candidate scores. Higher values accelerate upper-floor entry.",
@@ -299,23 +254,18 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
 
     ui.add_space(8.0);
     ui.label("Lower-Floor Forced Bonus (score):");
+    let prev_lower_floor_forced_bonus = state.lower_floor_forced_bonus;
     ui.horizontal(|ui| {
-        if ui
-            .add(
-                egui::Slider::new(&mut state.lower_floor_forced_bonus, 0.0..=10.0)
-                    .text("")
-                    .show_value(false)
-                    .fixed_decimals(2)
-                    .clamp_to_range(true),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if add_f64_input(ui, &mut state.lower_floor_forced_bonus, 0.0, 10.0, 64.0) {
-            changed = true;
-        }
+        ui.add(
+            egui::Slider::new(&mut state.lower_floor_forced_bonus, 0.0..=10.0)
+                .text("")
+                .fixed_decimals(2)
+                .clamp_to_range(true),
+        );
     });
+    if (state.lower_floor_forced_bonus - prev_lower_floor_forced_bonus).abs() > 1e-9 {
+        changed = true;
+    }
     ui.label(
         egui::RichText::new(
             "When remaining lower-floor members are at or below the forced completion threshold (default 5), this value is added to lower-floor candidate scores to prioritize lower-floor finish.",
@@ -326,23 +276,18 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
 
     ui.add_space(8.0);
     ui.label("Upper-Floor Forced Penalty (score):");
+    let prev_upper_floor_forced_penalty = state.upper_floor_forced_penalty;
     ui.horizontal(|ui| {
-        if ui
-            .add(
-                egui::Slider::new(&mut state.upper_floor_forced_penalty, 0.0..=10.0)
-                    .text("")
-                    .show_value(false)
-                    .fixed_decimals(2)
-                    .clamp_to_range(true),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if add_f64_input(ui, &mut state.upper_floor_forced_penalty, 0.0, 10.0, 64.0) {
-            changed = true;
-        }
+        ui.add(
+            egui::Slider::new(&mut state.upper_floor_forced_penalty, 0.0..=10.0)
+                .text("")
+                .fixed_decimals(2)
+                .clamp_to_range(true),
+        );
     });
+    if (state.upper_floor_forced_penalty - prev_upper_floor_forced_penalty).abs() > 1e-9 {
+        changed = true;
+    }
     ui.label(
         egui::RichText::new(
             "When lower floor is in forced completion zone (default <= 5 remaining), this value is subtracted from upper-floor candidate scores. Higher values enforce lower-floor-first completion.",
@@ -367,11 +312,9 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(w1, 0.0..=1.0)
                         .text("")
-                        .show_value(false)
                         .fixed_decimals(2)
                         .clamp_to_range(true),
                 );
-                let _ = add_f64_input(ui, w1, 0.0, 1.0, 64.0);
             });
             ui.end_row();
 
@@ -380,11 +323,9 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(w2, 0.0..=1.0)
                         .text("")
-                        .show_value(false)
                         .fixed_decimals(2)
                         .clamp_to_range(true),
                 );
-                let _ = add_f64_input(ui, w2, 0.0, 1.0, 64.0);
             });
             ui.end_row();
 
@@ -393,11 +334,9 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
                 ui.add(
                     egui::Slider::new(w3, 0.0..=1.0)
                         .text("")
-                        .show_value(false)
                         .fixed_decimals(2)
                         .clamp_to_range(true),
                 );
-                let _ = add_f64_input(ui, w3, 0.0, 1.0, 64.0);
             });
             ui.end_row();
         });
@@ -413,10 +352,8 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         ui.add(
             egui::Slider::new(&mut state.sim_scenario_count, 1..=200)
                 .text("")
-                .show_value(false)
                 .clamp_to_range(true),
         );
-        let _ = add_usize_input(ui, &mut state.sim_scenario_count, 1, 200, 56.0);
     });
 
     ui.add_space(12.0);
