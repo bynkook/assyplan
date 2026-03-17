@@ -358,15 +358,6 @@ pub struct UiState {
     /// If remaining members on a lower floor are <= this value,
     /// lower-floor completion is strongly preferred.
     pub lower_floor_forced_completion: usize,
-    /// Bonus added to upper-floor candidates when lower-floor column completion
-    /// ratio reaches lower_floor_completion_ratio.
-    pub upper_floor_boost_bonus: f64,
-    /// Bonus added to lower-floor candidates when lower floor is in forced
-    /// completion zone (remaining members <= lower_floor_forced_completion).
-    pub lower_floor_forced_bonus: f64,
-    /// Penalty applied to upper-floor candidates while lower floor is in forced
-    /// completion zone (remaining members <= lower_floor_forced_completion).
-    pub upper_floor_forced_penalty: f64,
 
     // ============================================================================
     // Simulation Mode State (Phase 3)
@@ -444,9 +435,6 @@ impl UiState {
             upper_floor_threshold: 0.3,
             lower_floor_completion_ratio: 0.8,
             lower_floor_forced_completion: 5,
-            upper_floor_boost_bonus: 2.5,
-            lower_floor_forced_bonus: 3.0,
-            upper_floor_forced_penalty: 2.0,
             // Simulation Mode (Phase 3)
             grid_config: GridConfig::default(),
             sim_workfronts: Vec::new(),

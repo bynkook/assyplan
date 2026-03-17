@@ -1166,9 +1166,6 @@ impl AssyPlanApp {
             lower_floor_forced_completion_threshold: self
                 .ui_state
                 .lower_floor_forced_completion,
-            upper_floor_boost_bonus: self.ui_state.upper_floor_boost_bonus,
-            lower_floor_forced_bonus: self.ui_state.lower_floor_forced_bonus,
-            upper_floor_forced_penalty: self.ui_state.upper_floor_forced_penalty,
         };
         let count = self.ui_state.sim_scenario_count;
 

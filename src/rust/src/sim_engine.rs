@@ -25,9 +25,6 @@ pub struct SimConstraints {
     pub upper_floor_column_rate_threshold: f64,
     pub lower_floor_completion_ratio_threshold: f64,
     pub lower_floor_forced_completion_threshold: usize,
-    pub upper_floor_boost_bonus: f64,
-    pub lower_floor_forced_bonus: f64,
-    pub upper_floor_forced_penalty: f64,
 }
 
 #[derive(Default, Clone)]
@@ -35,6 +32,7 @@ struct WorkfrontState {
     owned_ids: HashSet<i32>,
     buffer_sequences: Vec<SimSequence>,
     planned_pattern: Vec<i32>,
+    committed_floor: Option<i32>,
 }
 
 impl WorkfrontState {
@@ -63,14 +61,13 @@ struct SingleCandidate {
     element_id: i32,
     connectivity: usize,
     frontier_dist: f64,
-    floor_bonus: f64,
 }
 
 impl SingleCandidate {
     fn score(&self, w1: f64, w2: f64) -> f64 {
         let connectivity_score = self.connectivity as f64;
         let frontier_score = 1.0 / (1.0 + self.frontier_dist.max(0.0));
-        (w1 * connectivity_score) + (w2 * frontier_score) + self.floor_bonus
+        (w1 * connectivity_score) + (w2 * frontier_score)
     }
 }
 
@@ -631,49 +628,42 @@ fn installed_elements_per_floor(
     result
 }
 
-fn compute_floor_bonus_map(
+fn is_floor_eligible_for_new_work(
+    floor: i32,
     floor_tracker: &FloorTracker,
     installed_columns_per_floor: &HashMap<i32, usize>,
     installed_elements_per_floor: &HashMap<i32, usize>,
     total_elements_per_floor: &HashMap<i32, usize>,
-    constraints: SimConstraints,
-) -> HashMap<i32, f64> {
-    let mut floor_bonus: HashMap<i32, f64> = HashMap::new();
-    let mut floors: Vec<i32> = total_elements_per_floor.keys().copied().collect();
-    floors.sort();
-
-    for floor in floors {
-        floor_bonus.entry(floor).or_insert(0.0);
-
-        if floor <= 1 {
-            continue;
-        }
-
-        let lower_floor = floor - 1;
-        let lower_total_columns = *floor_tracker.total_per_floor.get(&lower_floor).unwrap_or(&0);
-        let lower_installed_columns = *installed_columns_per_floor.get(&lower_floor).unwrap_or(&0);
-
-        let lower_total_elements = *total_elements_per_floor.get(&lower_floor).unwrap_or(&0);
-        let lower_installed_elements = *installed_elements_per_floor.get(&lower_floor).unwrap_or(&0);
-        let lower_remaining_elements = lower_total_elements.saturating_sub(lower_installed_elements);
-
-        if lower_remaining_elements >= 1
-            && lower_remaining_elements <= constraints.lower_floor_forced_completion_threshold
-        {
-            *floor_bonus.entry(lower_floor).or_insert(0.0) += constraints.lower_floor_forced_bonus;
-            *floor_bonus.entry(floor).or_insert(0.0) -= constraints.upper_floor_forced_penalty;
-            continue;
-        }
-
-        if lower_total_columns > 0 {
-            let lower_completion_ratio = lower_installed_columns as f64 / lower_total_columns as f64;
-            if lower_completion_ratio >= constraints.lower_floor_completion_ratio_threshold {
-                *floor_bonus.entry(floor).or_insert(0.0) += constraints.upper_floor_boost_bonus;
-            }
-        }
+    constraints: &SimConstraints,
+) -> bool {
+    if floor <= 1 {
+        return true;
     }
 
-    floor_bonus
+    let lower_floor = floor - 1;
+    let lower_total_columns = *floor_tracker.total_per_floor.get(&lower_floor).unwrap_or(&0);
+    let lower_installed_columns = *installed_columns_per_floor.get(&lower_floor).unwrap_or(&0);
+
+    if lower_total_columns == 0 {
+        return true;
+    }
+
+    let lower_completion_ratio = lower_installed_columns as f64 / lower_total_columns as f64;
+    if lower_completion_ratio < constraints.lower_floor_completion_ratio_threshold {
+        return false;
+    }
+
+    let lower_total_elements = *total_elements_per_floor.get(&lower_floor).unwrap_or(&0);
+    let lower_installed_elements = *installed_elements_per_floor.get(&lower_floor).unwrap_or(&0);
+    let lower_remaining_elements = lower_total_elements.saturating_sub(lower_installed_elements);
+
+    if lower_remaining_elements >= 1
+        && lower_remaining_elements <= constraints.lower_floor_forced_completion_threshold
+    {
+        return false;
+    }
+
+    true
 }
 
 fn collect_single_candidates(
@@ -683,7 +673,6 @@ fn collect_single_candidates(
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    floor_bonus_by_floor: &HashMap<i32, f64>,
 ) -> Vec<SingleCandidate> {
     collect_single_candidates_optimized(
         wf,
@@ -692,7 +681,6 @@ fn collect_single_candidates(
         local_element_ids,
         committed_ids,
         node_pos,
-        floor_bonus_by_floor,
     )
 }
 
@@ -704,7 +692,6 @@ fn collect_single_candidates_legacy(
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    floor_bonus_by_floor: &HashMap<i32, f64>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
@@ -767,7 +754,6 @@ fn collect_single_candidates_legacy(
             element_id: elem.id,
             connectivity,
             frontier_dist: dist,
-            floor_bonus: *floor_bonus_by_floor.get(&floor).unwrap_or(&0.0),
         });
     }
 
@@ -781,7 +767,6 @@ fn collect_single_candidates_optimized(
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    floor_bonus_by_floor: &HashMap<i32, f64>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
@@ -851,7 +836,6 @@ fn collect_single_candidates_optimized(
             element_id: elem.id,
             connectivity,
             frontier_dist: dist,
-            floor_bonus: *floor_bonus_by_floor.get(&floor).unwrap_or(&0.0),
         });
     }
 
@@ -1587,13 +1571,6 @@ fn run_scenario_internal(
             let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
             let committed_elements_per_floor =
                 installed_elements_per_floor(grid, &committed_ids, dz);
-            let floor_bonus_by_floor = compute_floor_bonus_map(
-                &floor_tracker,
-                &committed_floor_counts,
-                &committed_elements_per_floor,
-                &total_elements_by_floor,
-                constraints,
-            );
 
             total_sequence_rounds += 1;
 
@@ -1623,6 +1600,9 @@ fn run_scenario_internal(
                 });
 
                 if current_state.planned_pattern.is_empty() || plan_has_conflict {
+                    let mut rollback_commitment = false;
+                    let mut rollback_buffer_ids: Vec<i32> = Vec::new();
+
                     let new_plan: Vec<i32> = if stable_ids.is_empty() && cycle_local_steps.is_empty() {
                         let bootstrap_candidates: Vec<Candidate> = generate_bootstrap_candidates(wf, grid, &node_pos)
                             .into_iter()
@@ -1687,8 +1667,9 @@ fn run_scenario_internal(
                             &local_ids,
                             &wf_committed_ids,
                             &node_pos,
-                            &floor_bonus_by_floor,
                         );
+
+                        let committed_floor = current_state.committed_floor;
 
                         let valid_seeds: Vec<&SingleCandidate> = wf_candidates
                             .iter()
@@ -1701,9 +1682,33 @@ fn run_scenario_internal(
                                     constraints.upper_floor_column_rate_threshold,
                                 )
                             })
+                            .filter(|candidate| {
+                                let candidate_floor = grid
+                                    .element_floor_by_id
+                                    .get(&candidate.element_id)
+                                    .copied()
+                                    .unwrap_or(1);
+
+                                if let Some(locked_floor) = committed_floor {
+                                    return candidate_floor == locked_floor;
+                                }
+
+                                is_floor_eligible_for_new_work(
+                                    candidate_floor,
+                                    &floor_tracker,
+                                    &committed_floor_counts,
+                                    &committed_elements_per_floor,
+                                    &total_elements_by_floor,
+                                    &constraints,
+                                )
+                            })
                             .collect();
 
                         if valid_seeds.is_empty() {
+                            if committed_floor.is_some() {
+                                rollback_commitment = true;
+                                rollback_buffer_ids = current_state.buffer_element_ids();
+                            }
                             Vec::new()
                         } else {
                             let mut complete_plans: Vec<(Vec<i32>, f64)> = Vec::new();
@@ -1722,7 +1727,7 @@ fn run_scenario_internal(
                                         w1,
                                         w2,
                                         w3,
-                                    ) + seed_candidate.floor_bonus;
+                                    );
                                     complete_plans.push((vec![seed_id], score));
                                 }
 
@@ -1750,7 +1755,7 @@ fn run_scenario_internal(
                                                 w1,
                                                 w2,
                                                 w3,
-                                            ) + seed_candidate.floor_bonus;
+                                            );
                                             complete_plans.push((plan, score));
                                         }
                                     }
@@ -1768,7 +1773,7 @@ fn run_scenario_internal(
                                                     w1,
                                                     w2,
                                                     w3,
-                                                ) + seed_candidate.floor_bonus;
+                                                );
                                                 complete_plans.push((plan, score));
                                             }
                                         }
@@ -1828,6 +1833,14 @@ fn run_scenario_internal(
                     };
 
                     if let Some(state) = workfront_states.get_mut(&wf.id) {
+                        if rollback_commitment {
+                            for eid in &rollback_buffer_ids {
+                                state.owned_ids.remove(eid);
+                            }
+                            state.buffer_sequences.clear();
+                            state.planned_pattern.clear();
+                            state.committed_floor = None;
+                        }
                         if state.planned_pattern.is_empty() || plan_has_conflict {
                             state.planned_pattern = new_plan;
                         }
@@ -1868,11 +1881,19 @@ fn run_scenario_internal(
             // Add selected elements to workfront buffers
             for &(wf_id, element_id) in &sequence_installations {
                 if let Some(state) = workfront_states.get_mut(&wf_id) {
+                    let was_empty = state.buffer_sequences.is_empty();
                     state.owned_ids.insert(element_id);
                     state.buffer_sequences.push(SimSequence {
                         element_id,
                         sequence_number: 0, // placeholder — will be reassigned by from_local_steps
                     });
+                    if was_empty {
+                        state.committed_floor = grid
+                            .element_floor_by_id
+                            .get(&element_id)
+                            .copied()
+                            .or_else(|| element_floor(element_id, grid, dz));
+                    }
                 }
             }
 
@@ -1915,6 +1936,7 @@ fn run_scenario_internal(
                         // Clear its buffer and plan
                         state.buffer_sequences.clear();
                         state.planned_pattern.clear();
+                        state.committed_floor = None;
                     }
                 }
             }
@@ -2007,9 +2029,6 @@ pub fn run_scenario(
         upper_floor_column_rate_threshold: threshold,
         lower_floor_completion_ratio_threshold: 0.8,
         lower_floor_forced_completion_threshold: 5,
-        upper_floor_boost_bonus: 2.5,
-        lower_floor_forced_bonus: 3.0,
-        upper_floor_forced_penalty: 2.0,
     };
     run_scenario_internal(scenario_id, grid, workfronts, seed, weights, constraints, None)
 }
@@ -2036,9 +2055,6 @@ pub fn run_all_scenarios_with_progress(
         upper_floor_column_rate_threshold: threshold,
         lower_floor_completion_ratio_threshold: 0.8,
         lower_floor_forced_completion_threshold: 5,
-        upper_floor_boost_bonus: 2.5,
-        lower_floor_forced_bonus: 3.0,
-        upper_floor_forced_penalty: 2.0,
     };
     run_all_scenarios_with_progress_and_cancel(
         count,
@@ -2125,7 +2141,6 @@ mod tests {
             element_id: 1,
             connectivity: 2,
             frontier_dist: 1.0,
-            floor_bonus: 0.2,
         };
         let s = c.score(0.5, 0.3);
         assert!(s > 0.0, "score should be positive");
@@ -2741,7 +2756,6 @@ mod tests {
 
         let local_element_ids: HashSet<i32> = support_ids.iter().take(3).copied().collect();
         let committed_ids: HashSet<i32> = support_ids.iter().take(4).copied().collect();
-        let floor_bonus_by_floor: HashMap<i32, f64> = HashMap::new();
 
         let legacy = collect_single_candidates_legacy(
             &wf,
@@ -2750,7 +2764,6 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            &floor_bonus_by_floor,
         );
         let optimized = collect_single_candidates_optimized(
             &wf,
@@ -2759,28 +2772,25 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            &floor_bonus_by_floor,
         );
 
-        let legacy_sig: Vec<(i32, usize, i32, i32)> = legacy
+        let legacy_sig: Vec<(i32, usize, i32)> = legacy
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
-        let optimized_sig: Vec<(i32, usize, i32, i32)> = optimized
+        let optimized_sig: Vec<(i32, usize, i32)> = optimized
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
@@ -2808,8 +2818,6 @@ mod tests {
 
         let local_element_ids: HashSet<i32> = support_ids.iter().take(2).copied().collect();
         let committed_ids: HashSet<i32> = support_ids.iter().take(5).copied().collect();
-        let mut floor_bonus_by_floor: HashMap<i32, f64> = HashMap::new();
-        floor_bonus_by_floor.insert(2, 2.5);
 
         let legacy = collect_single_candidates_legacy(
             &wf,
@@ -2818,7 +2826,6 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            &floor_bonus_by_floor,
         );
         let optimized = collect_single_candidates_optimized(
             &wf,
@@ -2827,28 +2834,25 @@ mod tests {
             &local_element_ids,
             &committed_ids,
             &node_pos,
-            &floor_bonus_by_floor,
         );
 
-        let legacy_sig: Vec<(i32, usize, i32, i32)> = legacy
+        let legacy_sig: Vec<(i32, usize, i32)> = legacy
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
-        let optimized_sig: Vec<(i32, usize, i32, i32)> = optimized
+        let optimized_sig: Vec<(i32, usize, i32)> = optimized
             .iter()
             .map(|c| {
                 (
                     c.element_id,
                     c.connectivity,
                     (c.frontier_dist * 1000.0).round() as i32,
-                    (c.floor_bonus * 1000.0).round() as i32,
                 )
             })
             .collect();
