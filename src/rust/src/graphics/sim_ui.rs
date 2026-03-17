@@ -1285,13 +1285,13 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
     use crate::graphics::ui::SimScenario;
 
     let scenarios = &state.sim_scenarios;
-    if scenarios.len() < 2 {
-        return; // comparison only meaningful with ≥ 2 scenarios
+    if scenarios.is_empty() {
+        return;
     }
 
     ui.add_space(10.0);
     ui.separator();
-    ui.heading("Scenario Comparison (Top 10)");
+    ui.heading("Step별 누적 총 부재 설치 수 비교 (Top 10)");
     ui.add_space(4.0);
 
     // ── Build sorted top-N list ───────────────────────────────────────────
@@ -1452,11 +1452,11 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
                 Color32::from_gray(130),
             );
 
-    // Y-axis label (rotated text not available in egui; place abbreviated label at top)
+    // Y-axis label (rotated text not available in egui; place title above top tick to avoid overlap)
             painter.text(
-                pos2(total_rect.left() + 2.0, plot_rect.top()),
+                pos2(total_rect.left() + 2.0, total_rect.top() + 1.0),
                 egui::Align2::LEFT_TOP,
-                "Members",
+                "Cumulative Members",
                 font_id,
                 Color32::from_gray(130),
             );
