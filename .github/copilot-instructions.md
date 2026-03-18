@@ -182,6 +182,10 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - floor 선택은 층 간 점수 비교가 아니라 제약 기반 타깃팅으로 처리한다.
 	- 비잠금 상태: 제약(상층 비율/하층 완료율/강제마감) 통과 floor 중 우선 floor를 선택
 	- 잠금 상태: `committed_floor` 고정 (해당 floor 후보만 선택)
+- 상층 기둥 비율 제약(`upper_floor_column_rate_threshold`)은 **ratio gate 전용**으로 적용한다.
+	- 최상층(`max_floor`)은 ratio gate를 면제한다. (B)
+	- 하층 기둥 완료율이 `lower_floor_completion_ratio_threshold` 이상이면 ratio gate를 면제한다. (C)
+	- 단, 하층 잔여 기둥이 `<= 5`인 강제마감 구간은 면제하지 않고 하층 우선 마감을 유지한다.
 - 잠금 floor에서 더 이상 유효 후보가 없으면 즉시 rollback 한다.
 	- buffer/planned_pattern/lock를 해제하고, `last_failed_floor`를 기록해 즉시 동일 floor 재시도 루프를 방지한다.
 - `planned_pattern` 이 버퍼에 의해 완전히 소진되었는데 Step이 미완성인 경우(`plan_exhausted`) 재계획을 강제한다.

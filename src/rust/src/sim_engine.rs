@@ -118,6 +118,7 @@ fn grid_dz(grid: &SimGrid) -> f64 {
 struct FloorTracker {
     total_per_floor: HashMap<i32, usize>,
     column_floor_by_element: HashMap<i32, i32>,
+    max_floor: i32,
 }
 
 impl FloorTracker {
@@ -141,9 +142,12 @@ impl FloorTracker {
             }
         }
 
+        let max_floor = total_per_floor.keys().copied().max().unwrap_or(1);
+
         Self {
             total_per_floor,
             column_floor_by_element,
+            max_floor,
         }
     }
 
@@ -474,7 +478,8 @@ fn check_upper_floor_constraint_tracked(
     element_ids: &[i32],
     floor_tracker: &FloorTracker,
     installed_per_floor: &HashMap<i32, usize>,
-    threshold: f64,
+    upper_floor_column_rate_threshold: f64,
+    lower_floor_completion_ratio_threshold: f64,
 ) -> bool {
     for eid in element_ids {
         let Some(floor) = floor_tracker.column_floor_by_element.get(eid).copied() else {
@@ -496,10 +501,27 @@ fn check_upper_floor_constraint_tracked(
             continue;
         }
 
+        // If lower floor has only a few columns left, force lower-floor completion first.
+        let remaining_lower = total_lower - installed_lower;
+        if remaining_lower <= 5 && installed_lower > 0 {
+            return false;
+        }
+
+        let lower_floor_completion_ratio = installed_lower as f64 / total_lower as f64;
+        let skip_ratio_gate = floor >= floor_tracker.max_floor
+            || lower_floor_completion_ratio >= lower_floor_completion_ratio_threshold;
+
+        // B + C: relax only ratio gating.
+        // - B: top floor (no upper dependent floor)
+        // - C: lower floor already sufficiently completed
+        if skip_ratio_gate {
+            continue;
+        }
+
         if installed_lower > 0 {
             let installed_upper = *installed_per_floor.get(&floor).unwrap_or(&0) + 1;
             let ratio = installed_upper as f64 / installed_lower as f64;
-            if ratio > threshold {
+            if ratio > upper_floor_column_rate_threshold {
                 return false;
             }
         }
@@ -597,12 +619,19 @@ fn check_upper_floor_constraint(
     element_ids: &[i32],
     grid: &SimGrid,
     installed_ids: &HashSet<i32>,
-    threshold: f64,
+    upper_floor_column_rate_threshold: f64,
+    lower_floor_completion_ratio_threshold: f64,
 ) -> bool {
     let dz = grid_dz(grid);
     let tracker = FloorTracker::from_grid(grid, dz);
     let installed_per_floor = tracker.installed_per_floor_from(installed_ids);
-    check_upper_floor_constraint_tracked(element_ids, &tracker, &installed_per_floor, threshold)
+    check_upper_floor_constraint_tracked(
+        element_ids,
+        &tracker,
+        &installed_per_floor,
+        upper_floor_column_rate_threshold,
+        lower_floor_completion_ratio_threshold,
+    )
 }
 
 fn total_elements_per_floor(grid: &SimGrid, dz: f64) -> HashMap<i32, usize> {
@@ -975,7 +1004,8 @@ fn push_pattern_if_valid(
     installed_ids: &HashSet<i32>,
     floor_tracker: &FloorTracker,
     installed_per_floor: &HashMap<i32, usize>,
-    threshold: f64,
+    upper_floor_column_rate_threshold: f64,
+    lower_floor_completion_ratio_threshold: f64,
 ) {
     if contains_forbidden_pattern(&element_ids, grid) {
         return;
@@ -994,7 +1024,8 @@ fn push_pattern_if_valid(
         &element_ids,
         floor_tracker,
         installed_per_floor,
-        threshold,
+        upper_floor_column_rate_threshold,
+        lower_floor_completion_ratio_threshold,
     ) {
         return;
     }
@@ -1206,7 +1237,8 @@ fn try_build_pattern(
     installed_ids: &HashSet<i32>,
     installed_nodes: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
-    threshold: f64,
+    upper_floor_column_rate_threshold: f64,
+    lower_floor_completion_ratio_threshold: f64,
     w1: f64,
     w2: f64,
     w3: f64,
@@ -1230,7 +1262,8 @@ fn try_build_pattern(
             installed_ids,
             floor_tracker,
             &installed_per_floor,
-            threshold,
+            upper_floor_column_rate_threshold,
+            lower_floor_completion_ratio_threshold,
         );
 
         let mut second_girders =
@@ -1256,7 +1289,8 @@ fn try_build_pattern(
                 installed_ids,
                 floor_tracker,
                 &installed_per_floor,
-                threshold,
+                upper_floor_column_rate_threshold,
+                lower_floor_completion_ratio_threshold,
             );
         }
     } else {
@@ -1269,7 +1303,8 @@ fn try_build_pattern(
             installed_ids,
             floor_tracker,
             &installed_per_floor,
-            threshold,
+            upper_floor_column_rate_threshold,
+            lower_floor_completion_ratio_threshold,
         );
 
         let seed_upper = seed.node_j_id;
@@ -1284,7 +1319,8 @@ fn try_build_pattern(
                 installed_ids,
                 floor_tracker,
                 &installed_per_floor,
-                threshold,
+                upper_floor_column_rate_threshold,
+                lower_floor_completion_ratio_threshold,
             );
 
             if let Some(col2_elem) = get_element(grid, col2) {
@@ -1299,7 +1335,8 @@ fn try_build_pattern(
                             installed_ids,
                             floor_tracker,
                             &installed_per_floor,
-                            threshold,
+                            upper_floor_column_rate_threshold,
+                            lower_floor_completion_ratio_threshold,
                         );
 
                         let mut second_girders =
@@ -1325,7 +1362,8 @@ fn try_build_pattern(
                                 installed_ids,
                                 floor_tracker,
                                 &installed_per_floor,
-                                threshold,
+                                upper_floor_column_rate_threshold,
+                                lower_floor_completion_ratio_threshold,
                             );
                         }
 
@@ -1362,7 +1400,8 @@ fn try_build_pattern(
                                             installed_ids,
                                             floor_tracker,
                                             &installed_per_floor,
-                                            threshold,
+                                            upper_floor_column_rate_threshold,
+                                            lower_floor_completion_ratio_threshold,
                                         );
                                     }
                                 }
@@ -1383,7 +1422,8 @@ fn try_build_pattern(
                 installed_ids,
                 floor_tracker,
                 &installed_per_floor,
-                threshold,
+                upper_floor_column_rate_threshold,
+                lower_floor_completion_ratio_threshold,
             );
 
             if let Some(g1_elem) = get_element(grid, g1) {
@@ -1400,7 +1440,8 @@ fn try_build_pattern(
                             installed_ids,
                             floor_tracker,
                             &installed_per_floor,
-                            threshold,
+                            upper_floor_column_rate_threshold,
+                            lower_floor_completion_ratio_threshold,
                         );
                     }
 
@@ -1426,7 +1467,8 @@ fn try_build_pattern(
                             installed_ids,
                             floor_tracker,
                             &installed_per_floor,
-                            threshold,
+                                upper_floor_column_rate_threshold,
+                                lower_floor_completion_ratio_threshold,
                         );
                     }
                 }
@@ -1692,6 +1734,7 @@ fn run_scenario_internal(
                                     &floor_tracker,
                                     &committed_floor_counts,
                                     constraints.upper_floor_column_rate_threshold,
+                                    constraints.lower_floor_completion_ratio_threshold,
                                 )
                             })
                             .filter(|candidate| {
@@ -1861,6 +1904,7 @@ fn run_scenario_internal(
                                         &stable_nodes,
                                         &node_pos,
                                         constraints.upper_floor_column_rate_threshold,
+                                        constraints.lower_floor_completion_ratio_threshold,
                                         w1,
                                         w2,
                                         w3,
@@ -2641,7 +2685,7 @@ mod tests {
 
         if let Some(col2_id) = floor2_col {
             // With threshold = 0.5, upper floor should be blocked when 4 remaining
-            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.5);
+            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.5, 0.8);
             assert!(
                 !allowed,
                 "Upper floor should be blocked when lower has 4 remaining columns (<=5)"
@@ -2688,7 +2732,7 @@ mod tests {
             .map(|e| e.id);
 
         if let Some(col2_id) = floor2_col {
-            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.3);
+            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.3, 0.8);
             assert!(
                 allowed,
                 "Upper floor should be allowed when lower is 100% complete"
@@ -2698,7 +2742,8 @@ mod tests {
 
     #[test]
     fn test_upper_floor_constraint_tracked_single_column_rate_based() {
-        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        // Use 4 z-levels so floor 2 is not the top floor (B bypass should not apply).
+        let grid = SimGrid::new(4, 4, 4, 6000.0, 6000.0, 4000.0);
         let dz = grid_dz(&grid);
         let tracker = FloorTracker::from_grid(&grid, dz);
 
@@ -2728,7 +2773,9 @@ mod tests {
             .map(|e| e.id)
             .expect("floor2 column should exist");
 
-        for installed_count in 0..=floor1_cols.len() {
+        // Keep this test in the pure ratio-governed zone
+        // (before forced-completion guard kicks in and before C-threshold relaxes).
+        for installed_count in 0..=10 {
             let installed: HashSet<i32> = floor1_cols
                 .iter()
                 .take(installed_count)
@@ -2741,6 +2788,7 @@ mod tests {
                 &tracker,
                 &installed_per_floor,
                 0.3,
+                0.8,
             );
 
             // With one new upper-floor column candidate:
@@ -2798,7 +2846,7 @@ mod tests {
 
         let legacy = check_upper_floor_constraint_legacy(&floor2_cols, &grid, &installed, 0.3);
         let tracked =
-            check_upper_floor_constraint_tracked(&floor2_cols, &tracker, &installed_per_floor, 0.3);
+            check_upper_floor_constraint_tracked(&floor2_cols, &tracker, &installed_per_floor, 0.3, 0.8);
 
         assert_eq!(legacy, tracked);
     }
@@ -2925,6 +2973,111 @@ mod tests {
             .collect();
 
         assert_eq!(legacy_sig, optimized_sig);
+    }
+
+    #[test]
+    fn test_upper_floor_constraint_bypassed_on_top_floor() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let dz = grid_dz(&grid);
+        let tracker = FloorTracker::from_grid(&grid, dz);
+
+        let top_floor = tracker.max_floor;
+        let lower_floor = (top_floor - 1).max(1);
+
+        let lower_floor_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| ((z / dz).round() as i32 + 1) == lower_floor)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .collect();
+
+        let top_floor_col = grid
+            .elements
+            .iter()
+            .find(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| ((z / dz).round() as i32 + 1) == top_floor)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .expect("top-floor column should exist");
+
+        // Intentionally low lower-floor progress. With B rule, top floor should bypass ratio gate.
+        let installed: HashSet<i32> = lower_floor_cols.iter().take(2).copied().collect();
+        let installed_per_floor = tracker.installed_per_floor_from(&installed);
+
+        let allowed = check_upper_floor_constraint_tracked(
+            &[top_floor_col],
+            &tracker,
+            &installed_per_floor,
+            0.3,
+            0.8,
+        );
+
+        assert!(allowed, "top-floor column should bypass upper-floor ratio constraint");
+    }
+
+    #[test]
+    fn test_upper_floor_constraint_relaxed_when_lower_floor_reaches_threshold() {
+        // Use a larger floor so 80% completion can be reached while
+        // still leaving more than 5 columns (forced-completion guard not active).
+        // Also use 4 z-levels so floor 2 is not top floor.
+        let grid = SimGrid::new(6, 6, 4, 6000.0, 6000.0, 4000.0);
+        let dz = grid_dz(&grid);
+        let tracker = FloorTracker::from_grid(&grid, dz);
+
+        let floor1_cols: Vec<i32> = grid
+            .elements
+            .iter()
+            .filter(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| ((z / dz).round() as i32 + 1) == 1)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .collect();
+
+        let floor2_col = grid
+            .elements
+            .iter()
+            .find(|e| {
+                e.member_type == "Column"
+                    && grid
+                        .node_coords(e.node_i_id)
+                        .map(|(_, _, z)| ((z / dz).round() as i32 + 1) == 2)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .expect("floor2 column should exist");
+
+        // Force ratio failure if checked: installed_upper=1, installed_lower=29 => 0.034 > 0.01
+        // C rule should bypass ratio because lower floor completion is already 80%+ (29/36)
+        // and remaining columns are still > 5 (so forced-completion guard is not active).
+        let installed: HashSet<i32> = floor1_cols.iter().take(29).copied().collect();
+        let installed_per_floor = tracker.installed_per_floor_from(&installed);
+
+        let allowed = check_upper_floor_constraint_tracked(
+            &[floor2_col],
+            &tracker,
+            &installed_per_floor,
+            0.01,
+            0.8,
+        );
+
+        assert!(
+            allowed,
+            "upper-floor ratio gate should be relaxed once lower floor completion reaches threshold"
+        );
     }
 
     #[test]
