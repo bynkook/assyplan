@@ -1242,6 +1242,34 @@ fn cross_girder_bonus(element_ids: &[i32], grid: &SimGrid, installed_ids: &HashS
     bonus
 }
 
+fn should_defer_buffer_completion(
+    buffer_element_ids: &[i32],
+    planned_pattern: &[i32],
+    current_pattern: &StepPatternType,
+    grid: &SimGrid,
+    has_stable_structure: bool,
+) -> bool {
+    if buffer_element_ids.is_empty() || planned_pattern.len() <= buffer_element_ids.len() {
+        return false;
+    }
+
+    let buffer_ids: HashSet<i32> = buffer_element_ids.iter().copied().collect();
+    if !buffer_ids.iter().all(|eid| planned_pattern.contains(eid)) {
+        return false;
+    }
+
+    let StepBufferDecision::Complete(planned_final_pattern) =
+        classify_buffer(planned_pattern, grid, has_stable_structure)
+    else {
+        return false;
+    };
+
+    matches!(
+        (current_pattern.as_str(), planned_final_pattern.as_str()),
+        ("Girder", "GirderGirder") | ("ColGirder", "ColGirderGirder")
+    )
+}
+
 fn bundle_score(
     element_ids: &[i32],
     grid: &SimGrid,
@@ -1535,16 +1563,7 @@ fn try_build_pattern(
         };
     }
 
-    let max_len = choices
-        .iter()
-        .map(|c| c.element_ids.len())
-        .max()
-        .unwrap_or(1);
-    let longest: Vec<&PatternChoice> = choices
-        .iter()
-        .filter(|choice| choice.element_ids.len() == max_len)
-        .collect();
-    let scores: Vec<f64> = longest
+    let scores: Vec<f64> = choices
         .iter()
         .map(|choice| {
             bundle_score(
@@ -1559,7 +1578,7 @@ fn try_build_pattern(
             )
         })
         .collect();
-    let chosen = longest[weighted_random_choice(&scores, rng)];
+    let chosen = &choices[weighted_random_choice(&scores, rng)];
     (
         chosen.element_ids.clone(),
         chosen.pattern.as_str().to_string(),
@@ -1667,6 +1686,10 @@ fn run_scenario_internal(
                 acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
                 acc
             });
+            let mut committed_ids = committed_ids;
+            for local_step in &cycle_local_steps {
+                committed_ids.extend(local_step.element_ids.iter().copied());
+            }
             let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
 
             total_sequence_rounds += 1;
@@ -1761,7 +1784,6 @@ fn run_scenario_internal(
                         }
 
                         let local_ids = current_state.all_local_ids();
-                        let support_nodes = node_set_for_elements(&support_ids, grid);
                         let allowed_floors: HashSet<i32> = if let Some(locked_floor) = current_state.committed_floor {
                             std::iter::once(locked_floor).collect()
                         } else {
@@ -1871,18 +1893,25 @@ fn run_scenario_internal(
                                 Vec::new()
                             } else {
                             let mut complete_plans: Vec<(Vec<i32>, f64)> = Vec::new();
+                            let mut local_support_ids = support_ids.clone();
+                            local_support_ids.extend(current_state.buffer_sequences.iter().map(|seq| seq.element_id));
+                            let local_support_nodes = node_set_for_elements(&local_support_ids, grid);
 
                             for seed_candidate in &floor_seeds {
                                 let seed_id = seed_candidate.element_id;
                                 let seed_is_column = is_column(grid, seed_id);
 
-                                if !seed_is_column && check_bundle_stability(&[seed_id], grid, &support_ids) {
+                                if !seed_is_column
+                                    && !wf_committed_ids.contains(&seed_id)
+                                    && !planned_reserved_ids.contains(&seed_id)
+                                    && check_bundle_stability(&[seed_id], grid, &local_support_ids)
+                                {
                                     let score = bundle_score(
                                         &[seed_id],
                                         grid,
-                                        &support_nodes,
+                                        &local_support_nodes,
                                         &node_pos,
-                                        &support_ids,
+                                        &local_support_ids,
                                         w1,
                                         w2,
                                         w3,
@@ -1904,13 +1933,16 @@ fn run_scenario_internal(
 
                                     for &g1 in &touching_girders {
                                         let plan = vec![seed_id, g1];
-                                        if check_bundle_stability(&plan, grid, &support_ids) {
+                                        let is_available = plan.iter().all(|eid| {
+                                            !wf_committed_ids.contains(eid) && !planned_reserved_ids.contains(eid)
+                                        });
+                                        if is_available && check_bundle_stability(&plan, grid, &local_support_ids) {
                                             let score = bundle_score(
                                                 &plan,
                                                 grid,
-                                                &support_nodes,
+                                                &local_support_nodes,
                                                 &node_pos,
-                                                &support_ids,
+                                                &local_support_ids,
                                                 w1,
                                                 w2,
                                                 w3,
@@ -1922,13 +1954,16 @@ fn run_scenario_internal(
                                     for i in 0..touching_girders.len() {
                                         for j in (i + 1)..touching_girders.len() {
                                             let plan = vec![seed_id, touching_girders[i], touching_girders[j]];
-                                            if check_bundle_stability(&plan, grid, &support_ids) {
+                                            let is_available = plan.iter().all(|eid| {
+                                                !wf_committed_ids.contains(eid) && !planned_reserved_ids.contains(eid)
+                                            });
+                                            if is_available && check_bundle_stability(&plan, grid, &local_support_ids) {
                                                 let score = bundle_score(
                                                     &plan,
                                                     grid,
-                                                    &support_nodes,
+                                                    &local_support_nodes,
                                                     &node_pos,
-                                                    &support_ids,
+                                                    &local_support_ids,
                                                     w1,
                                                     w2,
                                                     w3,
@@ -1947,7 +1982,7 @@ fn run_scenario_internal(
                                 });
                                 complete_plans[0].0.clone()
                             } else {
-                                let stable_nodes = node_set_for_elements(&support_ids, grid);
+                                let stable_nodes = node_set_for_elements(&local_support_ids, grid);
                                 let mut seed_order: Vec<&SingleCandidate> = floor_seeds;
                                 seed_order.sort_by(|a, b| {
                                     b.score(w1, w2)
@@ -1962,7 +1997,7 @@ fn run_scenario_internal(
                                         seed_candidate.element_id,
                                         grid,
                                         &floor_tracker,
-                                        &support_ids,
+                                        &local_support_ids,
                                         &stable_nodes,
                                         &node_pos,
                                         constraints.upper_floor_column_rate_threshold,
@@ -2076,6 +2111,13 @@ fn run_scenario_internal(
             for ls in &cycle_local_steps {
                 cycle_stable_context.extend(ls.element_ids.iter().copied());
             }
+            let committed_with_buffers: HashSet<i32> = workfront_states.values().fold(
+                cycle_stable_context.clone(),
+                |mut acc, state| {
+                    acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
+                    acc
+                },
+            );
 
             for wf in &eligible_wfs {
                 if cycle_completed_wf.contains(&wf.id) {
@@ -2089,6 +2131,40 @@ fn run_scenario_internal(
                 let decision = classify_buffer(&buffer_element_ids, grid, !cycle_stable_context.is_empty());
 
                 if let StepBufferDecision::Complete(pattern) = decision {
+                    if should_defer_buffer_completion(
+                        &buffer_element_ids,
+                        &state.planned_pattern,
+                        &pattern,
+                        grid,
+                        !cycle_stable_context.is_empty(),
+                    ) {
+                        let current_floor = state
+                            .committed_floor
+                            .or_else(|| {
+                                buffer_element_ids
+                                    .iter()
+                                    .filter_map(|eid| element_floor(*eid, grid, dz))
+                                    .min()
+                            })
+                            .unwrap_or(1);
+                        let total_on_floor = grid
+                            .elements_by_floor
+                            .get(&current_floor)
+                            .map(|elements| elements.len())
+                            .unwrap_or(0);
+                        let committed_on_floor = committed_with_buffers
+                            .iter()
+                            .filter(|eid| {
+                                grid.element_floor_by_id.get(eid).copied().unwrap_or(0) == current_floor
+                            })
+                            .count();
+                        let remaining_on_floor = total_on_floor.saturating_sub(committed_on_floor);
+
+                        if remaining_on_floor > constraints.lower_floor_forced_completion_threshold {
+                            continue;
+                        }
+                    }
+
                     if check_bundle_stability(&buffer_element_ids, grid, &cycle_stable_context) {
                         let step_floor = buffer_element_ids
                             .iter()
@@ -2301,12 +2377,36 @@ mod tests {
         SimGrid::new(2, 2, 2, 6000.0, 6000.0, 4000.0)
     }
 
+    fn make_grid_4x4x2() -> SimGrid {
+        SimGrid::new(4, 4, 2, 6000.0, 6000.0, 4000.0)
+    }
+
     fn make_workfronts_2x2() -> Vec<SimWorkfront> {
         vec![SimWorkfront {
             id: 1,
             grid_x: 0,
             grid_y: 0,
         }]
+    }
+
+    fn column_id(grid: &SimGrid, xi: usize, yi: usize, zi: usize) -> i32 {
+        grid.column_starting_at(xi, yi, zi)
+            .expect("column should exist at grid position")
+    }
+
+    fn girder_id(
+        grid: &SimGrid,
+        start: (usize, usize, usize),
+        end: (usize, usize, usize),
+    ) -> i32 {
+        let na = grid
+            .node_id_at(start.0, start.1, start.2)
+            .expect("start node should exist");
+        let nb = grid
+            .node_id_at(end.0, end.1, end.2)
+            .expect("end node should exist");
+        grid.girder_between(na, nb)
+            .expect("girder should exist between nodes")
     }
 
     #[test]
@@ -2318,6 +2418,29 @@ mod tests {
         };
         let s = c.score(0.5, 0.3);
         assert!(s > 0.0, "score should be positive");
+    }
+
+    #[test]
+    fn test_should_defer_buffer_completion_for_closure_upgrade_only() {
+        let grid = make_grid_4x4x2();
+        let col = column_id(&grid, 2, 1, 0);
+        let g1 = girder_id(&grid, (2, 1, 1), (3, 1, 1));
+        let g2 = girder_id(&grid, (2, 1, 1), (2, 2, 1));
+
+        assert!(should_defer_buffer_completion(
+            &[col, g1],
+            &[col, g1, g2],
+            &StepPatternType::ColGirder,
+            &grid,
+            true,
+        ));
+        assert!(!should_defer_buffer_completion(
+            &[col, g1],
+            &[col, g1],
+            &StepPatternType::ColGirder,
+            &grid,
+            true,
+        ));
     }
 
     #[test]
