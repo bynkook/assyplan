@@ -167,6 +167,7 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - 우선 후보 순서는 대체로 `1기둥+1거더`, `1기둥+2거더`, `2기둥+1거더`, `2기둥+2거더`, 마지막으로 독립 `3기둥+2거더` 다.
 - 기존 구조에 연결 가능한 증분 후보가 하나라도 있으면 독립 bootstrap 후보보다 우선한다.
 - 상층부 기둥 설치율 제약 threshold 기본값은 `0.3` 이다.
+- 하층부 기둥 완료율 제약 threshold 기본값은 `0.8` 이다.
 - 어떤 층의 미설치 부재가 `lower_floor_forced_completion_threshold` 이하이면 그 층을 우선 마감한다. (현재 UI 기본값 10)
 
 ### Current canonical behavior (2026-03-18)
@@ -179,6 +180,8 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - global step 의 `element_ids` 는 모든 local step element union 이며, `sequences` 는 **round-robin collation** 으로 구성한다.
 - sequence 번호는 1부터 시작하고 global step 단위로 연속 증가한다. 같은 round 는 동일 sequence 번호를 공유한다.
 - 따라서 `Sequence != Step` 가정은 유지되며, multi-workfront 상황에서 Step 수는 Sequence 수보다 작아야 정상이다.
+- candidate 수집 전에 workfront round 단위 `allowed_floors` 를 먼저 계산하고, 허용되지 않은 floor 는 candidate collection 단계에서 즉시 제외한다.
+- `allowed_floors` 기반 floor prefilter 는 legacy/optimized candidate collection parity 를 유지한 채 적용해야 한다.
 - floor 선택은 층 간 점수 비교가 아니라 제약 기반 타깃팅으로 처리한다.
 	- 비잠금 상태: 제약(상층 비율/하층 완료율/강제마감) 통과 floor 중 우선 floor를 선택
 	- 잠금 상태: `committed_floor` 고정 (해당 floor 후보만 선택)
@@ -190,6 +193,9 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 	- buffer/planned_pattern/lock를 해제하고, `last_failed_floor`를 기록해 즉시 동일 floor 재시도 루프를 방지한다.
 - `planned_pattern` 이 버퍼에 의해 완전히 소진되었는데 Step이 미완성인 경우(`plan_exhausted`) 재계획을 강제한다.
 	- 단일 seed로 시작한 증분 확장에서 정체되는 deadlock 회귀를 방지하기 위한 canonical 동작이다.
+- 시뮬레이션 실행은 UI 스레드 블로킹 호출이 아니라 background worker + progress/cancel 흐름으로 유지한다.
+- Simulation 기본 UI 값은 `GridConfig.ny = 8`, `lower_floor_forced_completion = 10`, `sim_scenario_count = 2` 이다.
+- 시뮬레이션 결과는 선택 시나리오 또는 전체 시나리오 기준 debug export CSV/summary 경로를 유지한다.
 
 ## 8) Known Current Risk
 
@@ -202,6 +208,8 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - global step cycle 끝에서만 `LocalStep` 들을 병합하여 최종 `SimStep` 을 방출한다.
 - Sub pattern 단계에서는 Step 을 생성하지 않는다.
 - sequence 번호는 1-based + global 연속성을 유지하고, 동일 round 동시 설치는 동일 sequence 번호를 공유해야 한다.
+- floor prefilter 를 약화시켜 허용되지 않은 floor 후보를 뒤늦게 거르는 구조로 되돌리지 않는다.
+- background simulation task/progress/cancel/export 흐름을 깨는 동기식 회귀를 만들지 않는다.
 - Step 생성 로직을 바꿀 때 UI, metrics, scenario summary 가 모두 여전히 `Sequence != Step` 가정을 유지하는지 함께 확인한다.
 
 ## 9) Editing Rules
@@ -239,6 +247,7 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - Step/Sequence 변경: step 수가 sequence 수와 거의 1:1 로 무너지는 회귀가 없는지 확인
 - 안정성 변경: 금지 패턴이 step 으로 인정되지 않는지 확인
 - UI 변경: step 이동, scenario 전환, metric 표시가 1-based 인덱스를 유지하는지 확인
+- Simulation UI/engine 변경: progress 표시, cancel, export 동선이 유지되는지 확인
 
 ## 12) Short Summary For Future Tasks
 

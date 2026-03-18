@@ -2,6 +2,17 @@
 
 > **목적**: 이 파일은 AI 에이전트가 프로젝트를 처음 접할 때 파일과 폴더를 찾아 헤매는 시간을 줄이고, 개발 속도를 최대화하기 위한 핵심 참조 문서입니다. 코드를 탐색하기 전에 이 파일을 먼저 읽으세요.
 
+## Source of Truth
+
+문서 우선순위는 아래 순서를 따른다.
+
+1. `.github/copilot-instructions.md`
+2. `AGENTS.md`
+3. `devplandoc.md`
+4. 실제 구현 코드
+
+문서 간 충돌이 있으면 실제 코드로 확인한 뒤, 이 순서에 맞춰 문서를 갱신한다.
+
 ---
 
 ## 1. 개발환경
@@ -44,7 +55,7 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 │   ├── python/                            ← Python 레이어
 │   │   ├── __init__.py
 │   │   ├── data_loader.py                 ← CSV 로딩 + 인코딩 감지 (charset_normalizer)
-│   │   ├── node_table.py                  ← 노드 추출 + ID 할당 (1부터 시작, x→y→z 정렬)
+│   │   ├── node_table.py                  ← 노드 추출 + ID 할당 (1부터 시작, z→x→y 정렬)
 │   │   ├── element_table.py               ← 부재 분류 (Column/Girder)
 │   │   ├── validators.py                  ← 구조 유효성 검사 스위트
 │   │   ├── encoding.py                    ← 인코딩 유틸리티
@@ -106,6 +117,7 @@ C:\Users\BgKing\mycode\assyplan\          ← 프로젝트 루트
 - **Rust**: eframe 0.27 (egui + wgpu), PyO3 0.21
 - **인코딩 감지**: charset_normalizer (`utf_8`, `euc_kr` — 언더스코어 형식)
 - **Node ID 할당**: 모든 unique 좌표 수집 → (x, y, z) 오름차순 정렬 → 1부터 순번
+  - 현재 canonical 구현은 `(z, x, y)` 오름차순이다.
 - **부재 분류**: Column (x,y 동일, z 다름), Girder (x 또는 y 다름, z 동일)
 
 ### Phase 2 (Step Visualization + Metrics)
@@ -141,7 +153,8 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 - **sim_grid.rs**: 격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성
 - **sim_engine.rs**: Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성
   - `SimSequence`: 단위 시간에 설치되는 부재 기록 (1-indexed global sequence_number)
-  - `SimStep`: 구조 안정 조건을 만족하는 패턴 기반 부재 그룹 (`pattern` 필드 포함)
+  - `LocalStep`: 한 workfront 가 global step cycle 안에서 완성한 로컬 패턴 단위
+  - `SimStep`: 여러 `LocalStep` 을 병합한 global step (`local_steps`, `pattern` 필드 포함)
   - 허용 패턴: `Col`, `Girder`, `ColCol`, `ColGirder`, `GirderGirder`, `ColColGirder`, `ColGirderCol`, `ColGirderGirder`, `ColColGirderGirder`, `ColColGirderColGirder`
   - **금지 패턴**: `Col→Col→Col`, `Col→Col→Col→Girder` (3개 연속 Column 금지)
 - **floor target/lock canonical**:
@@ -150,12 +163,21 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
   - 잠금 상태(`committed_floor`)에서는 해당 floor 후보만 선택한다.
   - 잠금 floor 실패 시 즉시 rollback 하고 `last_failed_floor`로 동일 floor 즉시 재시도 루프를 회피한다.
   - `planned_pattern` 소진 + step 미완성(`plan_exhausted`) 시 재계획을 강제한다.
+- **candidate floor prefilter**:
+  - workfront round마다 `allowed_floors` 를 먼저 계산한다.
+  - 허용되지 않은 floor 는 candidate collection 단계에서 즉시 제외한다.
+  - legacy/optimized candidate collection parity 를 유지해야 한다.
 - **upper_floor_threshold**: `sim_engine.rs`에서 `threshold * 100.0`으로 변환 후 `stability.rs`에 전달
+- **simulation execution**:
+  - `lib.rs` 는 simulation을 background worker 로 실행한다.
+  - progress / cancel / export 흐름을 현재 canonical behavior로 본다.
 - **console build**: `main.rs` `#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]`
 
 #### Simulation 기본값 (현재)
 - Grid Y lines (`GridConfig.ny`): `8`
+- Lower-floor completion ratio threshold (`lower_floor_completion_ratio`): `0.8`
 - Lower-floor forced completion threshold (`lower_floor_forced_completion`): `10`
+- Scenario count (`sim_scenario_count`): `2`
 
 ---
 
@@ -193,12 +215,15 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 
 **Phase 3 신규 타입** (ui.rs):
 - `SimSequence { element_id: i32, sequence_number: usize }` — 단위 시간에 설치되는 부재 (1-indexed globally)
-- `SimStep { workfront_id, element_ids, sequences: Vec<SimSequence>, floor, pattern: String }` — 구조 안정 조건을 만족하는 패턴 기반 부재 그룹
-- `SimStep::from_elements(workfront_id, element_ids, floor, pattern, start_seq)` — 헬퍼
+- `LocalStep { workfront_id, element_ids, floor, pattern }` — workfront 로컬 완성 패턴
+- `SimStep { workfront_id, element_ids, sequences: Vec<SimSequence>, floor, pattern: String, local_steps: Vec<LocalStep> }` — 구조 안정 조건을 만족하는 global step
+- `SimStep::from_local_steps(local_steps, start_seq)` — round-robin collation 기반 병합 헬퍼
 
 ### `src/rust/src/lib.rs`
 - `recalculate()`: CSV 로드 → 테이블 생성 → UiState 업데이트 전체 파이프라인
-- `run_simulation()`: Grid 생성 → run_all_scenarios() → best scenario 선택
+- `run_simulation()`: 입력 검증 → background worker 생성 → grid/scenario 계산 → best scenario 선택
+- `poll_simulation_task()`: progress, cancel, completion/failure 상태 반영
+- `export_simulation_debug()`: 선택 시나리오 또는 전체 시나리오 debug CSV/summary export
 - `update_floor_counts_for_step()`: 스텝별 층 데이터 업데이트
 - PyO3 바인딩 (`PyNode`, `PyElement`, `PyRenderData`, `PyStepTable`)
 - Sim 3D view (View 탭 인라인): 설치된 부재 렌더링 + 시나리오 ComboBox + step nav bar
@@ -206,14 +231,15 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 ### `src/rust/src/sim_grid.rs` (Phase 3 신규)
 격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성.
 - `SimGrid::new(nx, ny, nz, dx, dy, dz)` → SimGrid
-- IDs 1-indexed: nodes row-major (x→y→z), elements: columns first then X-girders then Y-girders
+- IDs 1-indexed: nodes는 `(z→x→y)` 정렬 의미를 유지하고, elements는 columns first then girders 순서를 유지한다.
 
 ### `src/rust/src/sim_engine.rs` (Phase 3 신규)
 Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성.
 - `run_scenario(scenario_id, grid, workfronts, seed, weights, threshold)` → SimScenario
-- `run_all_scenarios(count, grid, workfronts, weights, threshold)` → Vec<SimScenario>
+- `run_all_scenarios_with_progress_and_cancel(count, grid, workfronts, weights, constraints, progress, cancel)` → Vec<SimScenario>
 - `try_build_pattern(seed_id, grid, installed_ids, ...)` — 패턴 확장 (금지 패턴 차단)
 - threshold 변환: `threshold * 100.0` (stability.rs는 0~100 범위 기대)
+- global step cycle 집계, floor prefilter, rollback/replan 로직의 중심 파일이다.
 
 현재 역할 주의:
 - `sim_engine.rs` 는 시뮬레이션 전용 오케스트레이션 파일이다.
@@ -253,13 +279,13 @@ cp target/release/assyplan.exe ../../assyplan.exe
 1. `devplandoc.md` 에서 스펙 확인
 2. `.opencode/skills/dev-phase3/SKILLS.md` 에서 관련 패턴 확인
 3. Development Mode/공통 판정 규칙이면 `stability.rs`, Simulation orchestration 이면 `sim_engine.rs`, UI면 `ui.rs` 또는 `sim_ui.rs` 수정
-4. `lsp_diagnostics` 로 오류 확인
+4. `get_errors` 또는 빌드 결과로 오류 확인
 5. `cargo build --release` 빌드
 6. `target/release/assyplan.exe` → 루트 복사
 7. SKILLS.md 업데이트
 
 ### 디버깅 순서
-1. LSP diagnostics 확인 (`lsp_diagnostics` 도구)
+1. `get_errors` 또는 컴파일 오류 확인
 2. `cargo build` 컴파일 오류 확인
 3. Rust 단위 테스트 확인 (`cargo test --lib`)
 4. Dev/Sim 회귀 확인이 필요하면 `cargo test --test regression_compare`
@@ -268,9 +294,10 @@ cp target/release/assyplan.exe ../../assyplan.exe
 
 ## 8-A. 문서 기준점
 
+- 문서 우선순위의 최상위는 `.github/copilot-instructions.md` 이다.
 - 안정성/패턴/용어의 현재 정본은 `devplandoc.md` 내부 `용어 및 Step 적합 안정 조건 정본` 절이다.
 - 기존 `STABILITY_ANALYSIS.md` 는 `devplandoc.md` 로 통합되어 삭제되었다.
-- 작업 전 문서 기준이 필요하면 먼저 `devplandoc.md`, 그 다음 이 문서를 본다.
+- 작업 전 문서 기준이 필요하면 먼저 `.github/copilot-instructions.md`, 그 다음 `devplandoc.md`, 그 다음 이 문서를 본다.
 
 ---
 
@@ -294,6 +321,8 @@ cp target/release/assyplan.exe ../../assyplan.exe
 - **console build** (`main.rs`): `#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]` — release 빌드에서도 콘솔 출력 허용. `"windows"`로 변경하면 콘솔이 완전히 숨겨짐 (금지).
 - **sim 3D view orbit — single allocate_rect**: lib.rs View 탭 인라인 sim 3D view에서 `allocate_rect`는 반드시 한 번만 호출. 두 번 호출하면 orbit 이중 처리 버그 발생. hover 체크는 `ui.input(|i| i.pointer.hover_pos()).map(|p| rect.contains(p))`로 직접 비교.
 - **construction mode element ID 필터링**: Sequence/Step 모드에서 node/element ID는 **설치된 부재에만** 표시. 전체 elements 루프 금지 — 설치된 ID 목록만 순회할 것.
+- **simulation worker flow**: simulation은 현재 background worker + progress/cancel 구조다. 예전처럼 UI thread에서 직접 `run_all_scenarios()` 를 블로킹 호출하는 설명이나 회귀를 만들지 말 것.
+- **simulation requires workfront**: 현재 구현은 default workfront를 자동 생성하지 않는다. workfront가 비어 있으면 simulation은 에러 메시지와 함께 시작되지 않는다.
 ### Python
 - **charset_normalizer 인코딩 이름**: `"utf_8"`, `"euc_kr"` (언더스코어) — 대시(`"utf-8"`) 아님
 - **data_io.py LSP 오류**: Series → ConvertibleToInt 타입 오류 다수 존재. Phase 2 시작 전부터 있던 기존 이슈. 수정하지 말 것 (기능에 영향 없음).
