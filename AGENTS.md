@@ -144,8 +144,18 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
   - `SimStep`: 구조 안정 조건을 만족하는 패턴 기반 부재 그룹 (`pattern` 필드 포함)
   - 허용 패턴: `Col`, `Girder`, `ColCol`, `ColGirder`, `GirderGirder`, `ColColGirder`, `ColGirderCol`, `ColGirderGirder`, `ColColGirderGirder`, `ColColGirderColGirder`
   - **금지 패턴**: `Col→Col→Col`, `Col→Col→Col→Girder` (3개 연속 Column 금지)
+- **floor target/lock canonical**:
+  - floor 선택은 층 간 점수경쟁이 아니라 제약 기반으로 결정한다.
+  - 비잠금 상태에서는 제약을 통과한 floor를 대상으로 타깃 floor를 고른다.
+  - 잠금 상태(`committed_floor`)에서는 해당 floor 후보만 선택한다.
+  - 잠금 floor 실패 시 즉시 rollback 하고 `last_failed_floor`로 동일 floor 즉시 재시도 루프를 회피한다.
+  - `planned_pattern` 소진 + step 미완성(`plan_exhausted`) 시 재계획을 강제한다.
 - **upper_floor_threshold**: `sim_engine.rs`에서 `threshold * 100.0`으로 변환 후 `stability.rs`에 전달
 - **console build**: `main.rs` `#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]`
+
+#### Simulation 기본값 (현재)
+- Grid Y lines (`GridConfig.ny`): `8`
+- Lower-floor forced completion threshold (`lower_floor_forced_completion`): `10`
 
 ---
 
