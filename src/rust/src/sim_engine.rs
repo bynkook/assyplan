@@ -33,6 +33,7 @@ struct WorkfrontState {
     buffer_sequences: Vec<SimSequence>,
     planned_pattern: Vec<i32>,
     committed_floor: Option<i32>,
+    last_failed_floor: Option<i32>,
 }
 
 impl WorkfrontState {
@@ -630,8 +631,6 @@ fn installed_elements_per_floor(
 
 fn is_floor_eligible_for_new_work(
     floor: i32,
-    floor_tracker: &FloorTracker,
-    installed_columns_per_floor: &HashMap<i32, usize>,
     installed_elements_per_floor: &HashMap<i32, usize>,
     total_elements_per_floor: &HashMap<i32, usize>,
     constraints: &SimConstraints,
@@ -641,20 +640,18 @@ fn is_floor_eligible_for_new_work(
     }
 
     let lower_floor = floor - 1;
-    let lower_total_columns = *floor_tracker.total_per_floor.get(&lower_floor).unwrap_or(&0);
-    let lower_installed_columns = *installed_columns_per_floor.get(&lower_floor).unwrap_or(&0);
+    let lower_total_elements = *total_elements_per_floor.get(&lower_floor).unwrap_or(&0);
+    let lower_installed_elements = *installed_elements_per_floor.get(&lower_floor).unwrap_or(&0);
 
-    if lower_total_columns == 0 {
+    if lower_total_elements == 0 {
         return true;
     }
 
-    let lower_completion_ratio = lower_installed_columns as f64 / lower_total_columns as f64;
+    let lower_completion_ratio = lower_installed_elements as f64 / lower_total_elements as f64;
     if lower_completion_ratio < constraints.lower_floor_completion_ratio_threshold {
         return false;
     }
 
-    let lower_total_elements = *total_elements_per_floor.get(&lower_floor).unwrap_or(&0);
-    let lower_installed_elements = *installed_elements_per_floor.get(&lower_floor).unwrap_or(&0);
     let lower_remaining_elements = lower_total_elements.saturating_sub(lower_installed_elements);
 
     if lower_remaining_elements >= 1
@@ -716,13 +713,18 @@ fn collect_single_candidates_legacy(
             continue;
         }
 
-        // If this workfront has no local footprint yet on the target floor,
-        // force the first seed to start from the workfront anchor column.
+        // If this workfront has no local footprint yet on the target floor:
+        // - floor 1 keeps strict anchor start
+        // - upper floors allow near-anchor column starts to avoid hard lock
         if !local_seeded && elem.member_type == "Column" {
             let Some(&(xi, yi, _)) = node_pos.get(&elem.node_i_id) else {
                 continue;
             };
-            if xi != wf.grid_x || yi != wf.grid_y {
+            if floor <= 1 {
+                if xi != wf.grid_x || yi != wf.grid_y {
+                    continue;
+                }
+            } else if dist > 1.0 {
                 continue;
             }
         }
@@ -798,13 +800,18 @@ fn collect_single_candidates_optimized(
             continue;
         }
 
-        // If this workfront has no local footprint yet on the target floor,
-        // force the first seed to start from the workfront anchor column.
+        // If this workfront has no local footprint yet on the target floor:
+        // - floor 1 keeps strict anchor start
+        // - upper floors allow near-anchor column starts to avoid hard lock
         if !local_seeded && elem.member_type == "Column" {
             let Some(&(xi, yi, _)) = node_pos.get(&elem.node_i_id) else {
                 continue;
             };
-            if xi != wf.grid_x || yi != wf.grid_y {
+            if floor <= 1 {
+                if xi != wf.grid_x || yi != wf.grid_y {
+                    continue;
+                }
+            } else if dist > 1.0 {
                 continue;
             }
         }
@@ -1598,8 +1605,13 @@ fn run_scenario_internal(
                             || selected_this_sequence.contains(eid)
                             || planned_reserved_ids.contains(eid))
                 });
+                let plan_exhausted = !current_state.planned_pattern.is_empty()
+                    && current_state
+                        .planned_pattern
+                        .iter()
+                        .all(|eid| own_buffer_ids.contains(eid));
 
-                if current_state.planned_pattern.is_empty() || plan_has_conflict {
+                if current_state.planned_pattern.is_empty() || plan_has_conflict || plan_exhausted {
                     let mut rollback_commitment = false;
                     let mut rollback_buffer_ids: Vec<i32> = Vec::new();
 
@@ -1695,8 +1707,6 @@ fn run_scenario_internal(
 
                                 is_floor_eligible_for_new_work(
                                     candidate_floor,
-                                    &floor_tracker,
-                                    &committed_floor_counts,
                                     &committed_elements_per_floor,
                                     &total_elements_by_floor,
                                     &constraints,
@@ -1711,9 +1721,53 @@ fn run_scenario_internal(
                             }
                             Vec::new()
                         } else {
+                            let target_floor = if let Some(locked_floor) = committed_floor {
+                                locked_floor
+                            } else {
+                                let mut floors: Vec<i32> = valid_seeds
+                                    .iter()
+                                    .filter_map(|candidate| {
+                                        grid.element_floor_by_id
+                                            .get(&candidate.element_id)
+                                            .copied()
+                                            .or_else(|| element_floor(candidate.element_id, grid, dz))
+                                    })
+                                    .collect();
+                                floors.sort_unstable();
+                                floors.dedup();
+
+                                let avoid_floor = current_state.last_failed_floor;
+                                floors
+                                    .iter()
+                                    .rev()
+                                    .copied()
+                                    .find(|floor| Some(*floor) != avoid_floor)
+                                    .or_else(|| floors.iter().rev().copied().next())
+                                    .unwrap_or(1)
+                            };
+
+                            let floor_seeds: Vec<&SingleCandidate> = valid_seeds
+                                .into_iter()
+                                .filter(|candidate| {
+                                    grid.element_floor_by_id
+                                        .get(&candidate.element_id)
+                                        .copied()
+                                        .or_else(|| element_floor(candidate.element_id, grid, dz))
+                                        .unwrap_or(1)
+                                        == target_floor
+                                })
+                                .collect();
+
+                            if floor_seeds.is_empty() {
+                                if committed_floor.is_some() {
+                                    rollback_commitment = true;
+                                    rollback_buffer_ids = current_state.buffer_element_ids();
+                                }
+                                Vec::new()
+                            } else {
                             let mut complete_plans: Vec<(Vec<i32>, f64)> = Vec::new();
 
-                            for seed_candidate in &valid_seeds {
+                            for seed_candidate in &floor_seeds {
                                 let seed_id = seed_candidate.element_id;
                                 let seed_is_column = is_column(grid, seed_id);
 
@@ -1789,7 +1843,7 @@ fn run_scenario_internal(
                                 complete_plans[0].0.clone()
                             } else {
                                 let stable_nodes = node_set_for_elements(&support_ids, grid);
-                                let mut seed_order: Vec<&SingleCandidate> = valid_seeds;
+                                let mut seed_order: Vec<&SingleCandidate> = floor_seeds;
                                 seed_order.sort_by(|a, b| {
                                     b.score(w1, w2)
                                         .partial_cmp(&a.score(w1, w2))
@@ -1797,7 +1851,7 @@ fn run_scenario_internal(
                                 });
 
                                 let mut chosen_plan = Vec::new();
-                                for seed_candidate in seed_order {
+                                for seed_candidate in &seed_order {
                                     let mut plan_rng = rng ^ seed_candidate.element_id as u64;
                                     let (candidate_plan, _) = try_build_pattern(
                                         seed_candidate.element_id,
@@ -1827,21 +1881,32 @@ fn run_scenario_internal(
                                     }
                                 }
 
+                                // If no complete plan exists yet, start with one seed and keep
+                                // extending within the committed floor across subsequent rounds.
+                                if chosen_plan.is_empty() {
+                                    if let Some(seed_candidate) = seed_order.first() {
+                                        chosen_plan.push(seed_candidate.element_id);
+                                    }
+                                }
+
                                 chosen_plan
+                            }
                             }
                         }
                     };
 
                     if let Some(state) = workfront_states.get_mut(&wf.id) {
                         if rollback_commitment {
+                            let failed_floor = state.committed_floor;
                             for eid in &rollback_buffer_ids {
                                 state.owned_ids.remove(eid);
                             }
                             state.buffer_sequences.clear();
                             state.planned_pattern.clear();
                             state.committed_floor = None;
+                            state.last_failed_floor = failed_floor;
                         }
-                        if state.planned_pattern.is_empty() || plan_has_conflict {
+                        if state.planned_pattern.is_empty() || plan_has_conflict || plan_exhausted {
                             state.planned_pattern = new_plan;
                         }
                     }
@@ -1893,6 +1958,7 @@ fn run_scenario_internal(
                             .get(&element_id)
                             .copied()
                             .or_else(|| element_floor(element_id, grid, dz));
+                        state.last_failed_floor = None;
                     }
                 }
             }
@@ -1937,6 +2003,7 @@ fn run_scenario_internal(
                         state.buffer_sequences.clear();
                         state.planned_pattern.clear();
                         state.committed_floor = None;
+                        state.last_failed_floor = None;
                     }
                 }
             }
@@ -2907,6 +2974,65 @@ mod tests {
             TerminationReason::Completed,
             "Should terminate with Completed, not {:?}",
             scenario.metrics.termination_reason
+        );
+    }
+
+    #[test]
+    fn test_upper_floor_step_can_start_before_lower_floor_complete() {
+        let grid = SimGrid::new(4, 4, 3, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![SimWorkfront {
+            id: 1,
+            grid_x: 1,
+            grid_y: 1,
+        }];
+
+        let constraints = SimConstraints {
+            upper_floor_column_rate_threshold: 0.3,
+            lower_floor_completion_ratio_threshold: 0.8,
+            lower_floor_forced_completion_threshold: 5,
+        };
+
+        let scenario = run_scenario_internal(
+            1,
+            &grid,
+            &wfs,
+            777,
+            (0.5, 0.3, 0.2),
+            constraints,
+            None,
+        );
+
+        let dz = grid_dz(&grid);
+        let total_floor1_elements = grid
+            .elements
+            .iter()
+            .filter(|e| element_floor(e.id, &grid, dz) == Some(1))
+            .count();
+
+        let mut installed_floor1 = 0usize;
+        let mut found_upper_before_floor1_complete = false;
+
+        for step in &scenario.steps {
+            let has_floor2_or_above = step
+                .element_ids
+                .iter()
+                .any(|eid| element_floor(*eid, &grid, dz).unwrap_or(1) > 1);
+
+            if has_floor2_or_above {
+                found_upper_before_floor1_complete = installed_floor1 < total_floor1_elements;
+                break;
+            }
+
+            installed_floor1 += step
+                .element_ids
+                .iter()
+                .filter(|eid| element_floor(**eid, &grid, dz) == Some(1))
+                .count();
+        }
+
+        assert!(
+            found_upper_before_floor1_complete,
+            "Expected upper-floor step to appear before floor 1 is fully complete"
         );
     }
 

@@ -1362,7 +1362,7 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
 
     ui.add_space(10.0);
     ui.separator();
-    ui.heading("Step별 누적 총 부재 설치 수 비교 (Top 10)");
+    ui.heading("Cumulative Installed Members (Top 10)");
     ui.add_space(4.0);
 
     // ── Build sorted top-N list ───────────────────────────────────────────
