@@ -786,7 +786,7 @@ fn collect_single_candidates_legacy(
             }
         }
 
-        if local_seeded && dist > 1.0 {
+        if local_seeded && dist > 1.0 && elem.member_type == "Column" {
             continue;
         }
 
@@ -873,7 +873,7 @@ fn collect_single_candidates_optimized(
             }
         }
 
-        if local_seeded && dist > 1.0 {
+        if local_seeded && dist > 1.0 && elem.member_type == "Column" {
             continue;
         }
 
@@ -3415,6 +3415,55 @@ mod tests {
             elapsed.as_secs() < 60,
             "5x5x4 simulation should complete in <60s, took {:?}",
             elapsed
+        );
+    }
+
+    #[test]
+    fn test_simulation_completes_4x8x3_multi_workfront_all_elements() {
+        let grid = SimGrid::new(4, 8, 3, 6000.0, 6000.0, 4000.0);
+        let wfs = vec![
+            SimWorkfront { id: 1, grid_x: 0, grid_y: 0 },
+            SimWorkfront { id: 2, grid_x: 3, grid_y: 0 },
+            SimWorkfront { id: 3, grid_x: 0, grid_y: 7 },
+            SimWorkfront { id: 4, grid_x: 3, grid_y: 7 },
+            SimWorkfront { id: 5, grid_x: 1, grid_y: 3 },
+        ];
+
+        let scenario = run_scenario_internal(
+            1,
+            &grid,
+            &wfs,
+            777,
+            (0.5, 0.3, 0.2),
+            SimConstraints {
+                upper_floor_column_rate_threshold: 0.3,
+                lower_floor_completion_ratio_threshold: 0.8,
+                lower_floor_forced_completion_threshold: 10,
+            },
+            None,
+        );
+
+        let total_elements = grid.elements.len();
+        let installed_ids: HashSet<i32> = scenario
+            .steps
+            .iter()
+            .flat_map(|s| s.element_ids.iter().copied())
+            .collect();
+        let installed = installed_ids.len();
+        let missing: Vec<String> = grid
+            .elements
+            .iter()
+            .filter(|e| !installed_ids.contains(&e.id))
+            .map(|e| {
+                let floor = element_floor(e.id, &grid, grid_dz(&grid)).unwrap_or(-1);
+                format!("{}:{}:F{}", e.id, e.member_type, floor)
+            })
+            .collect();
+
+        assert_eq!(
+            installed, total_elements,
+            "4x8x3 multi-workfront grid should install ALL {} elements, got {}. Termination: {:?}. Missing: {:?}",
+            total_elements, installed, scenario.metrics.termination_reason, missing
         );
     }
 
