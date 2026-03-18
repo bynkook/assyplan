@@ -27,7 +27,7 @@ impl Default for GridConfig {
     fn default() -> Self {
         Self {
             nx: 4,
-            ny: 4,
+            ny: 8,
             nz: 3,
             dz: 4000.0,
             dx: 6000.0,
@@ -434,7 +434,7 @@ impl UiState {
             step_elements: Vec::new(),
             upper_floor_threshold: 0.3,
             lower_floor_completion_ratio: 0.8,
-            lower_floor_forced_completion: 5,
+            lower_floor_forced_completion: 10,
             // Simulation Mode (Phase 3)
             grid_config: GridConfig::default(),
             sim_workfronts: Vec::new(),
