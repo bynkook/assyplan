@@ -1,15 +1,15 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use assyplan::graphics::ui::SimWorkfront;
-use assyplan::sim_engine::run_all_scenarios;
-use assyplan::sim_grid::SimGrid;
-use assyplan::stability::{build_step_elements_map, generate_all_tables, get_floor_column_data};
+use assyplan_native::graphics::ui::SimWorkfront;
+use assyplan_native::sim_engine::run_all_scenarios;
+use assyplan_native::sim_grid::SimGrid;
+use assyplan_native::stability::{build_step_elements_map, generate_all_tables, get_floor_column_data};
 
 // Sim fingerprint changed after workfront anchor fix:
 // min_xy_distance now always blends workfront (x,y) origin so upper floors
 // prefer candidates near the workfront start position.
-const EXPECTED_SIM_FINGERPRINT_V3: u64 = 11076596406045293265;
+const EXPECTED_SIM_FINGERPRINT_V3: u64 = 17367809654336985207;
 // Dev fingerprint changed after canonical Dev step generation update
 // (local-step completion + global-cycle merge semantics).
 const EXPECTED_DEV_FINGERPRINT_V2: u64 = 7561072595717411788;

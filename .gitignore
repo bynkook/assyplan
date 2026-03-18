@@ -65,8 +65,7 @@ desktop.ini
 .sisyphus
 
 # Local development files (keep in repo if needed for testing)
-# data.txt
-# devplandoc.md
+data
 
 # Temporary files
 *.tmp

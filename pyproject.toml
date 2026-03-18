@@ -17,5 +17,5 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "src/python"
-module-name = "assyplan"
+module-name = "assyplan.assyplan_native"
 manifest-path = "src/rust/Cargo.toml"

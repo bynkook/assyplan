@@ -3,7 +3,7 @@
 // Remove this attribute (or invert the cfg) if you want a pure GUI-only binary.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "console")]
 
-use assyplan::run;
+use assyplan_native::run;
 
 fn main() {
     if let Err(e) = run() {

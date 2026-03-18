@@ -34,10 +34,10 @@ from src.python.stability_validators import (
 
 
 def get_data_file():
-    """Return path to the sample data file."""
+    """Return path to the current sample data file."""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(current_dir))
-    return os.path.join(project_root, "data.txt")
+    return os.path.join(project_root, "data.csv")
 
 
 def create_simple_df():
@@ -788,8 +788,8 @@ class TestDoubleCheckAndMetrics:
 class TestOutputPipelineIntegration:
     """Integration tests for full output pipeline with real data."""
 
-    def test_full_pipeline_with_data_txt(self):
-        """Test complete output pipeline using real data.txt file.
+    def test_full_pipeline_with_sample_csv(self):
+        """Test complete output pipeline using the current sample CSV file.
 
         Note: This test uses integer-based node/element tables for all internal
         calculations. The string member_ids from input CSV are only used during
@@ -899,7 +899,7 @@ class TestOutputPipelineIntegration:
             step_path = saved["workfront_step_table"]
             assert step_path.exists()
 
-            # Verify validation_report.txt
+            # Verify validation report
             val_path = saved["validation_report"]
             assert val_path.exists()
             val_content = val_path.read_text(encoding="utf-8")
@@ -907,13 +907,13 @@ class TestOutputPipelineIntegration:
             assert "총 노드 수" in val_content
             assert "총 부재 수" in val_content
 
-            # Verify stability_report.txt
+            # Verify stability report
             stab_path = saved["stability_report"]
             assert stab_path.exists()
             stab_content = stab_path.read_text(encoding="utf-8")
             assert "적합 및 안정 조건 검사 결과" in stab_content
 
-            # Verify metrics_summary.txt
+            # Verify metrics summary report
             met_path = saved["metrics_report"]
             assert met_path.exists()
             met_content = met_path.read_text(encoding="utf-8")
@@ -1115,7 +1115,7 @@ class TestOutputManager:
             filepath = save_validation_report(nodes, elements, [], output_folder)
 
             assert filepath.exists()
-            assert filepath.name == "validation_report.txt"
+            assert filepath.name == "dev_validation_report.txt"
             content = filepath.read_text(encoding="utf-8")
             assert "입력 데이터 검증 결과" in content
 
@@ -1139,7 +1139,7 @@ class TestOutputManager:
             filepath = save_stability_report(result, nodes, elements, output_folder)
 
             assert filepath.exists()
-            assert filepath.name == "stability_report.txt"
+            assert filepath.name == "dev_stability_report.txt"
             content = filepath.read_text(encoding="utf-8")
             assert "적합 및 안정 조건 검사 결과" in content
 
@@ -1161,7 +1161,7 @@ class TestOutputManager:
             filepath = save_metrics_report(metrics, output_folder)
 
             assert filepath.exists()
-            assert filepath.name == "metrics_summary.txt"
+            assert filepath.name == "dev_metrics_summary.txt"
             content = filepath.read_text(encoding="utf-8")
             assert "공사 진행 현황" in content
 
@@ -1413,7 +1413,7 @@ class TestStepStatistics:
             filepath = save_step_statistics_report(step_stats, output_folder)
 
             assert filepath.exists()
-            assert filepath.name == "step_statistics.txt"
+            assert filepath.name == "dev_step_statistics.txt"
             content = filepath.read_text(encoding="utf-8")
             assert "시공 단계별 통계" in content
             assert "Step   1" in content

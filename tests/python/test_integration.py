@@ -11,11 +11,11 @@ from src.python.validators import validate_all
 
 
 def get_data_file():
-    """Return path to the sample data file."""
+    """Return path to the current sample data file."""
     # Get project root by going up from tests/python/
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(current_dir))
-    return os.path.join(project_root, "data.txt")
+    return os.path.join(project_root, "data.csv")
 
 
 class TestIntegration:
@@ -81,18 +81,18 @@ class TestIntegration:
         df = load_csv(get_data_file())
         nodes = create_node_table(df)
 
-        # Verify sorted order (x → y → z ascending)
+        # Verify sorted order (z -> x -> y ascending)
         for i in range(len(nodes) - 1):
             x1, y1, z1 = nodes[i][1], nodes[i][2], nodes[i][3]
             x2, y2, z2 = nodes[i + 1][1], nodes[i + 1][2], nodes[i + 1][3]
 
-            if x1 < x2:
+            if z1 < z2:
                 continue
-            elif x1 == x2:
-                if y1 < y2:
+            elif z1 == z2:
+                if x1 < x2:
                     continue
-                elif y1 == y2:
-                    assert z1 < z2, f"Nodes not sorted by z at index {i}"
+                elif x1 == x2:
+                    assert y1 < y2, f"Nodes not sorted by y at index {i}"
 
     def test_create_element_table_with_nodes(self):
         """Test element table creation with node mapping."""

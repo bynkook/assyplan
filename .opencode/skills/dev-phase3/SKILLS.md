@@ -140,6 +140,13 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 - 현재 시뮬레이션은 UI thread blocking 호출이 아니라 background worker 기반이다.
 - 오래된 설명처럼 `run_all_scenarios()`를 UI update 루프에서 직접 막아 세우는 구조로 문서화하면 안 된다.
 
+### Packaging / Build guardrail
+
+- Python 패키지 공개 표면은 `import assyplan` 이고, Rust 확장 모듈은 `assyplan.assyplan_native` 서브모듈로 배치된다.
+- Windows PDB 충돌 회피를 위해 Rust lib target 이름은 `assyplan_native`, 실행 바이너리 이름은 `assyplan`으로 분리 유지한다.
+- editable 설치나 release wheel 검증은 반드시 프로젝트 루트에서 `python -m maturin develop`, `python -m maturin build --release` 형태로 실행한다.
+- `--manifest-path src/rust/Cargo.toml`만 지정해 maturin을 실행하면 루트 `pyproject.toml`의 `python-source = "src/python"` 문맥이 빠져 `assyplan_native`만 설치되고 `import assyplan` 검증이 깨질 수 있다.
+
 ## 5. Step 생성의 canonical 흐름
 
 현재 Step 생성은 workfront 즉시 방출 방식이 아니라 global step cycle 집계 방식이다.

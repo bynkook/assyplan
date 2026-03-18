@@ -264,7 +264,16 @@ cargo build --release
 
 # 결과물을 루트로 복사 (Git Bash — copy 아님, cp 사용)
 cp target/release/assyplan.exe ../../assyplan.exe
+
+# Python editable install / mixed project validation (run at repo root)
+python -m maturin develop
+
+# Release wheel build (run at repo root)
+python -m maturin build --release
 ```
+
+- Windows PDB 충돌 회피를 위해 Rust lib target은 `assyplan_native`, Python 확장 모듈 경로는 `assyplan.assyplan_native`, 실행 바이너리 이름은 `assyplan`으로 분리 유지한다.
+- `maturin` 명령은 루트 `pyproject.toml`의 `python-source = "src/python"` 문맥을 타야 하므로 repo root에서 실행한다. `--manifest-path src/rust/Cargo.toml`만 쓰면 `import assyplan` 검증이 깨질 수 있다.
 
 ### Skills 문서 업데이트 규칙
 1. 각 개발 단계 완료 또는 주요 변경 시 `.opencode/skills/dev-phase{N}/SKILLS.md` 업데이트
@@ -289,6 +298,11 @@ cp target/release/assyplan.exe ../../assyplan.exe
 2. `cargo build` 컴파일 오류 확인
 3. Rust 단위 테스트 확인 (`cargo test --lib`)
 4. Dev/Sim 회귀 확인이 필요하면 `cargo test --test regression_compare`
+
+### 테스트 기준 메모
+- `tests/python/` 는 현재 `data.csv` 를 샘플 입력으로 사용한다. 과거 `data.txt` 기준 설명은 stale 이다.
+- Python 출력 리포트 테스트의 기준 파일명은 `dev_validation_report.txt`, `dev_stability_report.txt`, `dev_metrics_summary.txt`, `dev_step_statistics.txt` 다.
+- Rust 회귀 기준은 `src/rust/tests/regression_compare.rs` 의 Dev/Sim fingerprint 값이다. canonical Sim/Dev 동작을 의도적으로 바꾼 경우에만 상수를 갱신한다.
 
 ---
 

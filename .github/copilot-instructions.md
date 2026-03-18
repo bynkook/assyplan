@@ -217,6 +217,8 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - 근본 원인을 고친다. 예외 무시, 임시 하드코딩, 의미 없는 방어 로직 추가를 피한다.
 - Python 은 입출력과 구조 데이터 준비를 담당하고, Rust 는 계산/시뮬레이션/UI 핵심을 담당한다. 책임을 섞지 않는다.
 - PyO3 경계를 바꾸면 Python 호출부와 Rust 바인딩을 함께 점검한다.
+- AssyPlan 패키징은 `assyplan` 패키지 + `assyplan.assyplan_native` 확장 서브모듈 구조를 유지한다. Windows PDB 충돌 회피를 위해 Rust lib target 이름은 `assyplan_native`, 실행 바이너리 이름은 `assyplan`으로 분리한다.
+- `maturin develop`/`maturin build` 검증은 반드시 프로젝트 루트에서 실행한다. `--manifest-path src/rust/Cargo.toml`만으로 실행하면 루트 `pyproject.toml`의 `python-source = "src/python"` 문맥이 빠져 `import assyplan` 검증이 왜곡될 수 있다.
 - 성능 관련 수정은 step 누적 렌더링과 floor 계산 경로를 의식한다.
 - 기존 공개 데이터 구조 이름과 1-based 의미를 함부로 바꾸지 않는다.
 - 차트는 외부 crate 대신 현재 egui painter 방식과 기존 스타일을 유지한다.

@@ -3252,7 +3252,7 @@ fn create_step_table(entries: Vec<(i32, usize, String)>) -> PyResult<PyStepTable
 }
 
 #[pymodule]
-fn assyplan(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn assyplan_native(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_and_validate, m)?)?;
     m.add_function(wrap_pyfunction!(render_data, m)?)?;
     m.add_function(wrap_pyfunction!(load_step_data, m)?)?;

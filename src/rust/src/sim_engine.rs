@@ -753,7 +753,7 @@ fn collect_single_candidates_legacy(
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
     let empty_positions: HashSet<(usize, usize)> = HashSet::new();
-    let mut result: Vec<SingleCandidate> = Vec::new(
+    let mut result: Vec<SingleCandidate> = Vec::new();
 
     for elem in &grid.elements {
         if committed_ids.contains(&elem.id) {
