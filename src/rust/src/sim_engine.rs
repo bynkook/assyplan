@@ -726,6 +726,7 @@ fn collect_single_candidates(
     support_ids: &HashSet<i32>,
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
+    allowed_floors: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> Vec<SingleCandidate> {
     collect_single_candidates_optimized(
@@ -734,6 +735,7 @@ fn collect_single_candidates(
         support_ids,
         local_element_ids,
         committed_ids,
+        allowed_floors,
         node_pos,
     )
 }
@@ -745,12 +747,13 @@ fn collect_single_candidates_legacy(
     support_ids: &HashSet<i32>,
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
+    allowed_floors: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
     let local_positions_by_floor = local_xy_positions_by_floor(local_element_ids, node_pos, grid);
     let empty_positions: HashSet<(usize, usize)> = HashSet::new();
-    let mut result: Vec<SingleCandidate> = Vec::new();
+    let mut result: Vec<SingleCandidate> = Vec::new(
 
     for elem in &grid.elements {
         if committed_ids.contains(&elem.id) {
@@ -758,6 +761,9 @@ fn collect_single_candidates_legacy(
         }
 
         let floor = element_floor(elem.id, grid, grid_dz(grid)).unwrap_or(0);
+        if !allowed_floors.contains(&floor) {
+            continue;
+        }
         let local_positions = local_positions_by_floor
             .get(&floor)
             .unwrap_or(&empty_positions);
@@ -825,6 +831,7 @@ fn collect_single_candidates_optimized(
     support_ids: &HashSet<i32>,
     local_element_ids: &HashSet<i32>,
     committed_ids: &HashSet<i32>,
+    allowed_floors: &HashSet<i32>,
     node_pos: &HashMap<i32, (usize, usize, usize)>,
 ) -> Vec<SingleCandidate> {
     let support_nodes = node_set_for_elements(support_ids, grid);
@@ -844,6 +851,9 @@ fn collect_single_candidates_optimized(
         };
 
         let floor = grid.element_floor_by_id.get(eid).copied().unwrap_or(0);
+        if !allowed_floors.contains(&floor) {
+            continue;
+        }
         let local_positions = local_positions_by_floor
             .get(&floor)
             .unwrap_or(&empty_positions);
@@ -1752,12 +1762,31 @@ fn run_scenario_internal(
 
                         let local_ids = current_state.all_local_ids();
                         let support_nodes = node_set_for_elements(&support_ids, grid);
+                        let allowed_floors: HashSet<i32> = if let Some(locked_floor) = current_state.committed_floor {
+                            std::iter::once(locked_floor).collect()
+                        } else {
+                            floor_tracker
+                                .total_per_floor
+                                .keys()
+                                .copied()
+                                .filter(|floor| {
+                                    is_floor_eligible_for_new_work(
+                                        *floor,
+                                        &committed_floor_counts,
+                                        &floor_tracker.total_per_floor,
+                                        &constraints,
+                                    )
+                                })
+                                .collect()
+                        };
+
                         let wf_candidates = collect_single_candidates(
                             wf,
                             grid,
                             &support_ids,
                             &local_ids,
                             &wf_committed_ids,
+                            &allowed_floors,
                             &node_pos,
                         );
 
@@ -1787,12 +1816,7 @@ fn run_scenario_internal(
                                     return candidate_floor == locked_floor;
                                 }
 
-                                is_floor_eligible_for_new_work(
-                                    candidate_floor,
-                                    &committed_floor_counts,
-                                    &floor_tracker.total_per_floor,
-                                    &constraints,
-                                )
+                                allowed_floors.contains(&candidate_floor)
                             })
                             .collect();
 
@@ -2911,6 +2935,7 @@ mod tests {
 
         let local_element_ids: HashSet<i32> = support_ids.iter().take(3).copied().collect();
         let committed_ids: HashSet<i32> = support_ids.iter().take(4).copied().collect();
+        let allowed_floors: HashSet<i32> = grid.elements_by_floor.keys().copied().collect();
 
         let legacy = collect_single_candidates_legacy(
             &wf,
@@ -2918,6 +2943,7 @@ mod tests {
             &support_ids,
             &local_element_ids,
             &committed_ids,
+            &allowed_floors,
             &node_pos,
         );
         let optimized = collect_single_candidates_optimized(
@@ -2926,6 +2952,7 @@ mod tests {
             &support_ids,
             &local_element_ids,
             &committed_ids,
+            &allowed_floors,
             &node_pos,
         );
 
@@ -2973,6 +3000,7 @@ mod tests {
 
         let local_element_ids: HashSet<i32> = support_ids.iter().take(2).copied().collect();
         let committed_ids: HashSet<i32> = support_ids.iter().take(5).copied().collect();
+        let allowed_floors: HashSet<i32> = grid.elements_by_floor.keys().copied().collect();
 
         let legacy = collect_single_candidates_legacy(
             &wf,
@@ -2980,6 +3008,7 @@ mod tests {
             &support_ids,
             &local_element_ids,
             &committed_ids,
+            &allowed_floors,
             &node_pos,
         );
         let optimized = collect_single_candidates_optimized(
@@ -2988,6 +3017,7 @@ mod tests {
             &support_ids,
             &local_element_ids,
             &committed_ids,
+            &allowed_floors,
             &node_pos,
         );
 
