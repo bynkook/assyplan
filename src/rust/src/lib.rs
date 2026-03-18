@@ -7,7 +7,7 @@ use eframe::egui;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
-use crate::graphics::ui::SimScenario;
+use crate::graphics::ui::{SimScenario, TerminationReason};
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
@@ -1056,6 +1056,10 @@ impl AssyPlanApp {
 
         let scenario_count = scenarios.len();
         let total_elements = grid.elements.len();
+        let successful_count = scenarios
+            .iter()
+            .filter(|s| matches!(s.metrics.termination_reason, TerminationReason::Completed))
+            .count();
         let best_info = best_idx
             .and_then(|i| scenarios.get(i))
             .map(|s| {
@@ -1070,10 +1074,12 @@ impl AssyPlanApp {
         self.ui_state.sim_selected_scenario = if self.ui_state.sim_scenarios.is_empty() {
             None
         } else {
-            Some(0)
+            best_idx.or(Some(0))
         };
         self.ui_state.sim_running = false;
         self.ui_state.sim_current_step = 1;
+        self.ui_state.sim_current_sequence = 1;
+        self.ui_state.sim_playing = false;
         self.ui_state.needs_recalc = false;
         self.sim_task_rx = None;
         self.sim_progress_done = None;
@@ -1081,10 +1087,22 @@ impl AssyPlanApp {
         self.sim_progress_stage = None;
         self.sim_cancel_flag = None;
 
-        self.ui_state.status_message = format!(
-            "Simulation complete: {} scenarios generated{}",
-            scenario_count, best_info
-        );
+        self.ui_state.status_message = if successful_count == 0 {
+            format!(
+                "Error: Simulation finished, but 0/{} scenarios completed successfully{}",
+                scenario_count, best_info
+            )
+        } else if successful_count < scenario_count {
+            format!(
+                "⚠ Simulation complete with warnings: {}/{} scenarios completed successfully{}",
+                successful_count, scenario_count, best_info
+            )
+        } else {
+            format!(
+                "Simulation complete: {} scenarios generated{}",
+                scenario_count, best_info
+            )
+        };
     }
 
     fn poll_simulation_task(&mut self, ctx: &egui::Context) {
@@ -1218,7 +1236,12 @@ impl AssyPlanApp {
                 let best_idx = scenarios
                     .iter()
                     .enumerate()
-                    .max_by_key(|(_, s)| s.metrics.total_members_installed)
+                    .max_by_key(|(_, s)| {
+                        (
+                            matches!(s.metrics.termination_reason, TerminationReason::Completed),
+                            s.metrics.total_members_installed,
+                        )
+                    })
                     .map(|(i, _)| i);
 
                 SimulationTaskResult {
@@ -3274,9 +3297,30 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use crate::graphics::ui::{ScenarioMetrics, SimScenario, TerminationReason};
     use crate::sim_grid::SimGrid;
 
-    use super::AssyPlanApp;
+    use super::{AssyPlanApp, SimulationTaskResult};
+
+    fn make_scenario(
+        id: usize,
+        installed: usize,
+        steps: usize,
+        termination_reason: TerminationReason,
+    ) -> SimScenario {
+        SimScenario {
+            id,
+            seed: id as u64,
+            steps: Vec::new(),
+            metrics: ScenarioMetrics {
+                avg_members_per_step: 0.0,
+                avg_connectivity: 0.0,
+                total_steps: steps,
+                total_members_installed: installed,
+                termination_reason,
+            },
+        }
+    }
 
     #[test]
     fn test_app_struct_exists() {
@@ -3410,5 +3454,62 @@ mod tests {
         );
         assert_eq!(no_progress.step_elements, with_progress.step_elements);
         assert_eq!(no_progress.floor_data, with_progress.floor_data);
+    }
+
+    #[test]
+    fn test_apply_simulation_result_selects_best_scenario() {
+        let mut app = AssyPlanApp::default();
+        let grid = SimGrid::new(4, 8, 3, 6000.0, 6000.0, 4000.0);
+        let scenarios = vec![
+            make_scenario(1, 760, 81, TerminationReason::NoCandidates),
+            make_scenario(2, 800, 86, TerminationReason::Completed),
+        ];
+
+        app.apply_simulation_result(SimulationTaskResult {
+            grid,
+            scenarios,
+            best_idx: Some(1),
+        });
+
+        assert_eq!(app.ui_state.sim_selected_scenario, Some(1));
+        assert!(app.ui_state.status_message.contains("Best: scenario 2"));
+    }
+
+    #[test]
+    fn test_apply_simulation_result_warns_when_some_scenarios_fail() {
+        let mut app = AssyPlanApp::default();
+        let grid = SimGrid::new(4, 8, 3, 6000.0, 6000.0, 4000.0);
+        let scenarios = vec![
+            make_scenario(1, 800, 86, TerminationReason::Completed),
+            make_scenario(2, 760, 81, TerminationReason::NoCandidates),
+        ];
+
+        app.apply_simulation_result(SimulationTaskResult {
+            grid,
+            scenarios,
+            best_idx: Some(0),
+        });
+
+        assert!(app.ui_state.status_message.starts_with('⚠'));
+        assert!(app.ui_state.status_message.contains("1/2 scenarios completed successfully"));
+    }
+
+    #[test]
+    fn test_apply_simulation_result_errors_when_no_scenarios_succeed() {
+        let mut app = AssyPlanApp::default();
+        let grid = SimGrid::new(4, 8, 3, 6000.0, 6000.0, 4000.0);
+        let scenarios = vec![
+            make_scenario(1, 760, 81, TerminationReason::NoCandidates),
+            make_scenario(2, 744, 79, TerminationReason::MaxIterations),
+        ];
+
+        app.apply_simulation_result(SimulationTaskResult {
+            grid,
+            scenarios,
+            best_idx: Some(0),
+        });
+
+        assert!(app.ui_state.status_message.starts_with("Error:"));
+        assert!(app.ui_state.status_message.contains("0/2 scenarios completed successfully"));
     }
 }
