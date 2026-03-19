@@ -170,7 +170,7 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - 하층부 기둥 완료율 제약 threshold 기본값은 `0.8` 이다.
 - 어떤 층의 미설치 부재가 `lower_floor_forced_completion_threshold` 이하이면 그 층을 우선 마감한다. (현재 UI 기본값 10)
 
-### Current canonical behavior (2026-03-18)
+### Current canonical behavior (2026-03-19)
 
 - 시뮬레이션 엔진의 Step 생성은 workfront 독립 방출이 아니라 **global step cycle 집계 방식**을 따른다.
 - 한 global step cycle 내부에서 각 workfront 는 sequence round 마다 최대 1개 부재를 선택한다.
@@ -193,6 +193,21 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 	- buffer/planned_pattern/lock를 해제하고, `last_failed_floor`를 기록해 즉시 동일 floor 재시도 루프를 방지한다.
 - `planned_pattern` 이 버퍼에 의해 완전히 소진되었는데 Step이 미완성인 경우(`plan_exhausted`) 재계획을 강제한다.
 	- 단일 seed로 시작한 증분 확장에서 정체되는 deadlock 회귀를 방지하기 위한 canonical 동작이다.
+- same-floor endgame 경쟁 완화용 **active throttling** 은 현재 canonical safety net 이다.
+	- bootstrap 이후 same-floor 정체가 발생하면 해당 floor 에서 상위 2개 workfront 만 active 로 유지한다.
+	- 정체가 지속되면 `active_cap = 1` 로 줄여 single-WF finish mode 로 내려간다.
+- 비선정 workfront reset 은 **buffer-only rollback** 으로 유지한다.
+	- `owned_ids` 전체 삭제는 금지한다.
+	- buffer 부재만 local 점유에서 해제하고, `buffer_sequences`, `planned_pattern`, `committed_floor` 를 초기화한 뒤 `last_failed_floor` 를 기록한다.
+- floor rebase 는 최소 cooldown 방식으로만 적용한다.
+	- reset 이후 짧은 cooldown 동안은 `last_failed_floor` 재우선 선택을 피한다.
+	- 기존 floor gate, ratio gate, forced completion 규칙은 그대로 유지한다.
+- spatial rebase 는 runtime anchor 기반 locality 보정으로만 적용한다.
+	- candidate search 거리 계산, floor 1 strict anchor check, reset 이후 다음 시도 anchor 설정에만 사용한다.
+	- active throttling representative selection core 는 여전히 static workfront zone 기준을 유지한다.
+- simulation 결과 metric 은 진단용 telemetry 를 포함한다.
+	- `throttle_events`, `floor_rebase_events`, `spatial_rebase_events` 를 UI result panel 에 표시한다.
+	- 이 값들은 현재 scenario ranking 변경용 signal 이 아니다.
 - 시뮬레이션 실행은 UI 스레드 블로킹 호출이 아니라 background worker + progress/cancel 흐름으로 유지한다.
 - Simulation 기본 UI 값은 `GridConfig.ny = 8`, `lower_floor_forced_completion = 10`, `sim_scenario_count = 2` 이다.
 - 시뮬레이션 결과는 선택 시나리오 또는 전체 시나리오 기준 debug export CSV/summary 경로를 유지한다.

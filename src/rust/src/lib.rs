@@ -3318,6 +3318,9 @@ mod tests {
                 total_steps: steps,
                 total_members_installed: installed,
                 termination_reason,
+                throttle_events: 0,
+                floor_rebase_events: 0,
+                spatial_rebase_events: 0,
             },
         }
     }

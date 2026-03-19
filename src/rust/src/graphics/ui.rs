@@ -81,6 +81,9 @@ pub struct ScenarioMetrics {
     pub total_steps: usize,
     pub total_members_installed: usize,
     pub termination_reason: TerminationReason,
+    pub throttle_events: usize,
+    pub floor_rebase_events: usize,
+    pub spatial_rebase_events: usize,
 }
 
 /// A single element installation entry in the global sequence order

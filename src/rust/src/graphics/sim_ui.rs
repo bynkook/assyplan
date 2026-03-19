@@ -749,6 +749,18 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
                     ui.label("Termination:");
                     ui.label(format!("{}", scenario.metrics.termination_reason));
                     ui.end_row();
+
+                    ui.label("Throttle Events:");
+                    ui.label(format!("{}", scenario.metrics.throttle_events));
+                    ui.end_row();
+
+                    ui.label("Floor Rebase Events:");
+                    ui.label(format!("{}", scenario.metrics.floor_rebase_events));
+                    ui.end_row();
+
+                    ui.label("Spatial Rebase Events:");
+                    ui.label(format!("{}", scenario.metrics.spatial_rebase_events));
+                    ui.end_row();
                 });
 
             ui.add_space(10.0);

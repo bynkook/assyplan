@@ -269,7 +269,6 @@ fn compute_score(c: &Candidate) -> f64 {
 - 부재 수 또는 Step 개수만으로 종료하지 않는다.
 - 독립 5개 단위의 과다 사용, 상층부 위반 반복, 장기간 무진전은 실패 원인 메타데이터로 기록할 수 있다.
 
-
 #### 시뮬레이션 모드(Simulation Mode) 의 환경설정, 제약, 메뉴 구성
 
 시뮬레이션 모드를 시작하면 환경설정에서 설정한 Grid Plane 을 표시한 x-y plan view 가 먼저 표시되고, 사용자는 그 교차점을 선택하여 1개 이상의 workfront 를 지정한다. 이 환경설정은 단순 UI 옵션이 아니라, 실제 시뮬레이션 후보 생성 범위와 층별 제약 동작을 결정하는 입력값이다.
@@ -359,6 +358,74 @@ fn compute_score(c: &Candidate) -> f64 {
 - 상층부 제약 검사 최적화 (층별 기둥 카운트 캐시)
 - 프론티어 관리 자료구조 (HashSet 또는 HashMap<NodeID, Distance>)
 - 사용자 가중치 슬라이더 UI 연동
+
+### 개발 4단계 로직 고도화
+
+#### 개발 4단계 목표
+
+- 개발 3단계 시뮬레이션 엔진이 large model + multi-workfront 조합에서도 같은 층 후반부 경쟁 때문에 장시간 정체되지 않도록 로직을 고도화한다.
+- 기존 canonical 구조인 global step cycle, floor commitment, sequence/step 분리를 유지한 채 same-floor competition 완화 로직을 안정화한다.
+- 시뮬레이션 결과에 throttling / rebase 개입 현황을 metric으로 남기고 UI 에서 확인할 수 있게 한다.
+
+#### 개발 4단계의 현재 구현 범위
+
+- active throttling 은 제거하지 않고 유지한다.
+- bootstrap 이후 same-floor 경쟁 정체가 발생하면 해당 floor 에서 상위 2개 workfront 만 active 로 유지한다.
+- 비선정 workfront 는 buffer-only rollback 을 수행한다.
+- 비선정 workfront 는 reset 이후 다음 시도에 사용할 runtime anchor 를 새로 부여받는다.
+- floor selection 은 짧은 cooldown 동안 직전 실패 floor 재선호를 줄이는 최소 floor rebase 를 사용한다.
+- simulation result panel 에 `Throttle Events`, `Floor Rebase Events`, `Spatial Rebase Events` 를 표시한다.
+
+#### 개발 4단계의 세부 규칙
+
+##### 1. Active throttling 유지
+
+- active throttling 은 same-floor endgame 경쟁 완화의 주 안전장치로 유지한다.
+- 같은 floor 경쟁이 실제로 발생하고 local step 정체가 시작된 뒤에만 개입한다.
+- throttling 이 시작되면 score 와 direct conflict 회피 기준으로 2개 workfront 를 우선 남기고, 필요시 active cap 을 1로 줄인다.
+
+##### 2. Buffer-only rollback 유지
+
+- 비선정 workfront reset 시 `owned_ids` 전체를 지우지 않는다.
+- 현재 buffer 에 포함된 부재만 local 점유에서 해제한다.
+- `buffer_sequences`, `planned_pattern`, `committed_floor` 를 초기화하고 `last_failed_floor` 를 기록한다.
+- 이미 형성된 local footprint 는 보존한다.
+
+##### 3. Spatial rebase
+
+- 각 workfront 는 static start point 외에 runtime anchor 를 가진다.
+- local footprint 가 비어 있는 floor 의 거리 계산과 floor 1 strict anchor check 에 runtime anchor 를 사용한다.
+- 새 element 선택 후 runtime anchor 는 해당 element 위치 쪽으로 갱신된다.
+- throttling 으로 reset 된 workfront 는 selected workfront anchor 와 최대한 떨어진 rebase anchor 를 부여받는다.
+
+##### 4. Floor rebase
+
+- floor rebase 는 공격적 floor migration 이 아니라 최소 cooldown 방식으로만 적용한다.
+- reset 직후 일정 round 동안은 `last_failed_floor` 를 다시 최우선 floor 로 선택하지 않는다.
+- 새 element 를 선택하면 cooldown 은 감소한다.
+- 기존 상층 비율 제약, 하층 완료율 제약, 강제 마감 규칙은 그대로 유지한다.
+
+##### 5. UI metric 노출
+
+- scenario metrics 는 기존 `avg_members_per_step`, `avg_connectivity`, `total_steps`, `total_members_installed`, `termination_reason` 외에 아래 값을 포함한다.
+- `throttle_events`
+- `floor_rebase_events`
+- `spatial_rebase_events`
+- 이 값들은 디버깅 및 결과 해석용 telemetry 이며, 현재 best scenario ranking 로직을 직접 바꾸는 signal 은 아니다.
+
+#### 개발 4단계의 구현 원칙
+
+- `Sequence != Step` 가정은 유지한다.
+- global step cycle aggregation 을 깨지 않는다.
+- active throttling selection core 는 현재 static workfront zone 기준을 유지한다.
+- runtime anchor 는 candidate search locality 보정과 reset 이후 재시도 출발점 보정에만 사용한다.
+- UI metric 추가는 표시용이며, scenario selection 정책 변경으로 확장하지 않는다.
+
+#### 개발 4단계 검증 기준
+
+- `cargo build --release` 가 성공해야 한다.
+- UI-like 재현 테스트 `test_simulation_completes_6x22x3_with_ui_case_workfronts_scenario2_seed` 가 통과해야 한다.
+- step / sequence 집계 규칙, progress / cancel / export 흐름, simulation result panel metric 표시가 유지되어야 한다.
 
 ## 용어 및 Step 적합 안정 조건 정본
 

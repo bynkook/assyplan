@@ -34,6 +34,11 @@ struct WorkfrontState {
     planned_pattern: Vec<i32>,
     committed_floor: Option<i32>,
     last_failed_floor: Option<i32>,
+    runtime_anchor_x: Option<usize>,
+    runtime_anchor_y: Option<usize>,
+    rebase_cooldown_rounds: u8,
+    floor_rebase_count: u32,
+    spatial_rebase_count: u32,
 }
 
 impl WorkfrontState {
@@ -715,14 +720,14 @@ fn min_xy_distance_to_local_positions(
     candidate_nodes: &[i32],
     node_pos: &HashMap<i32, (usize, usize, usize)>,
     local_positions: &HashSet<(usize, usize)>,
-    wf: &SimWorkfront,
+    anchor: (usize, usize),
 ) -> f64 {
     if local_positions.is_empty() {
         return candidate_nodes
             .iter()
             .filter_map(|node_id| node_pos.get(node_id))
             .map(|&(xi, yi, _)| {
-                ((xi as i32 - wf.grid_x as i32).abs() + (yi as i32 - wf.grid_y as i32).abs())
+                ((xi as i32 - anchor.0 as i32).abs() + (yi as i32 - anchor.1 as i32).abs())
                     as f64
             })
             .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
@@ -1026,6 +1031,108 @@ fn next_pending_planned_element(state: &WorkfrontState) -> Option<i32> {
         .find(|eid| !state.buffer_sequences.iter().any(|seq| seq.element_id == *eid))
 }
 
+fn current_workfront_anchor(state: &WorkfrontState, wf: &SimWorkfront) -> (usize, usize) {
+    (
+        state.runtime_anchor_x.unwrap_or(wf.grid_x),
+        state.runtime_anchor_y.unwrap_or(wf.grid_y),
+    )
+}
+
+fn assign_runtime_anchor_from_element(
+    state: &mut WorkfrontState,
+    element_id: i32,
+    grid: &SimGrid,
+    node_pos: &HashMap<i32, (usize, usize, usize)>,
+) {
+    let Some(elem) = get_element(grid, element_id) else {
+        return;
+    };
+
+    let positions: Vec<(usize, usize)> = [elem.node_i_id, elem.node_j_id]
+        .into_iter()
+        .filter_map(|node_id| node_pos.get(&node_id).map(|&(xi, yi, _)| (xi, yi)))
+        .collect();
+
+    if positions.is_empty() {
+        return;
+    }
+
+    let avg_x = positions.iter().map(|(x, _)| *x).sum::<usize>() / positions.len();
+    let avg_y = positions.iter().map(|(_, y)| *y).sum::<usize>() / positions.len();
+    state.runtime_anchor_x = Some(avg_x);
+    state.runtime_anchor_y = Some(avg_y);
+}
+
+fn choose_spatial_rebase_anchor(
+    state: &WorkfrontState,
+    wf: &SimWorkfront,
+    occupied_anchors: &[(usize, usize)],
+    grid: &SimGrid,
+) -> (usize, usize) {
+    let current_anchor = current_workfront_anchor(state, wf);
+    let candidates = [
+        (wf.grid_x, wf.grid_y),
+        (0, 0),
+        (0, grid.ny.saturating_sub(1)),
+        (grid.nx.saturating_sub(1), 0),
+        (grid.nx.saturating_sub(1), grid.ny.saturating_sub(1)),
+        (grid.nx / 2, 0),
+        (grid.nx / 2, grid.ny.saturating_sub(1)),
+    ];
+
+    candidates
+        .into_iter()
+        .max_by(|a, b| {
+            let score = |anchor: (usize, usize)| -> (i32, i32) {
+                let min_dist_to_occupied = occupied_anchors
+                    .iter()
+                    .map(|&(ox, oy)| {
+                        (anchor.0 as i32 - ox as i32).abs() + (anchor.1 as i32 - oy as i32).abs()
+                    })
+                    .min()
+                    .unwrap_or(i32::MAX);
+                let dist_from_current =
+                    (anchor.0 as i32 - current_anchor.0 as i32).abs() + (anchor.1 as i32 - current_anchor.1 as i32).abs();
+                (min_dist_to_occupied, dist_from_current)
+            };
+
+            score(*a)
+                .cmp(&score(*b))
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        })
+        .unwrap_or(current_anchor)
+}
+
+fn choose_rebased_target_floor(
+    candidate_floors: &[i32],
+    installed_columns_per_floor: &HashMap<i32, usize>,
+    constraints: &SimConstraints,
+    avoid_floor: Option<i32>,
+    rebase_cooldown_rounds: u8,
+) -> i32 {
+    if rebase_cooldown_rounds == 0 {
+        return choose_target_floor(
+            candidate_floors,
+            installed_columns_per_floor,
+            constraints,
+            avoid_floor,
+        );
+    }
+
+    let mut filtered_floors: Vec<i32> = candidate_floors
+        .iter()
+        .copied()
+        .filter(|floor| Some(*floor) != avoid_floor)
+        .collect();
+
+    if filtered_floors.is_empty() {
+        filtered_floors = candidate_floors.to_vec();
+    }
+
+    filtered_floors.into_iter().max().unwrap_or(1)
+}
+
 fn workfront_zone_key(wf: &SimWorkfront, grid: &SimGrid) -> (usize, usize) {
     let zone_width = ((grid.nx + 2) / 3).max(1);
     let zone_height = ((grid.ny + 3) / 4).max(1);
@@ -1104,6 +1211,9 @@ fn preview_workfront_activation_info(
             .collect()
     };
 
+    let anchor = current_workfront_anchor(state, wf);
+    let zone_key = workfront_zone_key(wf, grid);
+
     if allowed_floors.is_empty() {
         return state
             .committed_floor
@@ -1117,12 +1227,13 @@ fn preview_workfront_activation_info(
                 top_candidate_score: 0.0,
                 candidate_count: 0,
                 remaining_on_target_floor: 0,
-                zone_key: workfront_zone_key(wf, grid),
+                zone_key,
             });
     }
 
     let wf_candidates = collect_single_candidates(
         wf,
+        anchor,
         grid,
         &support_ids,
         &local_ids,
@@ -1172,7 +1283,7 @@ fn preview_workfront_activation_info(
                 top_candidate_score: 0.0,
                 candidate_count: 0,
                 remaining_on_target_floor: 0,
-                zone_key: workfront_zone_key(wf, grid),
+                zone_key,
             });
     }
 
@@ -1185,11 +1296,12 @@ fn preview_workfront_activation_info(
             .collect();
         floors.sort_unstable();
         floors.dedup();
-        choose_target_floor(
+        choose_rebased_target_floor(
             &floors,
             committed_floor_counts,
             constraints,
             state.last_failed_floor,
+            state.rebase_cooldown_rounds,
         )
     };
 
@@ -1216,6 +1328,7 @@ fn preview_workfront_activation_info(
     {
         floor_seeds = collect_single_candidates(
             wf,
+            anchor,
             grid,
             &support_ids,
             &local_ids,
@@ -1261,7 +1374,7 @@ fn preview_workfront_activation_info(
         top_candidate_score,
         candidate_count: floor_seeds.len(),
         remaining_on_target_floor,
-        zone_key: workfront_zone_key(wf, grid),
+        zone_key,
     })
 }
 
@@ -1470,6 +1583,7 @@ fn select_active_workfronts<'a>(
 
 fn collect_single_candidates(
     wf: &SimWorkfront,
+    anchor: (usize, usize),
     grid: &SimGrid,
     support_ids: &HashSet<i32>,
     local_element_ids: &HashSet<i32>,
@@ -1480,6 +1594,7 @@ fn collect_single_candidates(
 ) -> Vec<SingleCandidate> {
     collect_single_candidates_optimized(
         wf,
+        anchor,
         grid,
         support_ids,
         local_element_ids,
@@ -1492,7 +1607,8 @@ fn collect_single_candidates(
 
 #[cfg(test)]
 fn collect_single_candidates_legacy(
-    wf: &SimWorkfront,
+    _wf: &SimWorkfront,
+    anchor: (usize, usize),
     grid: &SimGrid,
     support_ids: &HashSet<i32>,
     local_element_ids: &HashSet<i32>,
@@ -1521,7 +1637,7 @@ fn collect_single_candidates_legacy(
         let local_seeded = !local_positions.is_empty();
 
         let candidate_nodes = [elem.node_i_id, elem.node_j_id];
-        let dist = min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, wf);
+        let dist = min_xy_distance_to_local_positions(&candidate_nodes, node_pos, &local_positions, anchor);
 
         if !dist.is_finite() {
             continue;
@@ -1535,7 +1651,7 @@ fn collect_single_candidates_legacy(
                 continue;
             };
             if floor <= 1 {
-                if xi != wf.grid_x || yi != wf.grid_y {
+                if xi != anchor.0 || yi != anchor.1 {
                     continue;
                 }
             } else if dist > 1.0 {
@@ -1577,7 +1693,8 @@ fn collect_single_candidates_legacy(
 }
 
 fn collect_single_candidates_optimized(
-    wf: &SimWorkfront,
+    _wf: &SimWorkfront,
+    anchor: (usize, usize),
     grid: &SimGrid,
     support_ids: &HashSet<i32>,
     local_element_ids: &HashSet<i32>,
@@ -1613,7 +1730,7 @@ fn collect_single_candidates_optimized(
 
         let candidate_nodes = [elem.node_i_id, elem.node_j_id];
         let dist =
-            min_xy_distance_to_local_positions(&candidate_nodes, node_pos, local_positions, wf);
+            min_xy_distance_to_local_positions(&candidate_nodes, node_pos, local_positions, anchor);
 
         if !dist.is_finite() {
             continue;
@@ -1627,7 +1744,7 @@ fn collect_single_candidates_optimized(
                 continue;
             };
             if floor <= 1 {
-                if xi != wf.grid_x || yi != wf.grid_y {
+                if xi != anchor.0 || yi != anchor.1 {
                     continue;
                 }
             } else if dist > 1.0 {
@@ -2234,6 +2351,7 @@ fn run_scenario_internal(
     let dz = grid_dz(grid);
     let floor_tracker = FloorTracker::from_grid(grid, dz);
     let mut floor_throttle_state: Option<FloorThrottleState> = None;
+    let mut throttle_events: usize = 0;
 
     let mut consecutive_empty_cycles = 0u32;
     let mut next_sequence_start: usize = 1; // 1-based sequence numbering for from_local_steps
@@ -2317,6 +2435,9 @@ fn run_scenario_internal(
             );
             let active_wfs = active_selection.active_wfs;
             if let Some(floor) = active_selection.throttled_floor {
+                if !active_selection.reset_wf_ids.is_empty() {
+                    throttle_events += 1;
+                }
                 floor_throttle_state = Some(FloorThrottleState {
                     floor,
                     selected_wf_ids: active_selection.selected_wf_ids.clone(),
@@ -2327,6 +2448,16 @@ fn run_scenario_internal(
             }
 
             for wf_id in &active_selection.reset_wf_ids {
+                let selected_anchor_positions: Vec<(usize, usize)> = active_selection
+                    .selected_wf_ids
+                    .iter()
+                    .filter_map(|selected_wf_id| {
+                        let selected_wf = workfronts.iter().find(|wf| wf.id == *selected_wf_id)?;
+                        let selected_state = workfront_states.get(selected_wf_id)?;
+                        Some(current_workfront_anchor(selected_state, selected_wf))
+                    })
+                    .collect();
+
                 if let Some(state) = workfront_states.get_mut(wf_id) {
                     let rollback_buffer_ids = state.buffer_element_ids();
                     for eid in &rollback_buffer_ids {
@@ -2336,6 +2467,15 @@ fn run_scenario_internal(
                     state.planned_pattern.clear();
                     state.committed_floor = None;
                     state.last_failed_floor = active_selection.throttled_floor;
+                    if let Some(wf_ref) = workfronts.iter().find(|wf| wf.id == *wf_id) {
+                        let rebase_anchor =
+                            choose_spatial_rebase_anchor(state, wf_ref, &selected_anchor_positions, grid);
+                        state.runtime_anchor_x = Some(rebase_anchor.0);
+                        state.runtime_anchor_y = Some(rebase_anchor.1);
+                    }
+                    state.rebase_cooldown_rounds = 2;
+                    state.floor_rebase_count += 1;
+                    state.spatial_rebase_count += 1;
                 }
             }
 
@@ -2425,6 +2565,7 @@ fn run_scenario_internal(
                         }
 
                         let local_ids = current_state.all_local_ids();
+                        let anchor = current_workfront_anchor(current_state, wf);
                         let allowed_floors: HashSet<i32> = if let Some(locked_floor) = current_state.committed_floor {
                             std::iter::once(locked_floor).collect()
                         } else {
@@ -2445,6 +2586,7 @@ fn run_scenario_internal(
 
                         let wf_candidates = collect_single_candidates(
                             wf,
+                            anchor,
                             grid,
                             &support_ids,
                             &local_ids,
@@ -2504,11 +2646,12 @@ fn run_scenario_internal(
                                 floors.dedup();
 
                                 let avoid_floor = current_state.last_failed_floor;
-                                choose_target_floor(
+                                choose_rebased_target_floor(
                                     &floors,
                                     &committed_floor_counts,
                                     &constraints,
                                     avoid_floor,
+                                    current_state.rebase_cooldown_rounds,
                                 )
                             };
 
@@ -2537,6 +2680,7 @@ fn run_scenario_internal(
                             {
                                 let relaxed_candidates = collect_single_candidates(
                                     wf,
+                                    anchor,
                                     grid,
                                     &support_ids,
                                     &local_ids,
@@ -2760,6 +2904,8 @@ fn run_scenario_internal(
                         state.committed_floor = resolve_element_floor(element_id, grid, dz);
                         state.last_failed_floor = None;
                     }
+                    assign_runtime_anchor_from_element(state, element_id, grid, &node_pos);
+                    state.rebase_cooldown_rounds = state.rebase_cooldown_rounds.saturating_sub(1);
                 }
             }
 
@@ -2886,6 +3032,15 @@ fn run_scenario_internal(
         total_conn / total_steps as f64
     };
 
+    let floor_rebase_events: usize = workfront_states
+        .values()
+        .map(|state| state.floor_rebase_count as usize)
+        .sum();
+    let spatial_rebase_events: usize = workfront_states
+        .values()
+        .map(|state| state.spatial_rebase_count as usize)
+        .sum();
+
     SimScenario {
         id: scenario_id,
         seed,
@@ -2896,6 +3051,9 @@ fn run_scenario_internal(
             total_steps,
             total_members_installed: total_members,
             termination_reason,
+            throttle_events,
+            floor_rebase_events,
+            spatial_rebase_events,
         },
     }
 }
@@ -2977,6 +3135,9 @@ pub fn run_all_scenarios_with_progress_and_cancel(
                         total_steps: 0,
                         total_members_installed: 0,
                         termination_reason: TerminationReason::Cancelled,
+                        throttle_events: 0,
+                        floor_rebase_events: 0,
+                        spatial_rebase_events: 0,
                     },
                 };
             }
@@ -3823,6 +3984,7 @@ mod tests {
 
         let legacy = collect_single_candidates_legacy(
             &wf,
+            (wf.grid_x, wf.grid_y),
             &grid,
             &support_ids,
             &local_element_ids,
@@ -3833,6 +3995,7 @@ mod tests {
         );
         let optimized = collect_single_candidates_optimized(
             &wf,
+            (wf.grid_x, wf.grid_y),
             &grid,
             &support_ids,
             &local_element_ids,
@@ -3890,6 +4053,7 @@ mod tests {
 
         let legacy = collect_single_candidates_legacy(
             &wf,
+            (wf.grid_x, wf.grid_y),
             &grid,
             &support_ids,
             &local_element_ids,
@@ -3900,6 +4064,7 @@ mod tests {
         );
         let optimized = collect_single_candidates_optimized(
             &wf,
+            (wf.grid_x, wf.grid_y),
             &grid,
             &support_ids,
             &local_element_ids,
