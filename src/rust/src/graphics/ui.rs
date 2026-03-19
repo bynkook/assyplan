@@ -2,6 +2,8 @@
 
 use eframe::egui::{self};
 
+use crate::sim_trace::{SimulationTraceLevel, SimulationTraceVerbosity};
+
 const CHART_AXIS_STROKE_WIDTH: f32 = 1.0;
 const Y_AXIS_TITLE_GAP: f32 = 26.0;
 
@@ -419,6 +421,16 @@ pub struct UiState {
     pub sim_export_selected_index: Option<usize>,
     /// Last export status message (shown in UI after export)
     pub sim_export_status: String,
+    /// Whether simulation trace logging is enabled
+    pub sim_trace_enabled: bool,
+    /// Selected trace level
+    pub sim_trace_level: SimulationTraceLevel,
+    /// Selected trace verbosity
+    pub sim_trace_verbosity: SimulationTraceVerbosity,
+    /// Last generated simulation trace file path
+    pub sim_trace_last_path: String,
+    /// Last simulation trace status message
+    pub sim_trace_status: String,
     /// Navigation mode in sim 3D view: true = Sequence mode, false = Step mode
     pub sim_nav_sequence_mode: bool,
     /// Current sequence position in Sequence nav mode (1-indexed, global across all steps)
@@ -479,6 +491,11 @@ impl UiState {
             sim_export_requested: false,
             sim_export_selected_index: None,
             sim_export_status: String::new(),
+            sim_trace_enabled: false,
+            sim_trace_level: SimulationTraceLevel::Info,
+            sim_trace_verbosity: SimulationTraceVerbosity::Normal,
+            sim_trace_last_path: String::new(),
+            sim_trace_status: String::new(),
             sim_nav_sequence_mode: false,
             sim_current_sequence: 1,
             sim_view_is_model: false,
@@ -528,6 +545,11 @@ impl UiState {
         self.sim_export_requested = false;
         self.sim_export_selected_index = None;
         self.sim_export_status.clear();
+        self.sim_trace_enabled = false;
+        self.sim_trace_level = SimulationTraceLevel::Info;
+        self.sim_trace_verbosity = SimulationTraceVerbosity::Normal;
+        self.sim_trace_last_path.clear();
+        self.sim_trace_status.clear();
         self.sim_nav_sequence_mode = false;
         self.sim_current_sequence = 1;
         self.sim_view_is_model = false;

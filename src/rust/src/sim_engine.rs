@@ -15,6 +15,10 @@ use crate::graphics::ui::{
     TerminationReason,
 };
 use crate::sim_grid::SimGrid;
+use crate::sim_trace::{
+    format_ids, SimulationTraceConfig, SimulationTraceEvent, SimulationTraceLevel,
+    SimulationTraceLogger, SimulationTraceRunContext, SimulationTraceVerbosity,
+};
 use crate::stability::{
     check_step_bundle_stability, classify_member_signature, StepBufferDecision, StepPatternType,
     StabilityElement,
@@ -404,6 +408,10 @@ fn try_emit_completed_buffer(
     committed_with_buffers: &HashSet<i32>,
     cycle_local_steps: &mut Vec<LocalStep>,
     cycle_completed_wf: &mut HashSet<i32>,
+    trace_logger: &mut Option<SimulationTraceLogger>,
+    scene_id: usize,
+    cycle_index: usize,
+    round_index: usize,
 ) -> bool {
     let buffer_element_ids = state.buffer_element_ids();
 
@@ -455,6 +463,30 @@ fn try_emit_completed_buffer(
         floor: step_floor,
         pattern: pattern.as_str().to_string(),
     });
+
+    trace_event(
+        trace_logger,
+        SimulationTraceLevel::Info,
+        "sim.wf.local_step_emitted",
+        Some(scene_id),
+        Some(cycle_index),
+        Some(round_index),
+        Some(wf_id),
+        "local step emitted",
+        vec![
+            ("pattern".to_string(), pattern.as_str().to_string()),
+            ("floor".to_string(), step_floor.to_string()),
+            ("element_ids".to_string(), format_ids(buffer_element_ids.iter().copied())),
+            (
+                "cycle_local_steps_len".to_string(),
+                cycle_local_steps.len().to_string(),
+            ),
+            (
+                "cycle_completed_wfs".to_string(),
+                format_ids(cycle_completed_wf.iter().copied()),
+            ),
+        ],
+    );
 
     cycle_completed_wf.insert(wf_id);
     state.buffer_sequences.clear();
@@ -2327,6 +2359,43 @@ pub fn weighted_random_choice(scores: &[f64], rng_state: &mut u64) -> usize {
     scores.len() - 1
 }
 
+fn trace_event(
+    trace_logger: &mut Option<SimulationTraceLogger>,
+    level: SimulationTraceLevel,
+    event_name: &str,
+    scene: Option<usize>,
+    cycle: Option<usize>,
+    round: Option<usize>,
+    wf: Option<i32>,
+    message: &str,
+    fields: Vec<(String, String)>,
+) {
+    let Some(logger) = trace_logger.as_mut() else {
+        return;
+    };
+
+    if !logger.level().allows(level) {
+        return;
+    }
+
+    if logger.verbosity() == SimulationTraceVerbosity::Normal
+        && matches!(event_name, "sim.round.start" | "sim.wf.pick")
+    {
+        return;
+    }
+
+    logger.emit(SimulationTraceEvent::new(
+        level,
+        event_name,
+        scene,
+        cycle,
+        round,
+        wf,
+        message,
+        fields,
+    ));
+}
+
 fn run_scenario_internal(
     scenario_id: usize,
     grid: &SimGrid,
@@ -2335,6 +2404,7 @@ fn run_scenario_internal(
     weights: (f64, f64, f64),
     constraints: SimConstraints,
     cancel_flag: Option<&AtomicBool>,
+    mut trace_logger: Option<SimulationTraceLogger>,
 ) -> SimScenario {
     let (w1, w2, w3) = weights;
     let mut rng = seed;
@@ -2356,8 +2426,41 @@ fn run_scenario_internal(
     let mut consecutive_empty_cycles = 0u32;
     let mut next_sequence_start: usize = 1; // 1-based sequence numbering for from_local_steps
     let mut total_sequence_rounds: usize = 0; // for stagnation/max-iteration check
+    let mut cycle_index: usize = 0;
+
+    trace_event(
+        &mut trace_logger,
+        SimulationTraceLevel::Info,
+        "sim.run.start",
+        Some(scenario_id),
+        None,
+        None,
+        None,
+        "simulation started",
+        vec![
+            ("seed".to_string(), seed.to_string()),
+            (
+                "grid".to_string(),
+                format!("{}x{}x{}", grid.nx, grid.ny, grid.nz),
+            ),
+            ("workfronts".to_string(), workfronts.len().to_string()),
+            (
+                "upper_floor_threshold".to_string(),
+                format!("{:.2}", constraints.upper_floor_column_rate_threshold),
+            ),
+            (
+                "lower_completion_ratio".to_string(),
+                format!("{:.2}", constraints.lower_floor_completion_ratio_threshold),
+            ),
+            (
+                "forced_completion".to_string(),
+                constraints.lower_floor_forced_completion_threshold.to_string(),
+            ),
+        ],
+    );
 
     let termination_reason = 'outer: loop {
+        cycle_index += 1;
         if cancel_flag
             .map(|flag| flag.load(Ordering::Relaxed))
             .unwrap_or(false)
@@ -2386,8 +2489,29 @@ fn run_scenario_internal(
         let mut cycle_completed_wf: HashSet<i32> = HashSet::new();
         let mut cycle_no_progress_count = 0u32;
         let mut cycle_no_local_step_rounds = 0u32;
+        let mut cycle_round_index = 0usize;
+
+        trace_event(
+            &mut trace_logger,
+            SimulationTraceLevel::Info,
+            "sim.cycle.start",
+            Some(scenario_id),
+            Some(cycle_index),
+            None,
+            None,
+            "cycle started",
+            vec![
+                ("stable_ids".to_string(), stable_ids.len().to_string()),
+                ("committed_ids".to_string(), committed_ids.len().to_string()),
+                (
+                    "completed_wfs".to_string(),
+                    format_ids(cycle_completed_wf.iter().copied()),
+                ),
+            ],
+        );
 
         loop {
+            cycle_round_index += 1;
             if cancel_flag
                 .map(|flag| flag.load(Ordering::Relaxed))
                 .unwrap_or(false)
@@ -2417,6 +2541,9 @@ fn run_scenario_internal(
                 }
             }
             let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
+            let previous_throttle = floor_throttle_state
+                .as_ref()
+                .map(|state| (state.floor, state.active_cap));
             let active_selection = select_active_workfronts(
                 &eligible_wfs,
                 &workfront_states,
@@ -2447,6 +2574,69 @@ fn run_scenario_internal(
                 floor_throttle_state = None;
             }
 
+            let current_throttle = floor_throttle_state
+                .as_ref()
+                .map(|state| (state.floor, state.active_cap));
+            if previous_throttle != current_throttle {
+                trace_event(
+                    &mut trace_logger,
+                    SimulationTraceLevel::Warning,
+                    "sim.throttle.changed",
+                    Some(scenario_id),
+                    Some(cycle_index),
+                    Some(cycle_round_index),
+                    None,
+                    "throttle state changed",
+                    vec![
+                        (
+                            "floor".to_string(),
+                            current_throttle
+                                .map(|state| state.0.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "active_cap".to_string(),
+                            current_throttle
+                                .map(|state| state.1.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "selected_wfs".to_string(),
+                            format_ids(active_selection.selected_wf_ids.iter().copied()),
+                        ),
+                        (
+                            "reset_wfs".to_string(),
+                            format_ids(active_selection.reset_wf_ids.iter().copied()),
+                        ),
+                    ],
+                );
+            }
+
+            trace_event(
+                &mut trace_logger,
+                SimulationTraceLevel::Info,
+                "sim.round.start",
+                Some(scenario_id),
+                Some(cycle_index),
+                Some(cycle_round_index),
+                None,
+                "round started",
+                vec![
+                    (
+                        "eligible_wfs".to_string(),
+                        format_ids(eligible_wfs.iter().map(|wf| wf.id)),
+                    ),
+                    (
+                        "active_wfs".to_string(),
+                        format_ids(active_wfs.iter().map(|wf| wf.id)),
+                    ),
+                    (
+                        "cycle_completed_wfs".to_string(),
+                        format_ids(cycle_completed_wf.iter().copied()),
+                    ),
+                ],
+            );
+
             for wf_id in &active_selection.reset_wf_ids {
                 let selected_anchor_positions: Vec<(usize, usize)> = active_selection
                     .selected_wf_ids
@@ -2476,6 +2666,34 @@ fn run_scenario_internal(
                     state.rebase_cooldown_rounds = 2;
                     state.floor_rebase_count += 1;
                     state.spatial_rebase_count += 1;
+
+                    trace_event(
+                        &mut trace_logger,
+                        SimulationTraceLevel::Warning,
+                        "sim.wf.rollback",
+                        Some(scenario_id),
+                        Some(cycle_index),
+                        Some(cycle_round_index),
+                        Some(*wf_id),
+                        "locked floor rollback triggered",
+                        vec![
+                            (
+                                "buffer_ids".to_string(),
+                                format_ids(rollback_buffer_ids.iter().copied()),
+                            ),
+                            (
+                                "reason".to_string(),
+                                "active_throttle_reset".to_string(),
+                            ),
+                            (
+                                "last_failed_floor".to_string(),
+                                active_selection
+                                    .throttled_floor
+                                    .map(|floor| floor.to_string())
+                                    .unwrap_or_else(|| "-".to_string()),
+                            ),
+                        ],
+                    );
                 }
             }
 
@@ -2487,6 +2705,29 @@ fn run_scenario_internal(
             for wf in &active_wfs {
                 let Some(current_state) = workfront_states.get(&wf.id) else {
                     continue;
+                };
+
+                let plan_refresh_reason = if current_state.planned_pattern.is_empty() {
+                    Some("empty_plan")
+                } else if current_state.planned_pattern.iter().any(|eid| {
+                    !current_state
+                        .buffer_sequences
+                        .iter()
+                        .map(|seq| seq.element_id)
+                        .collect::<HashSet<_>>()
+                        .contains(eid)
+                        && (committed_ids.contains(eid) || selected_this_sequence.contains(eid))
+                }) {
+                    Some("plan_conflict")
+                } else if !current_state.planned_pattern.is_empty()
+                    && current_state
+                        .planned_pattern
+                        .iter()
+                        .all(|eid| current_state.buffer_sequences.iter().any(|seq| seq.element_id == *eid))
+                {
+                    Some("plan_exhausted")
+                } else {
+                    None
                 };
 
                 let own_buffer_ids: HashSet<i32> = current_state
@@ -2845,9 +3086,72 @@ fn run_scenario_internal(
                             state.planned_pattern.clear();
                             state.committed_floor = None;
                             state.last_failed_floor = failed_floor;
+
+                            trace_event(
+                                &mut trace_logger,
+                                SimulationTraceLevel::Warning,
+                                "sim.wf.rollback",
+                                Some(scenario_id),
+                                Some(cycle_index),
+                                Some(cycle_round_index),
+                                Some(wf.id),
+                                "locked floor rollback triggered",
+                                vec![
+                                    (
+                                        "rollback_floor".to_string(),
+                                        failed_floor
+                                            .map(|floor| floor.to_string())
+                                            .unwrap_or_else(|| "-".to_string()),
+                                    ),
+                                    (
+                                        "buffer_ids".to_string(),
+                                        format_ids(rollback_buffer_ids.iter().copied()),
+                                    ),
+                                    (
+                                        "reason".to_string(),
+                                        "no_valid_seed_after_lock".to_string(),
+                                    ),
+                                ],
+                            );
                         }
                         if state.planned_pattern.is_empty() || plan_has_conflict || plan_exhausted {
                             state.planned_pattern = new_plan;
+                            trace_event(
+                                &mut trace_logger,
+                                SimulationTraceLevel::Info,
+                                "sim.wf.plan_refresh",
+                                Some(scenario_id),
+                                Some(cycle_index),
+                                Some(cycle_round_index),
+                                Some(wf.id),
+                                "refreshed planned pattern",
+                                vec![
+                                    (
+                                        "committed_floor".to_string(),
+                                        state.committed_floor
+                                            .map(|floor| floor.to_string())
+                                            .unwrap_or_else(|| "-".to_string()),
+                                    ),
+                                    (
+                                        "last_failed_floor".to_string(),
+                                        state.last_failed_floor
+                                            .map(|floor| floor.to_string())
+                                            .unwrap_or_else(|| "-".to_string()),
+                                    ),
+                                    (
+                                        "cooldown".to_string(),
+                                        state.rebase_cooldown_rounds.to_string(),
+                                    ),
+                                    (
+                                        "planned_pattern".to_string(),
+                                        format_ids(state.planned_pattern.iter().copied()),
+                                    ),
+                                    (
+                                        "reason".to_string(),
+                                        plan_refresh_reason.unwrap_or("unknown").to_string(),
+                                    ),
+                                ],
+                            );
                         }
                     }
                 }
@@ -2869,8 +3173,41 @@ fn run_scenario_internal(
                     continue;
                 };
 
+                let buffer_before = state.buffer_element_ids();
+
                 selected_this_sequence.insert(chosen_eid);
                 sequence_installations.push((wf.id, chosen_eid));
+
+                trace_event(
+                    &mut trace_logger,
+                    SimulationTraceLevel::Info,
+                    "sim.wf.pick",
+                    Some(scenario_id),
+                    Some(cycle_index),
+                    Some(cycle_round_index),
+                    Some(wf.id),
+                    "selected next element",
+                    vec![
+                        ("element_id".to_string(), chosen_eid.to_string()),
+                        (
+                            "member_type".to_string(),
+                            get_element(grid, chosen_eid)
+                                .map(|element| element.member_type.clone())
+                                .unwrap_or_else(|| "Unknown".to_string()),
+                        ),
+                        (
+                            "element_floor".to_string(),
+                            resolve_element_floor(chosen_eid, grid, dz)
+                                .map(|floor| floor.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "selected_this_sequence".to_string(),
+                            format_ids(selected_this_sequence.iter().copied()),
+                        ),
+                        ("buffer_before".to_string(), format_ids(buffer_before)),
+                    ],
+                );
             }
 
             // If no workfront could select anything, this sequence round is empty
@@ -2929,6 +3266,41 @@ fn run_scenario_internal(
                 let buffer_element_ids = state.buffer_element_ids();
                 let decision = classify_buffer(&buffer_element_ids, grid, !cycle_stable_context.is_empty());
 
+                trace_event(
+                    &mut trace_logger,
+                    SimulationTraceLevel::Info,
+                    "sim.wf.buffer_classified",
+                    Some(scenario_id),
+                    Some(cycle_index),
+                    Some(cycle_round_index),
+                    Some(wf.id),
+                    "buffer classified",
+                    vec![
+                        (
+                            "buffer".to_string(),
+                            format_ids(buffer_element_ids.iter().copied()),
+                        ),
+                        (
+                            "signature".to_string(),
+                            buffer_element_ids
+                                .iter()
+                                .map(|eid| if is_column(grid, *eid) { 'C' } else { 'G' })
+                                .collect::<String>(),
+                        ),
+                        ("decision".to_string(), format!("{:?}", decision)),
+                        (
+                            "has_stable_context".to_string(),
+                            (!cycle_stable_context.is_empty()).to_string(),
+                        ),
+                        (
+                            "committed_floor".to_string(),
+                            state.committed_floor
+                                .map(|floor| floor.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                    ],
+                );
+
                 if let StepBufferDecision::Complete(pattern) = decision {
                     try_emit_completed_buffer(
                         wf.id,
@@ -2941,6 +3313,10 @@ fn run_scenario_internal(
                         &committed_with_buffers,
                         &mut cycle_local_steps,
                         &mut cycle_completed_wf,
+                        &mut trace_logger,
+                        scenario_id,
+                        cycle_index,
+                        cycle_round_index,
                     );
                 }
             }
@@ -2984,6 +3360,23 @@ fn run_scenario_internal(
         // ── Emit Global Step from collected local steps ─────────────
         if cycle_local_steps.is_empty() {
             consecutive_empty_cycles += 1;
+            trace_event(
+                &mut trace_logger,
+                SimulationTraceLevel::Warning,
+                "sim.cycle.end",
+                Some(scenario_id),
+                Some(cycle_index),
+                None,
+                None,
+                "cycle ended without local steps",
+                vec![
+                    ("local_steps".to_string(), "0".to_string()),
+                    (
+                        "empty_cycles".to_string(),
+                        consecutive_empty_cycles.to_string(),
+                    ),
+                ],
+            );
             if consecutive_empty_cycles >= 5 {
                 break TerminationReason::NoCandidates;
             }
@@ -3001,6 +3394,35 @@ fn run_scenario_internal(
         next_sequence_start += round_count;
 
         stable_ids.extend(step.element_ids.iter().copied());
+        trace_event(
+            &mut trace_logger,
+            SimulationTraceLevel::Info,
+            "sim.cycle.end",
+            Some(scenario_id),
+            Some(cycle_index),
+            None,
+            None,
+            "cycle ended",
+            vec![
+                (
+                    "local_steps".to_string(),
+                    step.local_steps.len().to_string(),
+                ),
+                (
+                    "step_members".to_string(),
+                    step.element_ids.len().to_string(),
+                ),
+                ("step_rounds".to_string(), round_count.to_string()),
+                (
+                    "stable_ids_after".to_string(),
+                    stable_ids.len().to_string(),
+                ),
+                (
+                    "empty_rounds_in_cycle".to_string(),
+                    cycle_no_local_step_rounds.to_string(),
+                ),
+            ],
+        );
         steps.push(step);
     };
 
@@ -3041,6 +3463,38 @@ fn run_scenario_internal(
         .map(|state| state.spatial_rebase_count as usize)
         .sum();
 
+    trace_event(
+        &mut trace_logger,
+        SimulationTraceLevel::Info,
+        "sim.run.end",
+        Some(scenario_id),
+        None,
+        None,
+        None,
+        "simulation finished",
+        vec![
+            ("termination".to_string(), termination_reason.to_string()),
+            ("total_steps".to_string(), total_steps.to_string()),
+            (
+                "total_sequence_rounds".to_string(),
+                total_sequence_rounds.to_string(),
+            ),
+            ("throttle_events".to_string(), throttle_events.to_string()),
+            (
+                "floor_rebase_events".to_string(),
+                floor_rebase_events.to_string(),
+            ),
+            (
+                "spatial_rebase_events".to_string(),
+                spatial_rebase_events.to_string(),
+            ),
+        ],
+    );
+
+    if let Some(logger) = trace_logger.as_mut() {
+        logger.flush();
+    }
+
     SimScenario {
         id: scenario_id,
         seed,
@@ -3071,7 +3525,16 @@ pub fn run_scenario(
         lower_floor_completion_ratio_threshold: 0.8,
         lower_floor_forced_completion_threshold: 5,
     };
-    run_scenario_internal(scenario_id, grid, workfronts, seed, weights, constraints, None)
+    run_scenario_internal(
+        scenario_id,
+        grid,
+        workfronts,
+        seed,
+        weights,
+        constraints,
+        None,
+        None,
+    )
 }
 
 pub fn run_all_scenarios(
@@ -3151,6 +3614,7 @@ pub fn run_all_scenarios_with_progress_and_cancel(
                 weights,
                 constraints,
                 cancel_flag.as_deref(),
+                None,
             );
             if let Some(counter) = &progress_counter {
                 counter.fetch_add(1, Ordering::Relaxed);
@@ -3160,6 +3624,127 @@ pub fn run_all_scenarios_with_progress_and_cancel(
         .collect();
     scenarios.sort_by_key(|s| s.id);
     scenarios
+}
+
+pub fn run_all_scenarios_with_progress_and_cancel_and_trace(
+    count: usize,
+    grid: &SimGrid,
+    workfronts: &[SimWorkfront],
+    weights: (f64, f64, f64),
+    constraints: SimConstraints,
+    progress_counter: Option<Arc<AtomicUsize>>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    trace_config: SimulationTraceConfig,
+    trace_run_context: Option<SimulationTraceRunContext>,
+) -> (Vec<SimScenario>, Vec<std::path::PathBuf>, String) {
+    let mut results: Vec<(SimScenario, Option<std::path::PathBuf>, Option<String>)> =
+        (1..=count)
+            .into_par_iter()
+            .map(|i| {
+                if cancel_flag
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::Relaxed))
+                    .unwrap_or(false)
+                {
+                    return (
+                        SimScenario {
+                            id: i,
+                            seed: i as u64 * 2654435761,
+                            steps: Vec::new(),
+                            metrics: ScenarioMetrics {
+                                avg_members_per_step: 0.0,
+                                avg_connectivity: 0.0,
+                                total_steps: 0,
+                                total_members_installed: 0,
+                                termination_reason: TerminationReason::Cancelled,
+                                throttle_events: 0,
+                                floor_rebase_events: 0,
+                                spatial_rebase_events: 0,
+                            },
+                        },
+                        None,
+                        None,
+                    );
+                }
+
+                let seed = i as u64 * 2654435761;
+                let mut trace_path = None;
+                let mut trace_error = None;
+                let trace_logger = if trace_config.enabled {
+                    if let Some(run_context) = trace_run_context.as_ref() {
+                        match SimulationTraceLogger::create_for_scene(
+                            trace_config.clone(),
+                            run_context,
+                            i,
+                        ) {
+                            Ok(logger) => {
+                                trace_path = Some(logger.output_path());
+                                Some(logger)
+                            }
+                            Err(err) => {
+                                trace_error = Some(format!(
+                                    "scene {} trace init failed: {}",
+                                    i, err
+                                ));
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let scenario = run_scenario_internal(
+                    i,
+                    grid,
+                    workfronts,
+                    seed,
+                    weights,
+                    constraints,
+                    cancel_flag.as_deref(),
+                    trace_logger,
+                );
+                if let Some(counter) = &progress_counter {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+
+                (scenario, trace_path, trace_error)
+            })
+            .collect();
+
+    results.sort_by_key(|entry| entry.0.id);
+
+    let mut scenarios: Vec<SimScenario> = Vec::with_capacity(results.len());
+    let mut trace_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut trace_errors: Vec<String> = Vec::new();
+
+    for (scenario, trace_path, trace_error) in results {
+        scenarios.push(scenario);
+        if let Some(path) = trace_path {
+            trace_paths.push(path);
+        }
+        if let Some(err) = trace_error {
+            trace_errors.push(err);
+        }
+    }
+
+    let trace_status = if trace_config.enabled {
+        if trace_errors.is_empty() {
+            format!("Trace logs generated: {} file(s)", trace_paths.len())
+        } else {
+            format!(
+                "Trace logs partially generated: {} file(s), {} error(s)",
+                trace_paths.len(),
+                trace_errors.len()
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    (scenarios, trace_paths, trace_status)
 }
 
 #[cfg(test)]
@@ -4313,6 +4898,7 @@ mod tests {
             (0.5, 0.3, 0.2),
             constraints,
             None,
+            None,
         );
 
         let first_upper_idx = scenario.steps.iter().position(|step| step.floor > 1);
@@ -4385,6 +4971,7 @@ mod tests {
             777,
             (0.5, 0.3, 0.2),
             constraints,
+            None,
             None,
         );
 
@@ -4524,6 +5111,7 @@ mod tests {
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
+            None,
         );
 
         let total_elements = grid.elements.len();
@@ -4567,6 +5155,7 @@ mod tests {
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
+            None,
         );
 
         let total_elements = grid.elements.len();
@@ -4600,6 +5189,7 @@ mod tests {
                 lower_floor_completion_ratio_threshold: 0.8,
                 lower_floor_forced_completion_threshold: 10,
             },
+            None,
             None,
         );
 
@@ -4644,6 +5234,7 @@ mod tests {
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
+            None,
         );
 
         let total_elements = grid.elements.len();
@@ -4686,6 +5277,7 @@ mod tests {
                 lower_floor_completion_ratio_threshold: 0.8,
                 lower_floor_forced_completion_threshold: 10,
             },
+            None,
             None,
         );
 

@@ -1,6 +1,7 @@
 pub mod graphics;
 pub mod sim_engine;
 pub mod sim_grid;
+pub mod sim_trace;
 pub mod stability;
 
 use eframe::egui;
@@ -8,7 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 use crate::graphics::ui::{SimScenario, TerminationReason};
+use crate::sim_trace::{build_run_context, SimulationTraceConfig};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -189,6 +192,8 @@ struct SimulationTaskResult {
     grid: sim_grid::SimGrid,
     scenarios: Vec<SimScenario>,
     best_idx: Option<usize>,
+    trace_log_paths: Vec<PathBuf>,
+    trace_status: String,
 }
 
 #[derive(Debug)]
@@ -1028,6 +1033,8 @@ impl AssyPlanApp {
         let grid = result.grid;
         let scenarios = result.scenarios;
         let best_idx = result.best_idx;
+        let trace_log_paths = result.trace_log_paths;
+        let trace_status = result.trace_status;
 
         // Store grid so the View tab can render a 3D view of installed elements
         self.sim_grid = Some(grid.clone());
@@ -1085,6 +1092,11 @@ impl AssyPlanApp {
         self.ui_state.sim_current_sequence = 1;
         self.ui_state.sim_playing = false;
         self.ui_state.needs_recalc = false;
+        self.ui_state.sim_trace_last_path = trace_log_paths
+            .first()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        self.ui_state.sim_trace_status = trace_status.clone();
         self.sim_task_rx = None;
         self.sim_progress_done = None;
         self.sim_progress_total = 0;
@@ -1107,6 +1119,12 @@ impl AssyPlanApp {
                 scenario_count, best_info
             )
         };
+
+        if !trace_status.is_empty() {
+            self.ui_state
+                .status_message
+                .push_str(&format!(" | {}", trace_status));
+        }
     }
 
     fn poll_simulation_task(&mut self, ctx: &egui::Context) {
@@ -1159,6 +1177,7 @@ impl AssyPlanApp {
                 SimulationTaskMessage::Failed(err) => {
                     self.ui_state.sim_running = false;
                     self.ui_state.needs_recalc = false;
+                    self.ui_state.sim_trace_status.clear();
                     self.sim_task_rx = None;
                     self.sim_progress_done = None;
                     self.sim_progress_total = 0;
@@ -1180,6 +1199,14 @@ impl AssyPlanApp {
         let cfg = self.ui_state.grid_config.clone();
         let workfronts = self.ui_state.sim_workfronts.clone();
         let weights = self.ui_state.sim_weights;
+        let trace_config = SimulationTraceConfig {
+            enabled: self.ui_state.sim_trace_enabled,
+            level: self.ui_state.sim_trace_level,
+            verbosity: self.ui_state.sim_trace_verbosity,
+            write_text: true,
+            write_jsonl: false,
+            flush_each_event: true,
+        };
         let constraints = sim_engine::SimConstraints {
             upper_floor_column_rate_threshold: self.ui_state.upper_floor_threshold,
             lower_floor_completion_ratio_threshold: self
@@ -1207,6 +1234,12 @@ impl AssyPlanApp {
         }
 
         self.ui_state.sim_running = true;
+        self.ui_state.sim_trace_status = if trace_config.enabled {
+            "Simulation trace logger enabled.".to_string()
+        } else {
+            "".to_string()
+        };
+        self.ui_state.sim_trace_last_path.clear();
         self.ui_state.status_message = format!(
             "Running simulation: {} scenarios ({}×{} grid, {} floors)...",
             count, cfg.nx, cfg.ny, cfg.nz
@@ -1221,13 +1254,25 @@ impl AssyPlanApp {
         self.sim_progress_total = count;
         self.sim_progress_stage = Some(stage.clone());
         self.sim_cancel_flag = Some(cancel.clone());
+        let output_dir = self.resolve_output_dir();
+        let grid_summary = format!("{}x{}x{}", cfg.nx, cfg.ny, cfg.nz);
+        let trace_run_context = build_run_context(
+            output_dir,
+            grid_summary,
+            workfronts.len(),
+            count,
+            constraints.upper_floor_column_rate_threshold,
+            constraints.lower_floor_completion_ratio_threshold,
+            constraints.lower_floor_forced_completion_threshold,
+            2654435761,
+        );
 
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| {
                 stage.store(1, Ordering::Relaxed);
                 let grid = sim_grid::SimGrid::new(cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz);
                 stage.store(2, Ordering::Relaxed);
-                let scenarios = sim_engine::run_all_scenarios_with_progress_and_cancel(
+                let (scenarios, trace_log_paths, trace_status) = sim_engine::run_all_scenarios_with_progress_and_cancel_and_trace(
                     count,
                     &grid,
                     &workfronts,
@@ -1235,6 +1280,8 @@ impl AssyPlanApp {
                     constraints,
                     Some(progress),
                     Some(cancel.clone()),
+                    trace_config,
+                    Some(trace_run_context),
                 );
                 stage.store(3, Ordering::Relaxed);
                 let best_idx = scenarios
@@ -1252,6 +1299,8 @@ impl AssyPlanApp {
                     grid,
                     scenarios,
                     best_idx,
+                    trace_log_paths,
+                    trace_status,
                 }
             });
 
@@ -3476,6 +3525,8 @@ mod tests {
             grid,
             scenarios,
             best_idx: Some(1),
+            trace_log_paths: Vec::new(),
+            trace_status: String::new(),
         });
 
         assert_eq!(app.ui_state.sim_selected_scenario, Some(1));
@@ -3495,6 +3546,8 @@ mod tests {
             grid,
             scenarios,
             best_idx: Some(0),
+            trace_log_paths: Vec::new(),
+            trace_status: String::new(),
         });
 
         assert!(app.ui_state.status_message.starts_with('⚠'));
@@ -3514,6 +3567,8 @@ mod tests {
             grid,
             scenarios,
             best_idx: Some(0),
+            trace_log_paths: Vec::new(),
+            trace_status: String::new(),
         });
 
         assert!(app.ui_state.status_message.starts_with("Error:"));

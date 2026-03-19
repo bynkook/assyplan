@@ -10,6 +10,7 @@
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Stroke, Ui, Vec2};
 
 use crate::graphics::ui::{SimWorkfront, UiState};
+use crate::sim_trace::{SimulationTraceLevel, SimulationTraceVerbosity};
 
 // Shared chart layout constants (aligned with Development mode visuals)
 const CHART_PADDING_LEFT: f32 = 64.0;
@@ -253,6 +254,76 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     });
     if state.lower_floor_forced_completion != prev_lower_floor_forced_completion {
         changed = true;
+    }
+
+    ui.add_space(12.0);
+    ui.separator();
+
+    ui.heading("Trace Logger");
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut state.sim_trace_enabled,
+        "Enable simulation trace logger (writes a user-readable log file)",
+    );
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Trace level:");
+        egui::ComboBox::from_id_source("sim_trace_level")
+            .selected_text(match state.sim_trace_level {
+                SimulationTraceLevel::Info => "Info",
+                SimulationTraceLevel::Warning => "Warning",
+                SimulationTraceLevel::Error => "Error",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut state.sim_trace_level,
+                    SimulationTraceLevel::Info,
+                    "Info",
+                );
+                ui.selectable_value(
+                    &mut state.sim_trace_level,
+                    SimulationTraceLevel::Warning,
+                    "Warning",
+                );
+                ui.selectable_value(
+                    &mut state.sim_trace_level,
+                    SimulationTraceLevel::Error,
+                    "Error",
+                );
+            });
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Verbosity:");
+        egui::ComboBox::from_id_source("sim_trace_verbosity")
+            .selected_text(match state.sim_trace_verbosity {
+                SimulationTraceVerbosity::Normal => "Normal",
+                SimulationTraceVerbosity::Verbose => "Verbose",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut state.sim_trace_verbosity,
+                    SimulationTraceVerbosity::Normal,
+                    "Normal",
+                );
+                ui.selectable_value(
+                    &mut state.sim_trace_verbosity,
+                    SimulationTraceVerbosity::Verbose,
+                    "Verbose",
+                );
+            });
+    });
+
+    if !state.sim_trace_status.is_empty() {
+        ui.add_space(6.0);
+        ui.colored_label(Color32::from_rgb(140, 210, 255), &state.sim_trace_status);
+    }
+
+    if !state.sim_trace_last_path.is_empty() {
+        ui.add_space(4.0);
+        ui.label(format!("Last trace file: {}", state.sim_trace_last_path));
     }
 
     ui.add_space(12.0);
