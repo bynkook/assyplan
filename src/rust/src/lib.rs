@@ -1074,7 +1074,11 @@ impl AssyPlanApp {
         self.ui_state.sim_selected_scenario = if self.ui_state.sim_scenarios.is_empty() {
             None
         } else {
-            best_idx.or(Some(0))
+            self.ui_state
+                .sim_scenarios
+                .iter()
+                .position(|s| matches!(s.metrics.termination_reason, TerminationReason::Completed))
+                .or(Some(0))
         };
         self.ui_state.sim_running = false;
         self.ui_state.sim_current_step = 1;
