@@ -504,55 +504,7 @@ impl UiState {
 
     /// Reset state to initial values
     pub fn reset(&mut self) {
-        self.show_id_labels = true;
-        self.show_node_ids = true;
-        self.show_element_ids = true;
-        self.mode = "Development".to_string();
-        self.file_path.clear();
-        self.current_tab = "View".to_string();
-        self.status_message = "Ready".to_string();
-        self.has_data = false;
-        self.validation_passed = false;
-        self.current_step = 1;
-        self.max_step = 0;
-        self.step_input = "1".to_string();
-        self.show_grid = true;
-        self.show_nodes = true;
-        self.show_elements = true;
-        self.show_hidden = true;
-        self.display_mode = DisplayMode::Model;
-        self.has_step_data = false;
-        self.construction_view_mode = ConstructionViewMode::Sequence;
-        self.current_sequence = 1;
-        self.max_sequence = 0;
-        // Reset metrics
-        self.total_elements = 0;
-        self.total_columns = 0;
-        self.total_girders = 0;
-        self.workfront_count = 0;
-        self.floor_column_data.clear();
-        self.needs_recalc = false;
-        self.step_elements.clear();
-        // Reset simulation state
-        self.sim_workfronts.clear();
-        self.sim_scenarios.clear();
-        self.sim_selected_scenario = None;
-        self.sim_playing = false;
-        self.sim_speed = 1;
-        self.sim_current_step = 1;
-        self.sim_play_timer = 0.0;
-        self.sim_running = false;
-        self.sim_export_requested = false;
-        self.sim_export_selected_index = None;
-        self.sim_export_status.clear();
-        self.sim_trace_enabled = false;
-        self.sim_trace_level = SimulationTraceLevel::Info;
-        self.sim_trace_verbosity = SimulationTraceVerbosity::Normal;
-        self.sim_trace_last_path.clear();
-        self.sim_trace_status.clear();
-        self.sim_nav_sequence_mode = false;
-        self.sim_current_sequence = 1;
-        self.sim_view_is_model = false;
+        *self = Self::new();
     }
 
     /// Set step data from Python step table
@@ -1375,6 +1327,18 @@ mod tests {
         state.step_input = "5".to_string();
         state.display_mode = DisplayMode::Construction;
         state.has_step_data = true;
+        state.has_sequence_data = true;
+        state.upper_floor_threshold = 0.75;
+        state.lower_floor_completion_ratio = 0.25;
+        state.lower_floor_forced_completion = 3;
+        state.grid_config.nx = 9;
+        state.grid_config.ny = 11;
+        state.grid_config.nz = 5;
+        state.sim_weights = (0.2, 0.6, 0.2);
+        state.sim_scenario_count = 10;
+        state.sim_trace_enabled = true;
+        state.sim_trace_last_path = "output/sim.log".to_string();
+        state.sim_trace_status = "logger enabled".to_string();
 
         state.reset();
 
@@ -1388,6 +1352,18 @@ mod tests {
         assert_eq!(state.step_input, "1");
         assert_eq!(state.display_mode, DisplayMode::Model);
         assert!(!state.has_step_data);
+        assert!(!state.has_sequence_data);
+        assert_eq!(state.upper_floor_threshold, 0.3);
+        assert_eq!(state.lower_floor_completion_ratio, 0.8);
+        assert_eq!(state.lower_floor_forced_completion, 10);
+        assert_eq!(state.grid_config.nx, 4);
+        assert_eq!(state.grid_config.ny, 8);
+        assert_eq!(state.grid_config.nz, 3);
+        assert_eq!(state.sim_weights, (0.5, 0.3, 0.2));
+        assert_eq!(state.sim_scenario_count, 2);
+        assert!(!state.sim_trace_enabled);
+        assert!(state.sim_trace_last_path.is_empty());
+        assert!(state.sim_trace_status.is_empty());
     }
 
     #[test]

@@ -230,6 +230,8 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 ## 9) Editing Rules
 
 - 근본 원인을 고친다. 예외 무시, 임시 하드코딩, 의미 없는 방어 로직 추가를 피한다.
+- 증상 패치는 금지한다. 로그나 재현 결과는 증상을 좁히는 근거로만 쓰고, 수정 전 반드시 상태 전이와 책임 경계를 기준으로 구조적 원인을 먼저 검토한다.
+- 새로운 조건문이나 예외 분기를 추가하기 전에, 해당 문제가 throttle, plan refresh, buffer reset, emit eligibility 중 어느 책임에서 발생했는지 먼저 분리해서 확인한다.
 - Python 은 입출력과 구조 데이터 준비를 담당하고, Rust 는 계산/시뮬레이션/UI 핵심을 담당한다. 책임을 섞지 않는다.
 - PyO3 경계를 바꾸면 Python 호출부와 Rust 바인딩을 함께 점검한다.
 - AssyPlan 패키징은 `assyplan` 패키지 + `assyplan.assyplan_native` 확장 서브모듈 구조를 유지한다. Windows PDB 충돌 회피를 위해 Rust lib target 이름은 `assyplan_native`, 실행 바이너리 이름은 `assyplan`으로 분리한다.

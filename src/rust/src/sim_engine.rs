@@ -2965,113 +2965,116 @@ fn run_scenario_internal(
                                 }
                                 Vec::new()
                             } else {
-                            let mut complete_plans: Vec<(Vec<i32>, f64)> = Vec::new();
-                            let mut local_support_ids = support_ids.clone();
-                            local_support_ids.extend(current_state.buffer_sequences.iter().map(|seq| seq.element_id));
-                            let local_support_nodes = node_set_for_elements(&local_support_ids, grid);
-                            let complete_plan_context = CompletePlanContext::new(
-                                grid,
-                                &local_support_ids,
-                                &local_support_nodes,
-                                &node_pos,
-                                &wf_committed_ids,
-                                &planned_reserved_ids,
-                                (w1, w2, w3),
-                            );
+                                let mut complete_plans: Vec<(Vec<i32>, f64)> = Vec::new();
+                                let mut local_support_ids = support_ids.clone();
+                                local_support_ids.extend(
+                                    current_state.buffer_sequences.iter().map(|seq| seq.element_id),
+                                );
+                                let local_support_nodes = node_set_for_elements(&local_support_ids, grid);
+                                let complete_plan_context = CompletePlanContext::new(
+                                    grid,
+                                    &local_support_ids,
+                                    &local_support_nodes,
+                                    &node_pos,
+                                    &wf_committed_ids,
+                                    &planned_reserved_ids,
+                                    (w1, w2, w3),
+                                );
 
-                            for seed_candidate in &floor_seeds {
-                                let seed_id = seed_candidate.element_id;
-                                let seed_is_column = is_column(grid, seed_id);
+                                for seed_candidate in &floor_seeds {
+                                    let seed_id = seed_candidate.element_id;
+                                    let seed_is_column = is_column(grid, seed_id);
 
-                                if !seed_is_column {
-                                    complete_plan_context.push_if_viable(
-                                        &mut complete_plans,
-                                        vec![seed_id],
-                                    );
-                                }
-
-                                if seed_is_column {
-                                    let Some(seed_elem) = get_element(grid, seed_id) else {
-                                        continue;
-                                    };
-                                    let seed_upper = seed_elem.node_j_id;
-                                    let touching_girders = uninstalled_girders_touching_node(
-                                        seed_upper,
-                                        grid,
-                                        &wf_committed_ids,
-                                    );
-
-                                    for &g1 in &touching_girders {
-                                        let plan = vec![seed_id, g1];
-                                        complete_plan_context.push_if_viable(&mut complete_plans, plan);
+                                    if !seed_is_column {
+                                        complete_plan_context.push_if_viable(
+                                            &mut complete_plans,
+                                            vec![seed_id],
+                                        );
                                     }
 
-                                    for i in 0..touching_girders.len() {
-                                        for j in (i + 1)..touching_girders.len() {
-                                            let plan = vec![seed_id, touching_girders[i], touching_girders[j]];
+                                    if seed_is_column {
+                                        let Some(seed_elem) = get_element(grid, seed_id) else {
+                                            continue;
+                                        };
+                                        let seed_upper = seed_elem.node_j_id;
+                                        let touching_girders = uninstalled_girders_touching_node(
+                                            seed_upper,
+                                            grid,
+                                            &wf_committed_ids,
+                                        );
+
+                                        for &g1 in &touching_girders {
+                                            let plan = vec![seed_id, g1];
                                             complete_plan_context.push_if_viable(&mut complete_plans, plan);
+                                        }
+
+                                        for i in 0..touching_girders.len() {
+                                            for j in (i + 1)..touching_girders.len() {
+                                                let plan = vec![seed_id, touching_girders[i], touching_girders[j]];
+                                                complete_plan_context.push_if_viable(&mut complete_plans, plan);
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            if !complete_plans.is_empty() {
-                                complete_plans.sort_by(|a, b| {
-                                    b.1.partial_cmp(&a.1)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-                                complete_plans[0].0.clone()
-                            } else {
-                                let stable_nodes = node_set_for_elements(&local_support_ids, grid);
-                                let mut seed_order: Vec<&SingleCandidate> = floor_seeds.iter().collect();
-                                seed_order.sort_by(|a, b| {
-                                    b.score(w1, w2)
-                                        .partial_cmp(&a.score(w1, w2))
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-
-                                let mut chosen_plan = Vec::new();
-                                let pattern_build_context = PatternBuildContext::new(
-                                    grid,
-                                    &floor_tracker,
-                                    &local_support_ids,
-                                    &stable_nodes,
-                                    &node_pos,
-                                    constraints,
-                                    (w1, w2, w3),
-                                );
-                                for seed_candidate in &seed_order {
-                                    let mut plan_rng = rng ^ seed_candidate.element_id as u64;
-                                    let (candidate_plan, _) = try_build_pattern(
-                                        seed_candidate.element_id,
-                                        &pattern_build_context,
-                                        &mut plan_rng,
-                                    );
-
-                                    let is_complete = matches!(
-                                        classify_buffer(&candidate_plan, grid, !support_ids.is_empty()),
-                                        StepBufferDecision::Complete(_)
-                                    );
-                                    let is_available = candidate_plan.iter().all(|eid| {
-                                        !wf_committed_ids.contains(eid) && !planned_reserved_ids.contains(eid)
+                                if !complete_plans.is_empty() {
+                                    complete_plans.sort_by(|a, b| {
+                                        b.1.partial_cmp(&a.1)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    });
+                                    complete_plans[0].0.clone()
+                                } else {
+                                    let stable_nodes = node_set_for_elements(&local_support_ids, grid);
+                                    let mut seed_order: Vec<&SingleCandidate> = floor_seeds.iter().collect();
+                                    seed_order.sort_by(|a, b| {
+                                        b.score(w1, w2)
+                                            .partial_cmp(&a.score(w1, w2))
+                                            .unwrap_or(std::cmp::Ordering::Equal)
                                     });
 
-                                    if is_complete && is_available {
-                                        chosen_plan = candidate_plan;
-                                        break;
-                                    }
-                                }
+                                    let mut chosen_plan = Vec::new();
+                                    let pattern_build_context = PatternBuildContext::new(
+                                        grid,
+                                        &floor_tracker,
+                                        &local_support_ids,
+                                        &stable_nodes,
+                                        &node_pos,
+                                        constraints,
+                                        (w1, w2, w3),
+                                    );
+                                    for seed_candidate in &seed_order {
+                                        let mut plan_rng = rng ^ seed_candidate.element_id as u64;
+                                        let (candidate_plan, _) = try_build_pattern(
+                                            seed_candidate.element_id,
+                                            &pattern_build_context,
+                                            &mut plan_rng,
+                                        );
 
-                                // If no complete plan exists yet, start with one seed and keep
-                                // extending within the committed floor across subsequent rounds.
-                                if chosen_plan.is_empty() {
-                                    if let Some(seed_candidate) = seed_order.first() {
-                                        chosen_plan.push(seed_candidate.element_id);
-                                    }
-                                }
+                                        let is_complete = matches!(
+                                            classify_buffer(&candidate_plan, grid, !support_ids.is_empty()),
+                                            StepBufferDecision::Complete(_)
+                                        );
+                                        let is_available = candidate_plan.iter().all(|eid| {
+                                            !wf_committed_ids.contains(eid)
+                                                && !planned_reserved_ids.contains(eid)
+                                        });
 
-                                chosen_plan
-                            }
+                                        if is_complete && is_available {
+                                            chosen_plan = candidate_plan;
+                                            break;
+                                        }
+                                    }
+
+                                    // If no complete plan exists yet, start with one seed and keep
+                                    // extending within the committed floor across subsequent rounds.
+                                    if chosen_plan.is_empty() {
+                                        if let Some(seed_candidate) = seed_order.first() {
+                                            chosen_plan.push(seed_candidate.element_id);
+                                        }
+                                    }
+
+                                    chosen_plan
+                                }
                             }
                         }
                     };

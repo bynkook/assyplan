@@ -456,6 +456,7 @@ fn run_id_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_trace_logger_writes_text_file() {

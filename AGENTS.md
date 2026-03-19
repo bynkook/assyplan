@@ -293,6 +293,11 @@ python -m maturin build --release
 6. `target/release/assyplan.exe` → 루트 복사
 7. SKILLS.md 업데이트
 
+### 오류 수정 원칙
+- 증상 패치는 금지한다. 로그, 스크린샷, 재현 결과는 현상을 좁히는 용도로만 사용하고, 수정은 반드시 구조적 원인 확인 뒤 진행한다.
+- `sim_engine.rs` 같은 상태기계 성격의 코드는 먼저 책임 경계를 분리해서 본다. 특히 throttle, plan refresh, buffer reset, emit eligibility 를 섞어서 한 번에 땜질하지 않는다.
+- 새 `if` 분기나 예외 처리 추가 전, 기존 상태 전이에서 무엇이 잘못 연결됐는지 설명 가능해야 한다. 설명이 안 되면 패치를 미룬다.
+
 ### 디버깅 순서
 1. `get_errors` 또는 컴파일 오류 확인
 2. `cargo build` 컴파일 오류 확인
