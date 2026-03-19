@@ -1,7 +1,6 @@
-// In release builds on Windows, attach a console so that debug/log output
-// is visible when the binary is launched from a terminal.
-// Remove this attribute (or invert the cfg) if you want a pure GUI-only binary.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]
+// In release builds on Windows, run as a GUI subsystem app so launching the
+// executable does not open a second console window.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use assyplan_native::run;
 
