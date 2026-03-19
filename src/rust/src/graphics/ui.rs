@@ -2,6 +2,32 @@
 
 use eframe::egui::{self};
 
+const CHART_AXIS_STROKE_WIDTH: f32 = 1.0;
+const Y_AXIS_TITLE_GAP: f32 = 26.0;
+
+fn y_axis_label_x(plot_rect: egui::Rect) -> f32 {
+    plot_rect.left() - 6.0
+}
+
+fn draw_rotated_y_axis_title(
+    painter: &egui::Painter,
+    plot_rect: egui::Rect,
+    title: &str,
+    font_id: egui::FontId,
+    color: egui::Color32,
+) {
+    let galley = painter.layout_no_wrap(title.to_string(), font_id, color);
+    let pos = egui::pos2(
+        y_axis_label_x(plot_rect) - Y_AXIS_TITLE_GAP - galley.size().y,
+        plot_rect.center().y + galley.size().x * 0.5,
+    );
+
+    painter.add(
+        egui::epaint::TextShape::new(pos, galley, color)
+            .with_angle(-std::f32::consts::FRAC_PI_2),
+    );
+}
+
 // ============================================================================
 // Simulation Mode Data Types (Phase 3)
 // ============================================================================
@@ -732,11 +758,11 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
 
     let max_cum = cumulative_data.last().map(|p| p.1).unwrap_or(1.0).max(1.0);
     let chart1_height = 160.0f32;
-    let chart_padding_left = 50.0f32;
-    let chart_padding_bottom = 24.0f32;
+    let chart_padding_left = 64.0f32;
+    let chart_padding_bottom = 36.0f32;
     let chart_padding_top = 10.0f32;
     let chart_padding_right = 20.0f32;
-    let chart_margin_h = 12.0f32; // horizontal outer margin
+    let chart_margin_h = 6.0f32; // horizontal outer margin
 
     egui::Frame::none()
         .inner_margin(egui::Margin::symmetric(chart_margin_h, 0.0))
@@ -770,27 +796,34 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                 // Y-axis
                 painter.line_segment(
                     [plot_rect.left_bottom(), plot_rect.left_top()],
-                    egui::Stroke::new(1.0, axis_color),
+                    egui::Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
                 );
                 // X-axis
                 painter.line_segment(
                     [plot_rect.left_bottom(), plot_rect.right_bottom()],
-                    egui::Stroke::new(1.0, axis_color),
+                    egui::Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
                 );
 
                 // Y-axis label: 0 and max
                 let font_id = egui::FontId::proportional(10.0);
                 painter.text(
-                    egui::pos2(chart1_rect.left(), plot_rect.bottom() - 5.0),
-                    egui::Align2::LEFT_CENTER,
+                    egui::pos2(y_axis_label_x(plot_rect), plot_rect.bottom() - 5.0),
+                    egui::Align2::RIGHT_CENTER,
                     "0",
                     font_id.clone(),
                     axis_color,
                 );
                 painter.text(
-                    egui::pos2(chart1_rect.left(), plot_rect.top()),
-                    egui::Align2::LEFT_CENTER,
+                    egui::pos2(y_axis_label_x(plot_rect), plot_rect.top()),
+                    egui::Align2::RIGHT_CENTER,
                     format!("{}", max_cum as usize),
+                    font_id.clone(),
+                    axis_color,
+                );
+                draw_rotated_y_axis_title(
+                    &painter,
+                    plot_rect,
+                    "Cumulative Members",
                     font_id.clone(),
                     axis_color,
                 );
@@ -841,13 +874,20 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                     let x = plot_rect.left()
                         + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
                     painter.text(
-                        egui::pos2(x, chart1_rect.bottom() - 4.0),
-                        egui::Align2::CENTER_BOTTOM,
+                        egui::pos2(x, plot_rect.bottom() + 4.0),
+                        egui::Align2::CENTER_TOP,
                         format!("{}", s),
                         font_id.clone(),
                         axis_color,
                     );
                 }
+                painter.text(
+                    egui::pos2(plot_rect.center().x, chart1_rect.bottom() - 2.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    "Step",
+                    font_id.clone(),
+                    axis_color,
+                );
             }
 
             ui.add_space(10.0);
@@ -941,12 +981,12 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                 // Y-axis
                 painter.line_segment(
                     [plot_rect.left_bottom(), plot_rect.left_top()],
-                    egui::Stroke::new(1.0, axis_color),
+                    egui::Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
                 );
                 // X-axis
                 painter.line_segment(
                     [plot_rect.left_bottom(), plot_rect.right_bottom()],
-                    egui::Stroke::new(1.0, axis_color),
+                    egui::Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
                 );
 
                 // Y-axis labels: 0%, 50%, 100%
@@ -960,13 +1000,20 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                         egui::Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
                     );
                     painter.text(
-                        egui::pos2(chart2_rect.left(), y),
-                        egui::Align2::LEFT_CENTER,
+                        egui::pos2(y_axis_label_x(plot_rect), y),
+                        egui::Align2::RIGHT_CENTER,
                         *label,
                         font_id.clone(),
                         axis_color,
                     );
                 }
+                draw_rotated_y_axis_title(
+                    &painter,
+                    plot_rect,
+                    "Column Installation Rate",
+                    font_id.clone(),
+                    axis_color,
+                );
 
                 let max_step_f = state.max_step as f32;
 
@@ -1015,13 +1062,20 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                     let x = plot_rect.left()
                         + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
                     painter.text(
-                        egui::pos2(x, chart2_rect.bottom() - 4.0),
-                        egui::Align2::CENTER_BOTTOM,
+                        egui::pos2(x, plot_rect.bottom() + 4.0),
+                        egui::Align2::CENTER_TOP,
                         format!("{}", s),
                         font_id.clone(),
                         axis_color,
                     );
                 }
+                painter.text(
+                    egui::pos2(plot_rect.center().x, chart2_rect.bottom() - 2.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    "Step",
+                    font_id.clone(),
+                    axis_color,
+                );
             }
 
             ui.add_space(10.0);
@@ -1130,12 +1184,12 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                     // Y-axis
                     painter.line_segment(
                         [plot_rect.left_bottom(), plot_rect.left_top()],
-                        egui::Stroke::new(1.0, axis_color),
+                        egui::Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
                     );
                     // X-axis
                     painter.line_segment(
                         [plot_rect.left_bottom(), plot_rect.right_bottom()],
-                        egui::Stroke::new(1.0, axis_color),
+                        egui::Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
                     );
 
                     // Y-axis grid + labels: 0, 0.5*y_max, y_max
@@ -1153,13 +1207,20 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                             egui::Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
                         );
                         painter.text(
-                            egui::pos2(chart3_rect.left(), y),
-                            egui::Align2::LEFT_CENTER,
+                            egui::pos2(y_axis_label_x(plot_rect), y),
+                            egui::Align2::RIGHT_CENTER,
                             label.as_str(),
                             font_id.clone(),
                             axis_color,
                         );
                     }
+                    draw_rotated_y_axis_title(
+                        &painter,
+                        plot_rect,
+                        "Upper-Floor Ratio",
+                        font_id.clone(),
+                        axis_color,
+                    );
 
                     let max_step_f = state.max_step as f32;
 
@@ -1240,13 +1301,20 @@ fn render_result_tab_inner(ui: &mut egui::Ui, state: &UiState) {
                         let x = plot_rect.left()
                             + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
                         painter.text(
-                            egui::pos2(x, chart3_rect.bottom() - 4.0),
-                            egui::Align2::CENTER_BOTTOM,
+                            egui::pos2(x, plot_rect.bottom() + 4.0),
+                            egui::Align2::CENTER_TOP,
                             format!("{}", s),
                             font_id.clone(),
                             axis_color,
                         );
                     }
+                    painter.text(
+                        egui::pos2(plot_rect.center().x, chart3_rect.bottom() - 2.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        "Step",
+                        font_id.clone(),
+                        axis_color,
+                    );
                 }
 
                 ui.add_space(10.0);

@@ -12,12 +12,37 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Stroke, Ui, Vec2};
 use crate::graphics::ui::{SimWorkfront, UiState};
 
 // Shared chart layout constants (aligned with Development mode visuals)
-const CHART_PADDING_LEFT: f32 = 50.0;
+const CHART_PADDING_LEFT: f32 = 64.0;
 const CHART_PADDING_RIGHT: f32 = 20.0;
 const CHART_PADDING_TOP: f32 = 10.0;
-const CHART_PADDING_BOTTOM: f32 = 24.0;
-const CHART_MARGIN_H: f32 = 12.0;
+const CHART_PADDING_BOTTOM: f32 = 36.0;
+const CHART_MARGIN_H: f32 = 6.0;
 const CHART_LEGEND_W: f32 = 70.0;
+const CHART_AXIS_STROKE_WIDTH: f32 = 1.0;
+const Y_AXIS_TITLE_GAP: f32 = 26.0;
+
+fn y_axis_label_x(plot_rect: Rect) -> f32 {
+    plot_rect.left() - 6.0
+}
+
+fn draw_rotated_y_axis_title(
+    painter: &egui::Painter,
+    plot_rect: Rect,
+    title: &str,
+    font_id: FontId,
+    color: Color32,
+) {
+    let galley = painter.layout_no_wrap(title.to_string(), font_id, color);
+    let pos = Pos2::new(
+        y_axis_label_x(plot_rect) - Y_AXIS_TITLE_GAP - galley.size().y,
+        plot_rect.center().y + galley.size().x * 0.5,
+    );
+
+    painter.add(
+        egui::epaint::TextShape::new(pos, galley, color)
+            .with_angle(-std::f32::consts::FRAC_PI_2),
+    );
+}
 
 // ============================================================================
 // Settings tab (Grid config + algorithm weights + workfront list)
@@ -546,7 +571,7 @@ pub fn render_sim_view(ui: &mut Ui, state: &mut UiState) -> bool {
 // ============================================================================
 
 /// Render the simulation result tab.
-/// Shows scenario list, playback controls, selected scenario metrics.
+/// Shows scenario list, selected scenario metrics, and charts.
 pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
     ui.heading("Simulation Results");
     ui.separator();
@@ -620,8 +645,6 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
                                 .clicked()
                         {
                             state.sim_selected_scenario = Some(scenario.id - 1);
-                            state.sim_current_step = 1;
-                            state.sim_playing = false;
                         }
                         ui.label(format!("{}", scenario.metrics.total_members_installed));
                         ui.label(format!("{:.2}", scenario.metrics.avg_members_per_step));
@@ -631,95 +654,8 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
                 });
         });
 
-    ui.add_space(10.0);
-    ui.separator();
-
-    // ── Playback controls ──────────────────────────────────────────────────
     if let Some(sel_idx) = state.sim_selected_scenario {
         if let Some(scenario) = state.sim_scenarios.get(sel_idx) {
-            let max_step = scenario.steps.len();
-
-            ui.heading(format!("Scenario {} — Playback", scenario.id));
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                // Prev step
-                if ui
-                    .add_enabled(state.sim_current_step > 1, egui::Button::new("◀"))
-                    .clicked()
-                {
-                    state.sim_current_step = state.sim_current_step.saturating_sub(1).max(1);
-                    state.sim_playing = false;
-                }
-
-                // Play / Pause
-                if state.sim_playing {
-                    if ui.button("⏸ Pause").clicked() {
-                        state.sim_playing = false;
-                    }
-                } else if ui
-                    .add_enabled(
-                        max_step > 0 && state.sim_current_step < max_step,
-                        egui::Button::new("▶ Play"),
-                    )
-                    .clicked()
-                {
-                    state.sim_playing = true;
-                }
-
-                // Next step
-                if ui
-                    .add_enabled(state.sim_current_step < max_step, egui::Button::new("▶"))
-                    .clicked()
-                {
-                    state.sim_current_step = (state.sim_current_step + 1).min(max_step);
-                    state.sim_playing = false;
-                }
-
-                // Speed selector
-                ui.separator();
-                ui.label("Speed:");
-                ui.selectable_value(&mut state.sim_speed, 1, "1×");
-                ui.selectable_value(&mut state.sim_speed, 2, "2×");
-                ui.selectable_value(&mut state.sim_speed, 4, "4×");
-            });
-
-            // Seek bar (slider)
-            if max_step > 0 {
-                ui.add(
-                    egui::Slider::new(&mut state.sim_current_step, 1..=max_step)
-                        .text("Step")
-                        .clamp_to_range(true),
-                );
-            }
-
-            // Step info
-            let step_display = state.sim_current_step.min(max_step).max(1);
-            if let Some(step) = scenario.steps.get(step_display - 1) {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(format!("Step {} / {}", step_display, max_step));
-                    ui.separator();
-                    if step.local_steps.len() > 1 {
-                        let wf_detail = step.local_steps.iter()
-                            .map(|ls| format!("WF {}: {} ({})", ls.workfront_id, ls.element_ids.len(), ls.pattern))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        ui.label(format!("[{}]", wf_detail));
-                    } else {
-                        ui.label(format!("WF {}", step.workfront_id));
-                        ui.separator();
-                        ui.label(format!("Floor {}", step.floor));
-                    }
-                    ui.separator();
-                    ui.label(format!(
-                        "{} member(s): {:?}",
-                        step.element_ids.len(),
-                        step.element_ids
-                    ));
-                });
-            }
-
             ui.add_space(10.0);
             ui.separator();
 
@@ -873,7 +809,15 @@ fn render_members_per_step_plot(ui: &mut Ui, scenario: &crate::graphics::ui::Sim
                 ),
             );
 
-            painter.rect_stroke(plot_rect, 2.0, Stroke::new(1.0, Color32::from_gray(60)));
+            let axis_color = Color32::from_gray(140);
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.left_top()],
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
+            );
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
+            );
 
             let n = steps.len();
             let counts: Vec<usize> = steps.iter().map(|s| s.element_ids.len()).collect();
@@ -916,13 +860,20 @@ fn render_members_per_step_plot(ui: &mut Ui, scenario: &crate::graphics::ui::Sim
                     x += dash + gap;
                 }
                 painter.text(
-                    pos2(plot_rect.left() - 4.0, sy),
+                    pos2(y_axis_label_x(plot_rect), sy),
                     egui::Align2::RIGHT_CENTER,
                     format!("{:.0}", yv),
                     FontId::proportional(9.0),
                     Color32::from_gray(140),
                 );
             }
+            draw_rotated_y_axis_title(
+                &painter,
+                plot_rect,
+                "Members / Step",
+                FontId::proportional(9.0),
+                Color32::from_gray(140),
+            );
 
     // ── Data line ─────────────────────────────────────────────────────────
             let line_color = Color32::from_rgb(100, 180, 255);
@@ -1089,11 +1040,11 @@ fn render_floor_column_installation_rate_chart(
 
             painter.line_segment(
                 [plot_rect.left_bottom(), plot_rect.left_top()],
-                Stroke::new(1.0, axis_color),
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
             );
             painter.line_segment(
                 [plot_rect.left_bottom(), plot_rect.right_bottom()],
-                Stroke::new(1.0, axis_color),
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
             );
 
             for (frac, label) in &[(0.0f32, "0%"), (0.5, "50%"), (1.0, "100%")] {
@@ -1103,13 +1054,20 @@ fn render_floor_column_installation_rate_chart(
                     Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
                 );
                 painter.text(
-                    pos2(chart_rect.left(), y),
-                    egui::Align2::LEFT_CENTER,
+                    pos2(y_axis_label_x(plot_rect), y),
+                    egui::Align2::RIGHT_CENTER,
                     *label,
                     font_id.clone(),
                     axis_color,
                 );
             }
+            draw_rotated_y_axis_title(
+                &painter,
+                plot_rect,
+                "Column Installation Rate",
+                font_id.clone(),
+                axis_color,
+            );
 
             let max_step_f = n_steps as f32;
             let to_screen = |step: f32, rate: f32| -> Pos2 {
@@ -1150,13 +1108,20 @@ fn render_floor_column_installation_rate_chart(
                 let x = plot_rect.left()
                     + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
                 painter.text(
-                    pos2(x, chart_rect.bottom() - 4.0),
-                    egui::Align2::CENTER_BOTTOM,
+                    pos2(x, plot_rect.bottom() + 4.0),
+                    egui::Align2::CENTER_TOP,
                     format!("{}", s),
                     font_id.clone(),
                     axis_color,
                 );
             }
+            painter.text(
+                pos2(plot_rect.center().x, chart_rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Step",
+                font_id.clone(),
+                axis_color,
+            );
         });
 }
 
@@ -1259,11 +1224,11 @@ fn render_upper_floor_column_rate_chart(
 
             painter.line_segment(
                 [plot_rect.left_bottom(), plot_rect.left_top()],
-                Stroke::new(1.0, axis_color),
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
             );
             painter.line_segment(
                 [plot_rect.left_bottom(), plot_rect.right_bottom()],
-                Stroke::new(1.0, axis_color),
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
             );
 
             for (frac, label) in &[
@@ -1277,13 +1242,20 @@ fn render_upper_floor_column_rate_chart(
                     Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
                 );
                 painter.text(
-                    pos2(chart_rect.left(), y),
-                    egui::Align2::LEFT_CENTER,
+                    pos2(y_axis_label_x(plot_rect), y),
+                    egui::Align2::RIGHT_CENTER,
                     label,
                     font_id.clone(),
                     axis_color,
                 );
             }
+            draw_rotated_y_axis_title(
+                &painter,
+                plot_rect,
+                "Upper-Floor Ratio",
+                font_id.clone(),
+                axis_color,
+            );
 
             let max_step_f = n_steps as f32;
             let to_screen = |step: f32, ratio: f32| -> Pos2 {
@@ -1344,13 +1316,20 @@ fn render_upper_floor_column_rate_chart(
                 let x = plot_rect.left()
                     + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
                 painter.text(
-                    pos2(x, chart_rect.bottom() - 4.0),
-                    egui::Align2::CENTER_BOTTOM,
+                    pos2(x, plot_rect.bottom() + 4.0),
+                    egui::Align2::CENTER_TOP,
                     format!("{}", s),
                     font_id.clone(),
                     axis_color,
                 );
             }
+            painter.text(
+                pos2(plot_rect.center().x, chart_rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Step",
+                font_id.clone(),
+                axis_color,
+            );
         });
 }
 
@@ -1444,11 +1423,11 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
             let axis_color = Color32::from_gray(120);
             painter.line_segment(
                 [plot_rect.left_bottom(), plot_rect.left_top()],
-                Stroke::new(1.0, axis_color),
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
             );
             painter.line_segment(
                 [plot_rect.left_bottom(), plot_rect.right_bottom()],
-                Stroke::new(1.0, axis_color),
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
             );
 
     // ── Y-axis tick labels (0, 50%, 100%) ────────────────────────────────
@@ -1468,13 +1447,20 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
                     x += dash + gap;
                 }
                 painter.text(
-                    pos2(plot_rect.left() - 4.0, sy),
+                    pos2(y_axis_label_x(plot_rect), sy),
                     egui::Align2::RIGHT_CENTER,
                     format!("{:.0}", val),
                     font_id.clone(),
                     Color32::from_gray(130),
                 );
             }
+            draw_rotated_y_axis_title(
+                &painter,
+                plot_rect,
+                "Cumulative Members",
+                font_id.clone(),
+                Color32::from_gray(130),
+            );
 
     // ── Data → screen coordinate helper ───────────────────────────────────
             let to_screen = |step: f32, members: f32| -> Pos2 {
@@ -1535,11 +1521,10 @@ pub fn render_scenario_comparison_chart(ui: &mut Ui, state: &UiState) {
                 Color32::from_gray(130),
             );
 
-    // Y-axis label (rotated text not available in egui; place title above top tick to avoid overlap)
             painter.text(
-                pos2(total_rect.left() + 2.0, total_rect.top() + 1.0),
-                egui::Align2::LEFT_TOP,
-                "Cumulative Members",
+                pos2(plot_rect.center().x, total_rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Step",
                 font_id,
                 Color32::from_gray(130),
             );
