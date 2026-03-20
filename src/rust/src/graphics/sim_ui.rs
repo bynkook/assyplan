@@ -403,17 +403,27 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             .max_height(120.0)
             .show(ui, |ui| {
                 let mut to_remove: Option<usize> = None;
-                for (i, wf) in state.sim_workfronts.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "WF {} — Grid ({}, {})",
-                            wf.id, wf.grid_x, wf.grid_y
-                        ));
-                        if ui.small_button("✕").clicked() {
-                            to_remove = Some(i);
+                egui::Grid::new("sim_workfront_table")
+                    .num_columns(4)
+                    .spacing([16.0, 6.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("WF");
+                        ui.strong("Grid X");
+                        ui.strong("Grid Y");
+                        ui.strong("Delete");
+                        ui.end_row();
+
+                        for (i, wf) in state.sim_workfronts.iter().enumerate() {
+                            ui.label(format!("{}", wf.id));
+                            ui.label(format!("{}", wf.grid_x));
+                            ui.label(format!("{}", wf.grid_y));
+                            if ui.small_button("✕").clicked() {
+                                to_remove = Some(i);
+                            }
+                            ui.end_row();
                         }
                     });
-                }
                 if let Some(idx) = to_remove {
                     state.sim_workfronts.remove(idx);
                     // Re-assign IDs (1-indexed, sequential)

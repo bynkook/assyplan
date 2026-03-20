@@ -217,6 +217,37 @@ enum DevelopmentTaskMessage {
     Failed(String),
 }
 
+fn compare_simulation_scenarios(a: &SimScenario, b: &SimScenario) -> std::cmp::Ordering {
+    let a_completed = matches!(a.metrics.termination_reason, TerminationReason::Completed);
+    let b_completed = matches!(b.metrics.termination_reason, TerminationReason::Completed);
+
+    b_completed
+        .cmp(&a_completed)
+        .then_with(|| {
+            if a_completed && b_completed {
+                std::cmp::Ordering::Equal
+            } else {
+                b.metrics.total_members_installed.cmp(&a.metrics.total_members_installed)
+            }
+        })
+        .then_with(|| a.metrics.total_steps.cmp(&b.metrics.total_steps))
+        .then_with(|| {
+            b.metrics
+                .avg_connectivity
+                .partial_cmp(&a.metrics.avg_connectivity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+fn find_best_scenario_index(scenarios: &[SimScenario]) -> Option<usize> {
+    scenarios
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| compare_simulation_scenarios(a, b))
+        .map(|(i, _)| i)
+}
+
 pub struct AssyPlanApp {
     ui_state: graphics::UiState,
     render_data: Option<graphics::RenderData>,
@@ -1081,11 +1112,7 @@ impl AssyPlanApp {
         self.ui_state.sim_selected_scenario = if self.ui_state.sim_scenarios.is_empty() {
             None
         } else {
-            self.ui_state
-                .sim_scenarios
-                .iter()
-                .position(|s| matches!(s.metrics.termination_reason, TerminationReason::Completed))
-                .or(Some(0))
+            best_idx.or(Some(0))
         };
         self.ui_state.sim_running = false;
         self.ui_state.sim_current_step = 1;
@@ -1284,16 +1311,7 @@ impl AssyPlanApp {
                     Some(trace_run_context),
                 );
                 stage.store(3, Ordering::Relaxed);
-                let best_idx = scenarios
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(_, s)| {
-                        (
-                            matches!(s.metrics.termination_reason, TerminationReason::Completed),
-                            s.metrics.total_members_installed,
-                        )
-                    })
-                    .map(|(i, _)| i);
+                let best_idx = find_best_scenario_index(&scenarios);
 
                 SimulationTaskResult {
                     grid,
@@ -2370,28 +2388,65 @@ impl eframe::App for AssyPlanApp {
                                             }
                                         });
 
-                                        // Detail line below the nav bar
-                                        if !self.ui_state.sim_nav_sequence_mode {
-                                            // Step detail (floor / workfront / member list / pattern)
-                                            if let Some(info) = step_info {
-                                                ui.label(
-                                                    egui::RichText::new(info)
-                                                        .size(10.0)
-                                                        .color(egui::Color32::from_rgb(160, 210, 255)),
-                                                );
-                                            }
+                                        // Dedicated detail bar below the nav bar.
+                                        // Keep a fixed two-line height so long messages do not resize the 3D viewport.
+                                        let detail_font = egui::FontId::proportional(10.0);
+                                        let detail_line_height = ui.fonts(|fonts| fonts.row_height(&detail_font));
+                                        let detail_bar_height = detail_line_height + 6.0;
+                                        let detail_scroll_height = detail_line_height + 2.0;
+                                        let (detail_text, detail_color) = if !self.ui_state.sim_nav_sequence_mode {
+                                            (
+                                                step_info,
+                                                egui::Color32::from_rgb(160, 210, 255),
+                                            )
                                         } else {
-                                            // Sequence detail (element id)
-                                            if let Some(info) = seq_info {
-                                                ui.label(
-                                                    egui::RichText::new(info)
-                                                        .size(10.0)
-                                                        .color(egui::Color32::from_rgb(180, 255, 200)),
-                                                );
-                                            }
-                                        }
+                                            (
+                                                seq_info,
+                                                egui::Color32::from_rgb(180, 255, 200),
+                                            )
+                                        };
 
-                                        ui.separator();
+                                        ui.add_space(1.0);
+                                        let (detail_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(ui.available_width(), detail_bar_height),
+                                            egui::Sense::hover(),
+                                        );
+                                        let mut detail_ui = ui.child_ui(
+                                            detail_rect,
+                                            egui::Layout::top_down(egui::Align::Min),
+                                        );
+                                        detail_ui.set_clip_rect(detail_rect);
+
+                                        egui::Frame::none()
+                                            .fill(egui::Color32::from_gray(24))
+                                            .inner_margin(egui::Margin::symmetric(4.0, 1.0))
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                egui::Color32::from_gray(52),
+                                            ))
+                                            .show(&mut detail_ui, |ui| {
+                                                ui.set_height(detail_scroll_height);
+                                                egui::ScrollArea::vertical()
+                                                    .id_source("sim_detail_bar_scroll")
+                                                    .min_scrolled_height(detail_scroll_height)
+                                                    .max_height(detail_scroll_height)
+                                                    .scroll_bar_visibility(
+                                                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                                    )
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        if let Some(info) = detail_text {
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(info)
+                                                                        .font(detail_font.clone())
+                                                                        .color(detail_color),
+                                                                )
+                                                                .wrap(true),
+                                                            );
+                                                        }
+                                                    });
+                                            });
                                     } // end Construction nav bar
 
                                     // ── 3D viewport (remaining space) ─────────────────────
@@ -3353,7 +3408,7 @@ mod tests {
     use crate::graphics::ui::{ScenarioMetrics, SimScenario, TerminationReason};
     use crate::sim_grid::SimGrid;
 
-    use super::{AssyPlanApp, SimulationTaskResult};
+    use super::{find_best_scenario_index, AssyPlanApp, SimulationTaskResult};
 
     fn make_scenario(
         id: usize,
@@ -3376,6 +3431,18 @@ mod tests {
                 spatial_rebase_events: 0,
             },
         }
+    }
+
+    fn make_scenario_with_connectivity(
+        id: usize,
+        installed: usize,
+        steps: usize,
+        connectivity: f64,
+        termination_reason: TerminationReason,
+    ) -> SimScenario {
+        let mut scenario = make_scenario(id, installed, steps, termination_reason);
+        scenario.metrics.avg_connectivity = connectivity;
+        scenario
     }
 
     #[test]
@@ -3519,6 +3586,67 @@ mod tests {
         let scenarios = vec![
             make_scenario(1, 760, 81, TerminationReason::NoCandidates),
             make_scenario(2, 800, 86, TerminationReason::Completed),
+        ];
+
+        app.apply_simulation_result(SimulationTaskResult {
+            grid,
+            scenarios,
+            best_idx: Some(1),
+            trace_log_paths: Vec::new(),
+            trace_status: String::new(),
+        });
+
+        assert_eq!(app.ui_state.sim_selected_scenario, Some(1));
+        assert!(app.ui_state.status_message.contains("Best: scenario 2"));
+    }
+
+    #[test]
+    fn test_find_best_scenario_index_prefers_fewer_steps_on_completed_tie() {
+        let scenarios = vec![
+            make_scenario(1, 168, 21, TerminationReason::Completed),
+            make_scenario(2, 168, 19, TerminationReason::Completed),
+            make_scenario(3, 168, 23, TerminationReason::Completed),
+        ];
+
+        let best_idx = find_best_scenario_index(&scenarios);
+
+        assert_eq!(best_idx, Some(1));
+    }
+
+    #[test]
+    fn test_find_best_scenario_index_prefers_higher_connectivity_on_completed_tie() {
+        let scenarios = vec![
+            make_scenario_with_connectivity(1, 168, 19, 2.4, TerminationReason::Completed),
+            make_scenario_with_connectivity(2, 168, 19, 2.9, TerminationReason::Completed),
+            make_scenario_with_connectivity(3, 168, 19, 2.1, TerminationReason::Completed),
+        ];
+
+        let best_idx = find_best_scenario_index(&scenarios);
+
+        assert_eq!(best_idx, Some(1));
+    }
+
+    #[test]
+    fn test_find_best_scenario_index_uses_installed_count_for_incomplete_scenarios() {
+        let scenarios = vec![
+            make_scenario(1, 150, 18, TerminationReason::MaxIterations),
+            make_scenario(2, 158, 22, TerminationReason::NoCandidates),
+            make_scenario(3, 149, 17, TerminationReason::NoCandidates),
+        ];
+
+        let best_idx = find_best_scenario_index(&scenarios);
+
+        assert_eq!(best_idx, Some(1));
+    }
+
+    #[test]
+    fn test_apply_simulation_result_uses_best_idx_not_first_completed() {
+        let mut app = AssyPlanApp::default();
+        let grid = SimGrid::new(4, 8, 3, 6000.0, 6000.0, 4000.0);
+        let scenarios = vec![
+            make_scenario(1, 168, 21, TerminationReason::Completed),
+            make_scenario(2, 168, 19, TerminationReason::Completed),
+            make_scenario(3, 150, 17, TerminationReason::MaxIterations),
         ];
 
         app.apply_simulation_result(SimulationTaskResult {
