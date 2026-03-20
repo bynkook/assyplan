@@ -152,10 +152,9 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 #### 기술 구현
 - **sim_grid.rs**: 격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성
 - **sim_engine.rs**: Monte-Carlo + weighted sampling 기반 시나리오 생성
-  - `SimSequence`: 단위 시간에 설치되는 부재 기록 (1-indexed global sequence_number)
   - `LocalStep`: 한 workfront 가 global step cycle 안에서 완성한 로컬 패턴 단위
   - `SimStep`: 여러 `LocalStep` 을 병합한 global step (`local_steps`, `pattern` 필드 포함)
-  - `WorkfrontState`: 현재 핵심 상태는 `owned_ids`, `buffer_sequences`, `committed_floor`
+  - `WorkfrontState`: 현재 핵심 상태는 `owned_ids`, `buffer_sequences: Vec<i32>`, `committed_floor`
   - `StepBufferDecision`: `Incomplete(mask)` / `Complete(pattern)` / `Invalid`
   - `StepCandidateMask`: 버퍼 확장 시 column/girder 허용 타입을 제한하는 마스크
   - `EmitResult`: `Emitted` / `Deferred` / `Infeasible`
@@ -217,10 +216,11 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 **중요 패턴**: `floor_colors` 배열은 `render_result_tab_inner` 함수 스코프에 정의됨 (Chart 2/3 공유). 절대 chart 클로저 안에 넣지 말 것.
 
 **Phase 3 신규 타입** (ui.rs):
-- `SimSequence { element_id: i32, sequence_number: usize }` — 단위 시간에 설치되는 부재 (1-indexed globally)
 - `LocalStep { workfront_id, element_ids, floor, pattern }` — workfront 로컬 완성 패턴
-- `SimStep { workfront_id, element_ids, sequences: Vec<SimSequence>, floor, pattern: String, local_steps: Vec<LocalStep> }` — 구조 안정 조건을 만족하는 global step
-- `SimStep::from_local_steps(local_steps, start_seq)` — round-robin collation 기반 병합 헬퍼
+- `SimStep { workfront_id, element_ids, floor, pattern: String, local_steps: Vec<LocalStep> }` — 구조 안정 조건을 만족하는 global step
+- `SimStep::from_local_steps(local_steps)` — local step 원본 순서를 유지하는 병합 헬퍼
+- Simulation Sequence 뷰의 정본은 각 WF 의 local step `element_ids` 를 순서대로 이어붙인 WF 연속 이력이다.
+- `WorkfrontState.buffer_sequences` 는 아직 완성되지 않은 local step buffer 를 담는 `Vec<i32>` 다.
 
 ### `src/rust/src/lib.rs`
 - `recalculate()`: CSV 로드 → 테이블 생성 → UiState 업데이트 전체 파이프라인

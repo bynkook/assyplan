@@ -177,8 +177,10 @@ Phase 3 시뮬레이션 엔진은 다음 원칙을 따라야 한다.
 - workfront 로컬 버퍼가 완성 패턴 + 안정 조건 PASS 에 도달하면 `LocalStep` 으로 cycle 수집 버퍼에 저장한다.
 - 같은 cycle 에서 local step 생성에 성공한 workfront 는 해당 cycle 의 남은 라운드에서 제외한다.
 - cycle 종료 시 수집된 여러 `LocalStep` 을 1개의 `SimStep` 으로 병합한다 (`local_steps: Vec<LocalStep>` 보존).
-- global step 의 `element_ids` 는 모든 local step element union 이며, `sequences` 는 **round-robin collation** 으로 구성한다.
-- sequence 번호는 1부터 시작하고 global step 단위로 연속 증가한다. 같은 round 는 동일 sequence 번호를 공유한다.
+- global step 의 `element_ids` 는 모든 local step element union 이다.
+- 각 workfront 의 sequence 는 승인된 local step 의 `element_ids` 를 생성 순서대로 이어붙인 **WF 연속 이력** 이다.
+- Sequence 뷰는 모든 WF 연속 이력에서 같은 인덱스의 원소를 하나씩 꺼내 전역 sequence 를 구성하고 누적으로 표시한다.
+- Step 뷰는 안정성 패턴 단위 뷰이며, Sequence 뷰와 의미를 섞지 않는다.
 - 따라서 `Sequence != Step` 가정은 유지되며, multi-workfront 상황에서 Step 수는 Sequence 수보다 작아야 정상이다.
 - bootstrap 은 `stable_ids` 와 `cycle_local_steps` 가 모두 비어 있을 때만 시작하며, workfront anchor 근처 bootstrap bundle 을 weighted sampling 으로 고른다.
 - bootstrap 이후 증분 확장은 **single-candidate retry loop** 로 동작한다. 각 workfront 는 후보를 하나씩 뽑아 보고, 현재 버퍼를 진전시키지 못하는 후보는 버리고 다음 후보를 다시 시도한다.

@@ -117,13 +117,13 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 
 - Phase 3 공용 타입 정의
 - `UiState` simulation 필드 관리
-- `SimSequence`, `LocalStep`, `SimStep`, `SimScenario`, `TerminationReason` 정의
+- `LocalStep`, `SimStep`, `SimScenario`, `TerminationReason` 정의
 
 현재 중요한 타입 의미:
 
-- `SimSequence`: 전역 sequence 번호를 가진 개별 설치 항목
 - `LocalStep`: 한 workfront가 한 global step cycle 안에서 완성한 패턴
-- `SimStep`: 여러 `LocalStep` 을 round-robin sequence로 병합한 global step
+- `SimStep`: 여러 `LocalStep` 을 묶은 global step
+- workfront 내부 in-progress buffer 는 `Vec<i32>` element list 로 관리
 
 ### `src/rust/src/graphics/sim_ui.rs`
 
@@ -251,9 +251,9 @@ upper/lower floor gate의 현재 의미:
 
 ### Sequence vs Step
 
-- `SimSequence` 는 개별 설치 항목이다.
 - `SimStep` 은 global step이다.
 - `LocalStep` 은 그 중간 집계 단위다.
+- workfront 내부 buffer 는 단순 `Vec<i32>` 이고, Sequence 뷰의 정본은 WF 연속 이력이다.
 
 ### 1-based vs 0-based
 

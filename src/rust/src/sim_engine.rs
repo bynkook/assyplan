@@ -11,7 +11,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::graphics::ui::{
-    LocalStep, ScenarioMetrics, SimScenario, SimSequence, SimStep, SimWorkfront,
+    LocalStep, ScenarioMetrics, SimScenario, SimStep, SimWorkfront,
     TerminationReason,
 };
 use crate::sim_grid::SimGrid;
@@ -43,29 +43,23 @@ pub struct SimConstraints {
 #[derive(Default, Clone)]
 struct WorkfrontState {
     owned_ids: HashSet<i32>,
-    buffer_sequences: Vec<SimSequence>,
+    buffer_sequences: Vec<i32>,
     committed_floor: Option<i32>,
 }
 
 impl WorkfrontState {
     fn all_local_ids(&self) -> HashSet<i32> {
         let mut ids = self.owned_ids.clone();
-        ids.extend(self.buffer_sequences.iter().map(|seq| seq.element_id));
+        ids.extend(self.buffer_sequences.iter().copied());
         ids
     }
 
     fn buffer_local_ids(&self) -> HashSet<i32> {
-        self.buffer_sequences
-            .iter()
-            .map(|seq| seq.element_id)
-            .collect()
+        self.buffer_sequences.iter().copied().collect()
     }
 
     fn buffer_element_ids(&self) -> Vec<i32> {
-        self.buffer_sequences
-            .iter()
-            .map(|seq| seq.element_id)
-            .collect()
+        self.buffer_sequences.clone()
     }
 }
 
@@ -203,7 +197,7 @@ fn compute_cycle_committed_ids(
     cycle_local_steps: &[LocalStep],
 ) -> HashSet<i32> {
     let mut committed_ids: HashSet<i32> = workfront_states.values().fold(stable_ids.clone(), |mut acc, state| {
-        acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
+        acc.extend(state.buffer_sequences.iter().copied());
         acc
     });
 
@@ -1191,7 +1185,6 @@ fn run_scenario_internal(
     let floor_tracker = FloorTracker::from_grid(grid, dz);
 
     let mut consecutive_empty_cycles = 0u32;
-    let mut next_sequence_start: usize = 1; // 1-based sequence numbering for from_local_steps
     let mut total_sequence_rounds: usize = 0; // for stagnation/max-iteration check
     let mut cycle_index: usize = 0;
 
@@ -1233,7 +1226,7 @@ fn run_scenario_internal(
 
         // ── Termination checks ──────────────────────────────────────
         let committed_ids: HashSet<i32> = workfront_states.values().fold(stable_ids.clone(), |mut acc, state| {
-            acc.extend(state.buffer_sequences.iter().map(|seq| seq.element_id));
+            acc.extend(state.buffer_sequences.iter().copied());
             acc
         });
 
@@ -1436,10 +1429,7 @@ fn run_scenario_internal(
                         for &eid in &pattern {
                             if selected_this_sequence.contains(&eid) { continue; }
                             state.owned_ids.insert(eid);
-                            state.buffer_sequences.push(SimSequence {
-                                element_id: eid,
-                                sequence_number: 0,
-                            });
+                            state.buffer_sequences.push(eid);
                             if state.committed_floor.is_none() {
                                 state.committed_floor = resolve_element_floor(eid, grid, dz);
                             }
@@ -1593,10 +1583,7 @@ fn run_scenario_internal(
                     }
                     let was_empty = state.buffer_sequences.is_empty();
                     state.owned_ids.insert(element_id);
-                    state.buffer_sequences.push(SimSequence {
-                        element_id,
-                        sequence_number: 0, // placeholder — will be reassigned by from_local_steps
-                    });
+                    state.buffer_sequences.push(element_id);
                     if was_empty {
                         state.committed_floor = resolve_element_floor(element_id, grid, dz);
                     }
@@ -1780,10 +1767,7 @@ fn run_scenario_internal(
         }
         consecutive_empty_cycles = 0;
 
-        let step = SimStep::from_local_steps(cycle_local_steps, next_sequence_start);
-        let round_count = step.sequence_round_count();
-        // Advance sequence counter by the number of rounds used in this step.
-        next_sequence_start += round_count;
+        let step = SimStep::from_local_steps(cycle_local_steps);
 
         stable_ids.extend(step.element_ids.iter().copied());
         trace_event(
@@ -1816,7 +1800,10 @@ fn run_scenario_internal(
                     "step_members".to_string(),
                     step.element_ids.len().to_string(),
                 ),
-                ("step_rounds".to_string(), round_count.to_string()),
+                (
+                    "step_rounds".to_string(),
+                    cycle_round_index.to_string(),
+                ),
                 (
                     "stable_ids_after".to_string(),
                     stable_ids.len().to_string(),
@@ -2346,16 +2333,7 @@ mod tests {
     fn test_locality_seed_ids_prefers_buffer_over_owned_history() {
         let mut state = WorkfrontState::default();
         state.owned_ids = HashSet::from([30, 31]);
-        state.buffer_sequences = vec![
-            SimSequence {
-                element_id: 16,
-                sequence_number: 1,
-            },
-            SimSequence {
-                element_id: 78,
-                sequence_number: 2,
-            },
-        ];
+        state.buffer_sequences = vec![16, 78];
 
         let locality_seed_ids = locality_seed_ids_for_search(&state);
 

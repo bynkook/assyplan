@@ -16,6 +16,64 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug)]
+struct SimSequenceRow {
+    sequence_number: usize,
+    workfront_id: i32,
+    floor: i32,
+    element_id: i32,
+    step_number: usize,
+}
+
+fn build_sim_sequence_rows(scenario: &SimScenario) -> Vec<SimSequenceRow> {
+    let mut histories: std::collections::BTreeMap<i32, Vec<(i32, i32, usize)>> =
+        std::collections::BTreeMap::new();
+
+    for (step_index, step) in scenario.steps.iter().enumerate() {
+        for local_step in &step.local_steps {
+            let wf_history = histories.entry(local_step.workfront_id).or_default();
+            wf_history.extend(
+                local_step
+                    .element_ids
+                    .iter()
+                    .copied()
+                    .map(|element_id| (local_step.floor, element_id, step_index + 1)),
+            );
+        }
+    }
+
+    let max_len = histories.values().map(|entries| entries.len()).max().unwrap_or(0);
+    let mut rows = Vec::new();
+
+    for seq_index in 0..max_len {
+        let sequence_number = seq_index + 1;
+        for (&workfront_id, entries) in &histories {
+            if let Some(&(floor, element_id, step_number)) = entries.get(seq_index) {
+                rows.push(SimSequenceRow {
+                    sequence_number,
+                    workfront_id,
+                    floor,
+                    element_id,
+                    step_number,
+                });
+            }
+        }
+    }
+
+    rows
+}
+
+fn installed_ids_through_sim_sequence(
+    scenario: &SimScenario,
+    current_sequence: usize,
+) -> std::collections::HashSet<i32> {
+    build_sim_sequence_rows(scenario)
+        .into_iter()
+        .filter(|row| row.sequence_number <= current_sequence)
+        .map(|row| row.element_id)
+        .collect()
+}
+
 // ============================================================================
 // Python-compatible data structures (pyclass)
 // ============================================================================
@@ -1296,7 +1354,7 @@ impl AssyPlanApp {
                 stage.store(1, Ordering::Relaxed);
                 let grid = sim_grid::SimGrid::new(cfg.nx, cfg.ny, cfg.nz, cfg.dx, cfg.dy, cfg.dz);
                 stage.store(2, Ordering::Relaxed);
-                let (scenarios, trace_log_paths, trace_status) = sim_engine::run_all_scenarios_with_progress_and_cancel_and_trace(
+                let (scenarios, trace_log_paths, trace_status): (Vec<SimScenario>, Vec<PathBuf>, String) = sim_engine::run_all_scenarios_with_progress_and_cancel_and_trace(
                     count,
                     &grid,
                     &workfronts,
@@ -1411,26 +1469,18 @@ impl AssyPlanApp {
             let mut seq_csv = String::new();
             seq_csv.push_str("sequence_order,workfront_id,element_id,member_type,step\n");
             let mut seq_rows: Vec<(usize, i32, i32, String, usize)> = Vec::new();
-            for (step_idx, step) in scenario.steps.iter().enumerate() {
-                for seq in &step.sequences {
-                    let wf_id = step
-                        .local_steps
-                        .iter()
-                        .find(|ls| ls.element_ids.contains(&seq.element_id))
-                        .map(|ls| ls.workfront_id)
-                        .unwrap_or(step.workfront_id);
+            for row in build_sim_sequence_rows(scenario) {
                     let member_type = element_by_id
-                        .get(&seq.element_id)
+                        .get(&row.element_id)
                         .map(|e| e.member_type.clone())
                         .unwrap_or_else(|| "Unknown".to_string());
-                    seq_rows.push((
-                        seq.sequence_number,
-                        wf_id,
-                        seq.element_id,
-                        member_type,
-                        step_idx + 1,
-                    ));
-                }
+                seq_rows.push((
+                    row.sequence_number,
+                    row.workfront_id,
+                    row.element_id,
+                    member_type,
+                    row.step_number,
+                ));
             }
             seq_rows.sort_by_key(|row| (row.0, row.2));
             for (seq_no, wf_id, elem_id, member_type, step_no) in seq_rows {
@@ -2199,30 +2249,17 @@ impl eframe::App for AssyPlanApp {
                                                     )
                                                 }
                                             });
-                                            // Compute max sequence number across all steps
-                                            let max_seq: usize = scenario.steps.iter()
-                                                .flat_map(|s| s.sequences.iter())
-                                                .map(|seq| seq.sequence_number)
-                                                .max()
+                                            let sequence_rows = build_sim_sequence_rows(scenario);
+                                            let max_seq = sequence_rows
+                                                .last()
+                                                .map(|row| row.sequence_number)
                                                 .unwrap_or(0);
                                             // Info for current sequence position
                                             let cur_seq = self.ui_state.sim_current_sequence;
-                                            let current_seq_entries: Vec<(i32, i32, i32)> = scenario.steps.iter()
-                                                .flat_map(|step| {
-                                                    step.sequences.iter().filter_map(move |seq| {
-                                                        if seq.sequence_number == cur_seq {
-                                                            let (wf_id, floor) = step
-                                                                .local_steps
-                                                                .iter()
-                                                                .find(|ls| ls.element_ids.contains(&seq.element_id))
-                                                                .map(|ls| (ls.workfront_id, ls.floor))
-                                                                .unwrap_or((step.workfront_id, step.floor));
-                                                            Some((wf_id, floor, seq.element_id))
-                                                        } else {
-                                                            None
-                                                        }
-                                                    })
-                                                })
+                                            let current_seq_entries: Vec<(i32, i32, i32)> = sequence_rows
+                                                .iter()
+                                                .filter(|row| row.sequence_number == cur_seq)
+                                                .map(|row| (row.workfront_id, row.floor, row.element_id))
                                                 .collect();
                                             let seq_info = if current_seq_entries.is_empty() {
                                                 None
@@ -2488,14 +2525,10 @@ impl eframe::App for AssyPlanApp {
                                                         .flat_map(|s| s.element_ids.iter().copied())
                                                         .collect()
                                                 } else {
-                                                    // Sequence mode: show individual members whose
-                                                    // sequence_number <= sim_current_sequence
-                                                    let cur_seq = self.ui_state.sim_current_sequence;
-                                                    scenario.steps.iter()
-                                                        .flat_map(|s| s.sequences.iter())
-                                                        .filter(|seq| seq.sequence_number <= cur_seq)
-                                                        .map(|seq| seq.element_id)
-                                                        .collect()
+                                                    installed_ids_through_sim_sequence(
+                                                        scenario,
+                                                        self.ui_state.sim_current_sequence,
+                                                    )
                                                 }
                                             })
                                             .unwrap_or_default()
