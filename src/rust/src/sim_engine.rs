@@ -600,11 +600,12 @@ fn candidate_advances_local_step(
     candidate_id: i32,
     grid: &SimGrid,
     support_ids: &HashSet<i32>,
+    has_stable_structure: bool,
 ) -> CandidateAdvanceResult {
     let mut prospective_buffer = state.buffer_element_ids();
     prospective_buffer.push(candidate_id);
 
-    match classify_buffer(&prospective_buffer, grid, !support_ids.is_empty()) {
+    match classify_buffer(&prospective_buffer, grid, has_stable_structure) {
         StepBufferDecision::Invalid => CandidateAdvanceResult::RejectedInvalidPattern,
         StepBufferDecision::Incomplete(_) => CandidateAdvanceResult::Accepted,
         StepBufferDecision::Complete(_) => {
@@ -745,12 +746,13 @@ fn try_pick_incremental_candidate(
     let locality_seed_ids = locality_seed_ids_for_search(state);
 
     let support_ids = build_incremental_support_ids(stable_ids, cycle_local_steps, &buffer_local_ids);
+    let has_stable = !stable_ids.is_empty();
 
     let committed_floor = state.committed_floor;
     let buffer_decision = classify_buffer(
         &state.buffer_element_ids(),
         grid,
-        !support_ids.is_empty(),
+        has_stable,
     );
     let candidate_mask = match buffer_decision {
         StepBufferDecision::Incomplete(mask) => Some(mask),
@@ -806,7 +808,7 @@ fn try_pick_incremental_candidate(
         w2,
         rng,
         |candidate| {
-            let decision = candidate_advances_local_step(state, candidate.element_id, grid, &support_ids);
+            let decision = candidate_advances_local_step(state, candidate.element_id, grid, &support_ids, has_stable);
             if !decision.accepted() {
                 trace_event(
                     trace_logger,
@@ -1250,6 +1252,7 @@ fn run_scenario_internal(
         let mut cycle_completed_wf: HashSet<i32> = HashSet::new();
         let mut cycle_no_progress_count = 0u32;
         let mut cycle_no_local_step_rounds = 0u32;
+        let mut cycle_rollback_count = 0u32;
         let mut cycle_round_index = 0usize;
 
         trace_event(
@@ -1298,15 +1301,19 @@ fn run_scenario_internal(
             );
             let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
 
-            // WF proportional control: scale active count by remaining work
+            // WF proportional control: scale active count by remaining work.
+            // Each workfront can produce up to ~5 members per local step, so we treat
+            // (workfronts × 5) as the capacity baseline for proportional scaling.
             let current_remaining = total_elements.saturating_sub(committed_ids.len());
+            let wf_count = workfronts.len();
+            let capacity_baseline = wf_count * 5;
             let active_count = if current_remaining == 0 {
                 1
+            } else if current_remaining >= capacity_baseline {
+                wf_count
             } else {
-                let proportional = std::cmp::max(1, current_remaining * workfronts.len() / total_elements);
-                let elements_per_wf = (total_elements + workfronts.len() - 1) / workfronts.len();
-                let retirement_cap = std::cmp::max(1, (current_remaining + elements_per_wf - 1) / elements_per_wf);
-                std::cmp::min(proportional, retirement_cap)
+                // Round up so we don't retire workfronts too aggressively
+                std::cmp::max(1, (current_remaining * wf_count + capacity_baseline - 1) / capacity_baseline)
             };
             let active_wfs: Vec<&SimWorkfront> = if eligible_wfs.is_empty() {
                 Vec::new()
@@ -1376,6 +1383,7 @@ fn run_scenario_internal(
                     }
                     state.buffer_sequences.clear();
                     state.committed_floor = None;
+                    cycle_rollback_count += 1;
                     trace_event(
                         &mut trace_logger,
                         SimulationTraceLevel::Warning,
@@ -1513,6 +1521,7 @@ fn run_scenario_internal(
                             }
                             state.buffer_sequences.clear();
                             state.committed_floor = None;
+                            cycle_rollback_count += 1;
                             trace_event(
                                 &mut trace_logger, SimulationTraceLevel::Warning,
                                 "sim.wf.rollback", Some(scenario_id), Some(cycle_index),
@@ -1569,6 +1578,9 @@ fn run_scenario_internal(
                 if cycle_no_progress_count >= 10 {
                     break; // Stagnation within cycle
                 }
+                if cycle_no_local_step_rounds >= workfronts.len() as u32 * 10 {
+                    break; // Deadlock: no local step produced for too long
+                }
                 continue;
             }
             cycle_no_progress_count = 0;
@@ -1605,7 +1617,7 @@ fn run_scenario_internal(
                 };
 
                 let buffer_element_ids = state.buffer_element_ids();
-                let decision = classify_buffer(&buffer_element_ids, grid, !cycle_stable_context.is_empty());
+                let decision = classify_buffer(&buffer_element_ids, grid, !stable_ids.is_empty());
 
                 trace_event(
                     &mut trace_logger,
@@ -1630,8 +1642,8 @@ fn run_scenario_internal(
                         ),
                         ("decision".to_string(), format!("{:?}", decision)),
                         (
-                            "has_stable_context".to_string(),
-                            (!cycle_stable_context.is_empty()).to_string(),
+                            "has_stable_structure".to_string(),
+                            (!stable_ids.is_empty()).to_string(),
                         ),
                         (
                             "committed_floor".to_string(),
@@ -1667,6 +1679,7 @@ fn run_scenario_internal(
                         state.buffer_sequences.clear();
                         state.committed_floor = None;
 
+                        cycle_rollback_count += 1;
                         trace_event(
                             &mut trace_logger,
                             SimulationTraceLevel::Warning,
@@ -1725,8 +1738,8 @@ fn run_scenario_internal(
                 cycle_no_local_step_rounds = 0;
             }
 
-            // If all workfronts either completed or are excluded, end cycle
-            if cycle_completed_wf.len() >= eligible_wfs.len() {
+            // If all workfronts have completed a local step in this cycle, end cycle
+            if cycle_completed_wf.len() >= workfronts.len() {
                 break;
             }
 
@@ -1784,6 +1797,18 @@ fn run_scenario_internal(
             "cycle ended",
             vec![
                 (
+                    "total_elements".to_string(),
+                    total_elements.to_string(),
+                ),
+                (
+                    "remaining".to_string(),
+                    total_elements.saturating_sub(stable_ids.len()).to_string(),
+                ),
+                (
+                    "active_wf_count".to_string(),
+                    workfronts.len().to_string(),
+                ),
+                (
                     "local_steps".to_string(),
                     step.local_steps.len().to_string(),
                 ),
@@ -1799,6 +1824,10 @@ fn run_scenario_internal(
                 (
                     "empty_rounds_in_cycle".to_string(),
                     cycle_no_local_step_rounds.to_string(),
+                ),
+                (
+                    "rollback_count".to_string(),
+                    cycle_rollback_count.to_string(),
                 ),
             ],
         );
