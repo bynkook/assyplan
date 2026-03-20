@@ -382,8 +382,8 @@ pub struct UiState {
     /// Used for metric visualization only (simulation constraint applied in Phase 2).
     pub upper_floor_threshold: f64,
     /// Lower-floor column completion ratio threshold (0.0~1.0)
-    /// When lower floor column completion reaches this ratio,
-    /// upper-floor candidates receive additional score bonus.
+    /// Upper-floor new work is allowed once the lower floor reaches this ratio,
+    /// and the upper-floor ratio gate may be relaxed.
     pub lower_floor_completion_ratio: f64,
     /// Lower-floor forced completion threshold (member count)
     /// If remaining members on a lower floor are <= this value,
@@ -474,7 +474,7 @@ impl UiState {
             needs_recalc: false,
             step_elements: Vec::new(),
             upper_floor_threshold: 0.3,
-            lower_floor_completion_ratio: 0.8,
+            lower_floor_completion_ratio: 0.5,
             lower_floor_forced_completion: 10,
             // Simulation Mode (Phase 3)
             grid_config: GridConfig::default(),
@@ -1354,7 +1354,7 @@ mod tests {
         assert!(!state.has_step_data);
         assert!(!state.has_sequence_data);
         assert_eq!(state.upper_floor_threshold, 0.3);
-        assert_eq!(state.lower_floor_completion_ratio, 0.8);
+        assert_eq!(state.lower_floor_completion_ratio, 0.5);
         assert_eq!(state.lower_floor_forced_completion, 10);
         assert_eq!(state.grid_config.nx, 4);
         assert_eq!(state.grid_config.ny, 8);

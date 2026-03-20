@@ -99,14 +99,34 @@ struct FloorThrottleState {
     floor: i32,
     selected_wf_ids: Vec<i32>,
     active_cap: usize,
+    mode: FloorThrottleMode,
+    stall_rounds: u32,
+    collision_rounds: u32,
+    quiet_rounds: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloorThrottleMode {
+    Observe,
+    CapTwo,
+    CapOne,
+    Cooldown,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FloorCongestionInfo {
+    score: usize,
+    top_collision_count: usize,
+    buffer_holder_count: usize,
+    zero_candidate_count: usize,
+    max_candidate_count: usize,
+    min_remaining: usize,
 }
 
 struct ActiveWorkfrontSelection<'a> {
     active_wfs: Vec<&'a SimWorkfront>,
-    throttled_floor: Option<i32>,
-    selected_wf_ids: Vec<i32>,
+    next_throttle_state: Option<FloorThrottleState>,
     reset_wf_ids: Vec<i32>,
-    throttled_active_count: usize,
 }
 
 #[derive(Clone)]
@@ -1175,6 +1195,11 @@ fn sort_activation_infos(infos: &mut [WorkfrontActivationInfo]) {
     infos.sort_by(|a, b| {
         b.has_buffer
             .cmp(&a.has_buffer)
+            .then_with(|| {
+                a.candidate_count
+                    .eq(&0)
+                    .cmp(&b.candidate_count.eq(&0))
+            })
             .then_with(|| b.has_committed_floor.cmp(&a.has_committed_floor))
             .then_with(|| {
                 b.top_candidate_score
@@ -1184,6 +1209,262 @@ fn sort_activation_infos(infos: &mut [WorkfrontActivationInfo]) {
             .then_with(|| b.candidate_count.cmp(&a.candidate_count))
             .then_with(|| a.wf_id.cmp(&b.wf_id))
     });
+}
+
+fn top_candidate_collision_count(group: &[WorkfrontActivationInfo]) -> usize {
+    let mut counts: HashMap<i32, usize> = HashMap::new();
+    for candidate_id in group.iter().filter_map(|info| info.top_candidate_id) {
+        *counts.entry(candidate_id).or_insert(0) += 1;
+    }
+
+    counts.values().copied().max().unwrap_or(0)
+}
+
+fn analyze_floor_congestion(
+    group: &[WorkfrontActivationInfo],
+    cycle_no_local_step_rounds: u32,
+    constraints: &SimConstraints,
+) -> Option<FloorCongestionInfo> {
+    if group.len() <= 1 {
+        return None;
+    }
+
+    let min_remaining = group
+        .iter()
+        .map(|info| info.remaining_on_target_floor)
+        .min()
+        .unwrap_or(0);
+    if min_remaining == 0 {
+        return None;
+    }
+
+    let max_candidate_count = group
+        .iter()
+        .map(|info| info.candidate_count)
+        .max()
+        .unwrap_or(0);
+    if max_candidate_count > constraints.lower_floor_forced_completion_threshold {
+        return None;
+    }
+
+    let top_collision_count = top_candidate_collision_count(group);
+    let buffer_holder_count = group.iter().filter(|info| info.has_buffer).count();
+    let zero_candidate_count = group.iter().filter(|info| info.candidate_count == 0).count();
+
+    if top_collision_count <= 1 && buffer_holder_count == 0 && cycle_no_local_step_rounds == 0 {
+        return None;
+    }
+
+    let mut score = 0usize;
+    score += group.len().saturating_sub(1).min(2);
+    score += top_collision_count.saturating_sub(1).min(3);
+    score += buffer_holder_count.min(2);
+    score += zero_candidate_count.min(2);
+    score += usize::from(min_remaining <= constraints.lower_floor_forced_completion_threshold);
+    score += usize::from(max_candidate_count <= constraints.lower_floor_forced_completion_threshold / 2);
+    score += (cycle_no_local_step_rounds as usize).min(3);
+
+    Some(FloorCongestionInfo {
+        score,
+        top_collision_count,
+        buffer_holder_count,
+        zero_candidate_count,
+        max_candidate_count,
+        min_remaining,
+    })
+}
+
+fn desired_throttle_mode(
+    existing_mode: Option<FloorThrottleMode>,
+    congestion: &FloorCongestionInfo,
+    cycle_no_local_step_rounds: u32,
+) -> FloorThrottleMode {
+    if matches!(existing_mode, Some(FloorThrottleMode::Cooldown)) && cycle_no_local_step_rounds == 0 {
+        return FloorThrottleMode::Cooldown;
+    }
+
+    if cycle_no_local_step_rounds >= 2
+        || congestion.score >= 8
+        || congestion.top_collision_count >= 3
+        || congestion.zero_candidate_count > 0
+        || congestion.max_candidate_count <= 2
+        || congestion.min_remaining <= 2
+    {
+        return FloorThrottleMode::CapOne;
+    }
+
+    if cycle_no_local_step_rounds >= 1
+        || congestion.score >= 5
+        || congestion.buffer_holder_count > 0
+        || congestion.zero_candidate_count > 0
+    {
+        return FloorThrottleMode::CapTwo;
+    }
+
+    FloorThrottleMode::Observe
+}
+
+fn choose_endgame_workfront_ids(
+    group: &[WorkfrontActivationInfo],
+    desired_total_keep: usize,
+) -> Vec<i32> {
+    let mut ranked = group.to_vec();
+    sort_activation_infos(&mut ranked);
+
+    let mut selected: Vec<i32> = ranked
+        .iter()
+        .filter(|info| info.has_buffer)
+        .map(|info| info.wf_id)
+        .collect();
+
+    if selected.is_empty() {
+        if let Some(primary) = ranked.iter().find(|info| info.candidate_count > 0 || info.has_buffer) {
+            selected.push(primary.wf_id);
+        }
+    }
+
+    while selected.len() < desired_total_keep {
+        let Some(last_selected) = selected
+            .last()
+            .and_then(|wf_id| ranked.iter().find(|info| info.wf_id == *wf_id))
+        else {
+            break;
+        };
+
+        let next_choice = ranked
+            .iter()
+            .filter(|info| !selected.contains(&info.wf_id))
+            .filter(|info| info.candidate_count > 0 || info.has_buffer)
+            .find(|info| {
+                info.top_candidate_id != last_selected.top_candidate_id
+                    && info.zone_key != last_selected.zone_key
+            })
+            .or_else(|| {
+                ranked
+                    .iter()
+                    .filter(|info| !selected.contains(&info.wf_id))
+                    .filter(|info| info.candidate_count > 0 || info.has_buffer)
+                    .find(|info| info.top_candidate_id != last_selected.top_candidate_id)
+            })
+            .or_else(|| {
+                ranked
+                    .iter()
+                    .filter(|info| !selected.contains(&info.wf_id))
+                    .filter(|info| info.candidate_count > 0 || info.has_buffer)
+                    .find(|info| info.zone_key != last_selected.zone_key)
+            })
+            .or_else(|| {
+                ranked
+                    .iter()
+                    .filter(|info| !selected.contains(&info.wf_id))
+                    .find(|info| info.candidate_count > 0 || info.has_buffer)
+            });
+
+        let Some(next_choice) = next_choice else {
+            break;
+        };
+        selected.push(next_choice.wf_id);
+    }
+
+    selected
+}
+
+fn build_floor_throttle_state(
+    floor: i32,
+    group: &[WorkfrontActivationInfo],
+    mode: FloorThrottleMode,
+    prior_state: Option<&FloorThrottleState>,
+) -> FloorThrottleState {
+    let selected_wf_ids = match mode {
+        FloorThrottleMode::Observe | FloorThrottleMode::Cooldown => {
+            let mut ranked = group.to_vec();
+            sort_activation_infos(&mut ranked);
+            ranked.into_iter().map(|info| info.wf_id).collect()
+        }
+        FloorThrottleMode::CapTwo => choose_endgame_workfront_ids(group, 2),
+        FloorThrottleMode::CapOne => choose_endgame_workfront_ids(group, 1),
+    };
+
+    let active_cap = match mode {
+        FloorThrottleMode::Observe | FloorThrottleMode::Cooldown => selected_wf_ids.len(),
+        FloorThrottleMode::CapTwo => selected_wf_ids.len().clamp(1, 2),
+        FloorThrottleMode::CapOne => 1.min(selected_wf_ids.len()).max(usize::from(!selected_wf_ids.is_empty())),
+    };
+
+    FloorThrottleState {
+        floor,
+        selected_wf_ids,
+        active_cap,
+        mode,
+        stall_rounds: prior_state.map(|state| state.stall_rounds).unwrap_or(0),
+        collision_rounds: prior_state.map(|state| state.collision_rounds).unwrap_or(0),
+        quiet_rounds: prior_state.map(|state| state.quiet_rounds).unwrap_or(0),
+    }
+}
+
+fn update_floor_throttle_progress(
+    throttle_state: &mut Option<FloorThrottleState>,
+    grid: &SimGrid,
+    committed_ids: &HashSet<i32>,
+    local_step_added: bool,
+) {
+    let Some(state) = throttle_state.as_mut() else {
+        return;
+    };
+
+    if remaining_elements_on_floor(grid, state.floor, committed_ids) == 0 {
+        *throttle_state = None;
+        return;
+    }
+
+    if local_step_added {
+        state.stall_rounds = 0;
+        state.collision_rounds = 0;
+        state.quiet_rounds += 1;
+
+        match state.mode {
+            FloorThrottleMode::Observe => {
+                *throttle_state = None;
+            }
+            FloorThrottleMode::CapOne => {
+                state.mode = FloorThrottleMode::Cooldown;
+            }
+            FloorThrottleMode::CapTwo => {
+                if state.quiet_rounds >= 2 {
+                    *throttle_state = None;
+                }
+            }
+            FloorThrottleMode::Cooldown => {
+                if state.quiet_rounds >= 2 {
+                    *throttle_state = None;
+                }
+            }
+        }
+        return;
+    }
+
+    state.quiet_rounds = 0;
+    state.stall_rounds += 1;
+    state.collision_rounds += 1;
+
+    match state.mode {
+        FloorThrottleMode::Observe => {
+            state.mode = if state.stall_rounds >= 2 || state.collision_rounds >= 2 {
+                FloorThrottleMode::CapOne
+            } else {
+                FloorThrottleMode::CapTwo
+            };
+        }
+        FloorThrottleMode::CapTwo => {
+            if state.stall_rounds >= 1 {
+                state.mode = FloorThrottleMode::CapOne;
+            }
+        }
+        FloorThrottleMode::Cooldown => {
+            state.mode = FloorThrottleMode::CapTwo;
+        }
+        FloorThrottleMode::CapOne => {}
+    }
 }
 
 fn remaining_elements_on_floor(
@@ -1410,41 +1691,6 @@ fn preview_workfront_activation_info(
     })
 }
 
-fn choose_endgame_workfront_ids(group: &[WorkfrontActivationInfo]) -> Vec<i32> {
-    let mut ranked = group.to_vec();
-    sort_activation_infos(&mut ranked);
-
-    let Some(primary) = ranked.first() else {
-        return Vec::new();
-    };
-
-    let mut selected = vec![primary.wf_id];
-    let secondary = ranked
-        .iter()
-        .skip(1)
-        .find(|info| {
-            info.top_candidate_id != primary.top_candidate_id && info.zone_key != primary.zone_key
-        })
-        .or_else(|| {
-            ranked
-                .iter()
-                .skip(1)
-                .find(|info| info.top_candidate_id != primary.top_candidate_id)
-        })
-        .or_else(|| {
-            ranked
-                .iter()
-                .skip(1)
-                .find(|info| info.zone_key != primary.zone_key)
-        });
-
-    if let Some(info) = secondary {
-        selected.push(info.wf_id);
-    }
-
-    selected
-}
-
 fn select_active_workfronts<'a>(
     eligible_wfs: &[&'a SimWorkfront],
     workfront_states: &HashMap<i32, WorkfrontState>,
@@ -1486,10 +1732,8 @@ fn select_active_workfronts<'a>(
     if infos.is_empty() {
         return ActiveWorkfrontSelection {
             active_wfs: eligible_wfs.to_vec(),
-            throttled_floor: None,
-            selected_wf_ids: Vec::new(),
+            next_throttle_state: None,
             reset_wf_ids: Vec::new(),
-            throttled_active_count: 0,
         };
     }
 
@@ -1500,46 +1744,46 @@ fn select_active_workfronts<'a>(
 
     if let Some(throttle_state) = throttle_state {
         if let Some(group) = floor_groups.get(&throttle_state.floor) {
-            let remaining = group
-                .iter()
-                .map(|info| info.remaining_on_target_floor)
-                .min()
-                .unwrap_or(0);
-            if group.len() > 1 && remaining > 0 {
-                let selected_wf_ids: Vec<i32> = throttle_state
-                    .selected_wf_ids
-                    .iter()
-                    .copied()
-                    .filter(|wf_id| group.iter().any(|info| info.wf_id == *wf_id))
-                    .collect();
+            if let Some(congestion) = analyze_floor_congestion(group, cycle_no_local_step_rounds, constraints) {
+                let mode = desired_throttle_mode(Some(throttle_state.mode), &congestion, cycle_no_local_step_rounds);
+                let next_state = build_floor_throttle_state(
+                    throttle_state.floor,
+                    group,
+                    mode,
+                    Some(throttle_state),
+                );
 
-                if !selected_wf_ids.is_empty() {
-                    let active_cap = throttle_state.active_cap.clamp(1, selected_wf_ids.len());
-                    let keep_ids: HashSet<i32> = selected_wf_ids
-                        .iter()
-                        .take(active_cap)
-                        .copied()
-                        .collect();
-                    let reset_wf_ids: Vec<i32> = group
-                        .iter()
-                        .map(|info| info.wf_id)
-                        .filter(|wf_id| !keep_ids.contains(wf_id))
-                        .collect();
-
-                    let active_wfs: Vec<&SimWorkfront> = eligible_wfs
-                        .iter()
-                        .copied()
-                        .filter(|wf| !reset_wf_ids.contains(&wf.id))
-                        .collect();
-
+                if matches!(mode, FloorThrottleMode::Observe | FloorThrottleMode::Cooldown) {
                     return ActiveWorkfrontSelection {
-                        active_wfs,
-                        throttled_floor: Some(throttle_state.floor),
-                        selected_wf_ids,
-                        reset_wf_ids,
-                        throttled_active_count: active_cap,
+                        active_wfs: eligible_wfs.to_vec(),
+                        next_throttle_state: Some(next_state),
+                        reset_wf_ids: Vec::new(),
                     };
                 }
+
+                let keep_ids: HashSet<i32> = next_state
+                    .selected_wf_ids
+                    .iter()
+                    .take(next_state.active_cap)
+                    .copied()
+                    .collect();
+                let reset_wf_ids: Vec<i32> = group
+                    .iter()
+                    .map(|info| info.wf_id)
+                    .filter(|wf_id| !keep_ids.contains(wf_id))
+                    .collect();
+
+                let active_wfs: Vec<&SimWorkfront> = eligible_wfs
+                    .iter()
+                    .copied()
+                    .filter(|wf| !reset_wf_ids.contains(&wf.id))
+                    .collect();
+
+                return ActiveWorkfrontSelection {
+                    active_wfs,
+                    next_throttle_state: Some(next_state),
+                    reset_wf_ids,
+                };
             }
         }
     }
@@ -1547,26 +1791,23 @@ fn select_active_workfronts<'a>(
     let trigger_floor = floor_groups
         .iter()
         .filter_map(|(floor, group)| {
-            let remaining = group
-                .iter()
-                .map(|info| info.remaining_on_target_floor)
-                .min()
-                .unwrap_or(0);
-            let should_trigger = !stable_ids.is_empty()
-                && group.len() > 1
-                && remaining > 0
-                && cycle_no_local_step_rounds > 0;
+            if stable_ids.is_empty() {
+                return None;
+            }
 
-            should_trigger
-                .then_some((
-                    *floor,
-                    remaining,
-                    group.len(),
-                    group.iter().map(|info| info.top_candidate_score).fold(0.0_f64, f64::max),
-                ))
+            let congestion = analyze_floor_congestion(group, cycle_no_local_step_rounds, constraints)?;
+
+            Some((
+                *floor,
+                congestion,
+                group.len(),
+                group.iter().map(|info| info.top_candidate_score).fold(0.0_f64, f64::max),
+            ))
         })
         .min_by(|a, b| {
-            a.1.cmp(&b.1)
+            a.1.min_remaining
+                .cmp(&b.1.min_remaining)
+                .then_with(|| b.1.score.cmp(&a.1.score))
                 .then_with(|| b.2.cmp(&a.2))
                 .then_with(|| {
                     b.3.partial_cmp(&a.3)
@@ -1574,24 +1815,36 @@ fn select_active_workfronts<'a>(
                 })
                 .then_with(|| a.0.cmp(&b.0))
         })
-        .map(|(floor, _, _, _)| floor);
+        .map(|(floor, congestion, _, _)| (floor, congestion));
 
-    let Some(trigger_floor) = trigger_floor else {
+    let Some((trigger_floor, congestion)) = trigger_floor else {
         return ActiveWorkfrontSelection {
             active_wfs: eligible_wfs.to_vec(),
-            throttled_floor: None,
-            selected_wf_ids: Vec::new(),
+            next_throttle_state: None,
             reset_wf_ids: Vec::new(),
-            throttled_active_count: 0,
         };
     };
 
     let group = floor_groups
         .get(&trigger_floor)
         .expect("trigger floor group must exist");
-    let selected_wf_ids = choose_endgame_workfront_ids(group);
-    let active_cap = selected_wf_ids.len().clamp(1, 2);
-    let keep_ids: HashSet<i32> = selected_wf_ids.iter().take(active_cap).copied().collect();
+    let mode = desired_throttle_mode(None, &congestion, cycle_no_local_step_rounds);
+    let next_state = build_floor_throttle_state(trigger_floor, group, mode, None);
+
+    if matches!(mode, FloorThrottleMode::Observe | FloorThrottleMode::Cooldown) {
+        return ActiveWorkfrontSelection {
+            active_wfs: eligible_wfs.to_vec(),
+            next_throttle_state: Some(next_state),
+            reset_wf_ids: Vec::new(),
+        };
+    }
+
+    let keep_ids: HashSet<i32> = next_state
+        .selected_wf_ids
+        .iter()
+        .take(next_state.active_cap)
+        .copied()
+        .collect();
     let reset_wf_ids: Vec<i32> = group
         .iter()
         .map(|info| info.wf_id)
@@ -1606,10 +1859,8 @@ fn select_active_workfronts<'a>(
 
     ActiveWorkfrontSelection {
         active_wfs,
-        throttled_floor: Some(trigger_floor),
-        selected_wf_ids,
+        next_throttle_state: Some(next_state),
         reset_wf_ids,
-        throttled_active_count: active_cap,
     }
 }
 
@@ -2543,7 +2794,7 @@ fn run_scenario_internal(
             let committed_floor_counts = floor_tracker.installed_per_floor_from(&committed_ids);
             let previous_throttle = floor_throttle_state
                 .as_ref()
-                .map(|state| (state.floor, state.active_cap));
+                .map(|state| (state.floor, state.mode, state.active_cap));
             let active_selection = select_active_workfronts(
                 &eligible_wfs,
                 &workfront_states,
@@ -2561,22 +2812,14 @@ fn run_scenario_internal(
                 &node_pos,
             );
             let active_wfs = active_selection.active_wfs;
-            if let Some(floor) = active_selection.throttled_floor {
-                if !active_selection.reset_wf_ids.is_empty() {
-                    throttle_events += 1;
-                }
-                floor_throttle_state = Some(FloorThrottleState {
-                    floor,
-                    selected_wf_ids: active_selection.selected_wf_ids.clone(),
-                    active_cap: active_selection.throttled_active_count.max(1),
-                });
-            } else {
-                floor_throttle_state = None;
+            if active_selection.next_throttle_state.is_some() && !active_selection.reset_wf_ids.is_empty() {
+                throttle_events += 1;
             }
+            floor_throttle_state = active_selection.next_throttle_state;
 
             let current_throttle = floor_throttle_state
                 .as_ref()
-                .map(|state| (state.floor, state.active_cap));
+                .map(|state| (state.floor, state.mode, state.active_cap));
             if previous_throttle != current_throttle {
                 trace_event(
                     &mut trace_logger,
@@ -2597,16 +2840,25 @@ fn run_scenario_internal(
                         (
                             "active_cap".to_string(),
                             current_throttle
-                                .map(|state| state.1.to_string())
+                                .map(|state| state.2.to_string())
                                 .unwrap_or_else(|| "-".to_string()),
                         ),
                         (
-                            "selected_wfs".to_string(),
-                            format_ids(active_selection.selected_wf_ids.iter().copied()),
+                            "mode".to_string(),
+                            current_throttle
+                                .map(|state| format!("{:?}", state.1))
+                                .unwrap_or_else(|| "-".to_string()),
                         ),
                         (
                             "reset_wfs".to_string(),
                             format_ids(active_selection.reset_wf_ids.iter().copied()),
+                        ),
+                        (
+                            "selected_wfs".to_string(),
+                            floor_throttle_state
+                                .as_ref()
+                                .map(|state| format_ids(state.selected_wf_ids.iter().copied()))
+                                .unwrap_or_else(|| "-".to_string()),
                         ),
                     ],
                 );
@@ -2638,15 +2890,20 @@ fn run_scenario_internal(
             );
 
             for wf_id in &active_selection.reset_wf_ids {
-                let selected_anchor_positions: Vec<(usize, usize)> = active_selection
-                    .selected_wf_ids
-                    .iter()
-                    .filter_map(|selected_wf_id| {
-                        let selected_wf = workfronts.iter().find(|wf| wf.id == *selected_wf_id)?;
-                        let selected_state = workfront_states.get(selected_wf_id)?;
-                        Some(current_workfront_anchor(selected_state, selected_wf))
+                let selected_anchor_positions: Vec<(usize, usize)> = floor_throttle_state
+                    .as_ref()
+                    .map(|state| {
+                        state
+                            .selected_wf_ids
+                            .iter()
+                            .filter_map(|selected_wf_id| {
+                                let selected_wf = workfronts.iter().find(|wf| wf.id == *selected_wf_id)?;
+                                let selected_state = workfront_states.get(selected_wf_id)?;
+                                Some(current_workfront_anchor(selected_state, selected_wf))
+                            })
+                            .collect()
                     })
-                    .collect();
+                    .unwrap_or_default();
 
                 if let Some(state) = workfront_states.get_mut(wf_id) {
                     let rollback_buffer_ids = state.buffer_element_ids();
@@ -2656,7 +2913,7 @@ fn run_scenario_internal(
                     state.buffer_sequences.clear();
                     state.planned_pattern.clear();
                     state.committed_floor = None;
-                    state.last_failed_floor = active_selection.throttled_floor;
+                    state.last_failed_floor = floor_throttle_state.as_ref().map(|state| state.floor);
                     if let Some(wf_ref) = workfronts.iter().find(|wf| wf.id == *wf_id) {
                         let rebase_anchor =
                             choose_spatial_rebase_anchor(state, wf_ref, &selected_anchor_positions, grid);
@@ -2687,8 +2944,9 @@ fn run_scenario_internal(
                             ),
                             (
                                 "last_failed_floor".to_string(),
-                                active_selection
-                                    .throttled_floor
+                                floor_throttle_state
+                                    .as_ref()
+                                    .map(|state| state.floor)
                                     .map(|floor| floor.to_string())
                                     .unwrap_or_else(|| "-".to_string()),
                             ),
@@ -3216,13 +3474,12 @@ fn run_scenario_internal(
             // If no workfront could select anything, this sequence round is empty
             if sequence_installations.is_empty() {
                 cycle_no_progress_count += 1;
-                if let Some(state) = floor_throttle_state.as_mut() {
-                    if Some(state.floor) == active_selection.throttled_floor
-                        && state.active_cap > 1
-                    {
-                        state.active_cap = 1;
-                    }
-                }
+                update_floor_throttle_progress(
+                    &mut floor_throttle_state,
+                    grid,
+                    &committed_ids,
+                    false,
+                );
                 cycle_no_local_step_rounds += 1;
                 if cycle_no_progress_count >= 10 {
                     break; // Stagnation within cycle
@@ -3324,26 +3581,22 @@ fn run_scenario_internal(
                 }
             }
 
-            if let Some(state) = floor_throttle_state.as_mut() {
-                let committed_after_round = compute_cycle_committed_ids(
-                    &stable_ids,
-                    &workfront_states,
-                    &cycle_local_steps,
+            let local_step_added = cycle_local_steps.len() > local_steps_before_round;
+            let committed_after_round = compute_cycle_committed_ids(
+                &stable_ids,
+                &workfront_states,
+                &cycle_local_steps,
+            );
+            if floor_throttle_state.is_some() {
+                update_floor_throttle_progress(
+                    &mut floor_throttle_state,
+                    grid,
+                    &committed_after_round,
+                    local_step_added,
                 );
-                if remaining_elements_on_floor(grid, state.floor, &committed_after_round) == 0 {
-                    floor_throttle_state = None;
-                } else {
-                    let local_step_added = cycle_local_steps.len() > local_steps_before_round;
-                    if local_step_added {
-                        cycle_no_local_step_rounds = 0;
-                    } else {
-                        if Some(state.floor) == active_selection.throttled_floor && state.active_cap > 1 {
-                            state.active_cap = 1;
-                        }
-                        cycle_no_local_step_rounds += 1;
-                    }
-                }
-            } else if cycle_local_steps.len() == local_steps_before_round {
+            }
+
+            if !local_step_added {
                 cycle_no_local_step_rounds += 1;
             } else {
                 cycle_no_local_step_rounds = 0;
@@ -3525,7 +3778,7 @@ pub fn run_scenario(
 ) -> SimScenario {
     let constraints = SimConstraints {
         upper_floor_column_rate_threshold: threshold,
-        lower_floor_completion_ratio_threshold: 0.8,
+        lower_floor_completion_ratio_threshold: 0.5,
         lower_floor_forced_completion_threshold: 5,
     };
     run_scenario_internal(
@@ -3560,7 +3813,7 @@ pub fn run_all_scenarios_with_progress(
 ) -> Vec<SimScenario> {
     let constraints = SimConstraints {
         upper_floor_column_rate_threshold: threshold,
-        lower_floor_completion_ratio_threshold: 0.8,
+        lower_floor_completion_ratio_threshold: 0.5,
         lower_floor_forced_completion_threshold: 5,
     };
     run_all_scenarios_with_progress_and_cancel(
@@ -3767,6 +4020,10 @@ mod tests {
         SimGrid::new(6, 24, 3, 6000.0, 6000.0, 4000.0)
     }
 
+    fn make_grid_4x8x3() -> SimGrid {
+        SimGrid::new(4, 8, 3, 6000.0, 6000.0, 4000.0)
+    }
+
     fn make_grid_6x22x3() -> SimGrid {
         SimGrid::new(6, 22, 3, 6000.0, 6000.0, 4000.0)
     }
@@ -3896,6 +4153,17 @@ mod tests {
                 grid_x: 5,
                 grid_y: 21,
             },
+        ]
+    }
+
+    fn make_workfronts_4x8_congestion_case() -> Vec<SimWorkfront> {
+        vec![
+            SimWorkfront { id: 1, grid_x: 1, grid_y: 0 },
+            SimWorkfront { id: 2, grid_x: 2, grid_y: 0 },
+            SimWorkfront { id: 3, grid_x: 3, grid_y: 0 },
+            SimWorkfront { id: 4, grid_x: 3, grid_y: 2 },
+            SimWorkfront { id: 5, grid_x: 3, grid_y: 4 },
+            SimWorkfront { id: 6, grid_x: 3, grid_y: 6 },
         ]
     }
 
@@ -4381,7 +4649,7 @@ mod tests {
 
         if let Some(col2_id) = floor2_col {
             // With threshold = 0.5, upper floor should be blocked when 4 remaining
-            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.5, 0.8, 5);
+            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.5, 0.5, 5);
             assert!(
                 !allowed,
                 "Upper floor should be blocked when lower has 4 remaining columns (<=5)"
@@ -4428,7 +4696,7 @@ mod tests {
             .map(|e| e.id);
 
         if let Some(col2_id) = floor2_col {
-            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.3, 0.8, 5);
+            let allowed = check_upper_floor_constraint(&[col2_id], &grid, &installed, 0.3, 0.5, 5);
             assert!(
                 allowed,
                 "Upper floor should be allowed when lower is 100% complete"
@@ -4484,7 +4752,7 @@ mod tests {
                 &tracker,
                 &installed_per_floor,
                 0.3,
-                0.8,
+                0.5,
                 5,
             );
 
@@ -4543,7 +4811,7 @@ mod tests {
 
         let legacy = check_upper_floor_constraint_legacy(&floor2_cols, &grid, &installed, 0.3);
         let tracked =
-            check_upper_floor_constraint_tracked(&floor2_cols, &tracker, &installed_per_floor, 0.3, 0.8, 5);
+            check_upper_floor_constraint_tracked(&floor2_cols, &tracker, &installed_per_floor, 0.3, 0.5, 5);
 
         assert_eq!(legacy, tracked);
     }
@@ -4730,7 +4998,7 @@ mod tests {
             &tracker,
             &installed_per_floor,
             0.3,
-            0.8,
+            0.5,
             5,
         );
 
@@ -4773,7 +5041,7 @@ mod tests {
             .expect("floor2 column should exist");
 
         // Force ratio failure if checked: installed_upper=1, installed_lower=29 => 0.034 > 0.01
-        // C rule should bypass ratio because lower floor completion is already 80%+ (29/36)
+        // C rule should bypass ratio because lower floor completion is already above the threshold (29/36)
         // and remaining columns are still > 5 (so forced-completion guard is not active).
         let installed: HashSet<i32> = floor1_cols.iter().take(29).copied().collect();
         let installed_per_floor = tracker.installed_per_floor_from(&installed);
@@ -4783,7 +5051,7 @@ mod tests {
             &tracker,
             &installed_per_floor,
             0.01,
-            0.8,
+            0.5,
             5,
         );
 
@@ -4835,7 +5103,7 @@ mod tests {
         let installed_columns_per_floor = tracker.installed_per_floor_from(&installed);
         let constraints = SimConstraints {
             upper_floor_column_rate_threshold: 0.3,
-            lower_floor_completion_ratio_threshold: 0.8,
+            lower_floor_completion_ratio_threshold: 0.5,
             lower_floor_forced_completion_threshold: 5,
         };
 
@@ -4851,7 +5119,7 @@ mod tests {
     fn test_choose_target_floor_prefers_upper_deficit_then_returns_lower() {
         let constraints = SimConstraints {
             upper_floor_column_rate_threshold: 0.3,
-            lower_floor_completion_ratio_threshold: 0.8,
+            lower_floor_completion_ratio_threshold: 0.5,
             lower_floor_forced_completion_threshold: 5,
         };
         let candidate_floors = vec![1, 2];
@@ -4889,7 +5157,7 @@ mod tests {
 
         let constraints = SimConstraints {
             upper_floor_column_rate_threshold: 0.3,
-            lower_floor_completion_ratio_threshold: 0.8,
+            lower_floor_completion_ratio_threshold: 0.5,
             lower_floor_forced_completion_threshold: 5,
         };
 
@@ -4963,7 +5231,7 @@ mod tests {
 
         let constraints = SimConstraints {
             upper_floor_column_rate_threshold: 0.3,
-            lower_floor_completion_ratio_threshold: 0.8,
+            lower_floor_completion_ratio_threshold: 0.5,
             lower_floor_forced_completion_threshold: 5,
         };
 
@@ -5110,7 +5378,7 @@ mod tests {
             (0.5, 0.3, 0.2),
             SimConstraints {
                 upper_floor_column_rate_threshold: 0.3,
-                lower_floor_completion_ratio_threshold: 0.8,
+                lower_floor_completion_ratio_threshold: 0.5,
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
@@ -5154,7 +5422,7 @@ mod tests {
             (0.5, 0.3, 0.2),
             SimConstraints {
                 upper_floor_column_rate_threshold: 0.3,
-                lower_floor_completion_ratio_threshold: 0.8,
+                lower_floor_completion_ratio_threshold: 0.5,
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
@@ -5189,7 +5457,7 @@ mod tests {
             (0.5, 0.3, 0.2),
             SimConstraints {
                 upper_floor_column_rate_threshold: 0.3,
-                lower_floor_completion_ratio_threshold: 0.8,
+                lower_floor_completion_ratio_threshold: 0.5,
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
@@ -5233,7 +5501,7 @@ mod tests {
             (0.5, 0.3, 0.2),
             SimConstraints {
                 upper_floor_column_rate_threshold: 0.3,
-                lower_floor_completion_ratio_threshold: 0.8,
+                lower_floor_completion_ratio_threshold: 0.5,
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
@@ -5265,6 +5533,74 @@ mod tests {
     }
 
     #[test]
+    fn test_4x8x3_congestion_fixture_matches_seed_columns() {
+        let grid = make_grid_4x8x3();
+
+        let seed_columns = [
+            grid.column_starting_at(1, 0, 0),
+            grid.column_starting_at(2, 0, 0),
+            grid.column_starting_at(3, 0, 0),
+            grid.column_starting_at(3, 2, 0),
+            grid.column_starting_at(3, 4, 0),
+            grid.column_starting_at(3, 6, 0),
+        ];
+
+        assert_eq!(seed_columns, [Some(9), Some(17), Some(25), Some(27), Some(29), Some(31)]);
+    }
+
+    #[test]
+    fn test_simulation_4x8x3_congestion_seed_batch_does_not_worsen() {
+        let grid = make_grid_4x8x3();
+        let wfs = make_workfronts_4x8_congestion_case();
+        let seeds = [
+            2654435761_u64,
+            5308871522,
+            7963307283,
+            10617743044,
+            13272178805,
+            15926614566,
+            18581050327,
+            21235486088,
+            23889921849,
+            26544357610,
+        ];
+
+        let mut failures: Vec<(usize, TerminationReason)> = Vec::new();
+        for (index, seed) in seeds.iter().copied().enumerate() {
+            let scenario = run_scenario_internal(
+                index + 1,
+                &grid,
+                &wfs,
+                seed,
+                (0.5, 0.3, 0.2),
+                SimConstraints {
+                    upper_floor_column_rate_threshold: 0.3,
+                    lower_floor_completion_ratio_threshold: 0.5,
+                    lower_floor_forced_completion_threshold: 10,
+                },
+                None,
+                None,
+            );
+
+            if !matches!(scenario.metrics.termination_reason, TerminationReason::Completed) {
+                failures.push((index + 1, scenario.metrics.termination_reason.clone()));
+            }
+        }
+
+        println!(
+            "4x8x3 default batch summary: completed={}, failed={:?}",
+            seeds.len() - failures.len(),
+            failures
+        );
+
+        assert!(
+            failures.len() <= 3,
+            "4x8x3 congestion batch should not exceed baseline 3 failures, got {:?}",
+            failures
+        );
+    }
+
+    #[test]
     fn test_simulation_completes_6x22x3_with_ui_case_workfronts_scenario2_seed() {
         let grid = make_grid_6x22x3();
         let wfs = make_workfronts_6x22_ui_case();
@@ -5277,7 +5613,7 @@ mod tests {
             (0.5, 0.3, 0.2),
             SimConstraints {
                 upper_floor_column_rate_threshold: 0.3,
-                lower_floor_completion_ratio_threshold: 0.8,
+                lower_floor_completion_ratio_threshold: 0.5,
                 lower_floor_forced_completion_threshold: 10,
             },
             None,
