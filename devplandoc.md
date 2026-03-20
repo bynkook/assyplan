@@ -202,7 +202,7 @@ fn generate_next_step(current_structure: &Structure, workfronts: &[Workfront]) -
 - 병합된 global step 의 `element_ids` 는 local step 들의 union 이며, 디버깅/표시를 위해 `local_steps` 원본 구조를 유지한다.
 - sequence 번호는 1부터 시작하는 global 연속 번호를 사용한다.
 - 각 workfront 의 sequence 는 승인된 local step 의 `element_ids` 를 생성 순서대로 이어붙인 WF 연속 이력이다.
-- Sequence 뷰는 모든 WF 연속 이력에서 같은 인덱스의 원소를 하나씩 꺼내 누적으로 보여준다.
+- Sequence 뷰는 cycle(step) 순서 기반으로 정렬한다. 각 cycle 블록 내에서 WF별 원소를 position interleave하여 전역 sequence 를 구성하고 누적으로 표시한다. 이 방식은 지지 기둥이 반드시 거더보다 먼저 표시됨을 보장한다.
 - Step 뷰는 안정성 패턴 단위 뷰이며, Sequence 뷰와 의미를 섞지 않는다.
 
 ##### 4. Workfront-local candidate search
@@ -464,7 +464,7 @@ fn compute_score(c: &Candidate) -> f64 {
 - 같은 cycle 에서 LocalStep 생성에 성공한 workfront 는 해당 cycle 의 남은 라운드에서 제외된다.
 - cycle 종료 시 여러 LocalStep 을 1개의 global step 으로 병합한다.
 - 각 workfront 의 sequence 는 승인된 local step 의 `element_ids` 를 생성 순서대로 이어붙인 WF 연속 이력이다.
-- Sequence 뷰는 모든 WF 연속 이력에서 같은 인덱스의 원소를 하나씩 꺼내 누적으로 보여준다.
+- Sequence 뷰는 cycle(step) 순서 기반으로 정렬한다. 각 cycle 블록 내에서 WF별 원소를 position interleave하여 전역 sequence 를 구성하고 누적으로 표시한다. 이 방식은 지지 기둥이 반드시 거더보다 먼저 표시됨을 보장한다.
 - invalid / infeasible / no-candidate committed buffer 는 즉시 rollback 한다.
 - trace logger 는 승인된 local step 이력을 workfront 별로 기록할 수 있다.
 - 결과적으로 `Sequence != Step` 가정이 유지되어야 하며 multi-workfront 에서 Step 수는 Sequence 수보다 작아야 정상이다.

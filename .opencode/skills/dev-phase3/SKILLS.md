@@ -171,7 +171,7 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 8. complete pattern + stability pass일 때만 `LocalStep` 을 만든다.
 9. cycle 내에서 `LocalStep` 을 만든 workfront는 해당 cycle 남은 round에서 제외된다.
 10. cycle 종료 시 여러 `LocalStep` 을 `SimStep::from_local_steps()` 로 병합한다.
-11. 병합된 `SimStep.sequences` 는 round-robin collation이며 같은 round는 같은 sequence 번호를 공유한다.
+11. Sequence 뷰는 cycle(step) 순서 기반으로 정렬한다. 각 cycle 블록 내에서 WF별 원소를 position interleave하여 전역 sequence를 구성하고 누적으로 표시한다. 이 방식은 지지 기둥이 반드시 거더보다 먼저 표시됨을 보장한다.
 
 문서/코드 검토 시 가장 먼저 볼 회귀 신호:
 

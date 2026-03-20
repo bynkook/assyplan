@@ -26,36 +26,51 @@ struct SimSequenceRow {
 }
 
 fn build_sim_sequence_rows(scenario: &SimScenario) -> Vec<SimSequenceRow> {
-    let mut histories: std::collections::BTreeMap<i32, Vec<(i32, i32, usize)>> =
-        std::collections::BTreeMap::new();
+    // Cycle-based ordering: iterate steps in cycle order, interleave WF
+    // elements within each cycle block. This guarantees that supporting
+    // columns always appear before the girders they support, preventing
+    // visual cantilever artefacts in the Sequence view.
+    let mut rows = Vec::new();
+    let mut seq_num: usize = 0;
 
     for (step_index, step) in scenario.steps.iter().enumerate() {
+        let step_number = step_index + 1;
+
+        // Collect per-WF element lists for this cycle, keyed by wf_id (sorted)
+        let mut cycle_wf_elements: std::collections::BTreeMap<i32, Vec<(i32, i32)>> =
+            std::collections::BTreeMap::new();
         for local_step in &step.local_steps {
-            let wf_history = histories.entry(local_step.workfront_id).or_default();
-            wf_history.extend(
+            let entry = cycle_wf_elements
+                .entry(local_step.workfront_id)
+                .or_default();
+            entry.extend(
                 local_step
                     .element_ids
                     .iter()
                     .copied()
-                    .map(|element_id| (local_step.floor, element_id, step_index + 1)),
+                    .map(|eid| (local_step.floor, eid)),
             );
         }
-    }
 
-    let max_len = histories.values().map(|entries| entries.len()).max().unwrap_or(0);
-    let mut rows = Vec::new();
+        // Interleave within cycle: iterate position 0, 1, ...
+        let max_in_cycle = cycle_wf_elements
+            .values()
+            .map(|v| v.len())
+            .max()
+            .unwrap_or(0);
 
-    for seq_index in 0..max_len {
-        let sequence_number = seq_index + 1;
-        for (&workfront_id, entries) in &histories {
-            if let Some(&(floor, element_id, step_number)) = entries.get(seq_index) {
-                rows.push(SimSequenceRow {
-                    sequence_number,
-                    workfront_id,
-                    floor,
-                    element_id,
-                    step_number,
-                });
+        for pos in 0..max_in_cycle {
+            seq_num += 1;
+            for (&workfront_id, elements) in &cycle_wf_elements {
+                if let Some(&(floor, element_id)) = elements.get(pos) {
+                    rows.push(SimSequenceRow {
+                        sequence_number: seq_num,
+                        workfront_id,
+                        floor,
+                        element_id,
+                        step_number,
+                    });
+                }
             }
         }
     }
