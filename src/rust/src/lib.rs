@@ -89,6 +89,28 @@ fn installed_ids_through_sim_sequence(
         .collect()
 }
 
+fn current_ids_for_sim_sequence(
+    scenario: &SimScenario,
+    current_sequence: usize,
+) -> std::collections::HashSet<i32> {
+    build_sim_sequence_rows(scenario)
+        .into_iter()
+        .filter(|row| row.sequence_number == current_sequence)
+        .map(|row| row.element_id)
+        .collect()
+}
+
+fn current_ids_for_sim_step(
+    scenario: &SimScenario,
+    current_step: usize,
+) -> std::collections::HashSet<i32> {
+    scenario
+        .steps
+        .get(current_step.saturating_sub(1))
+        .map(|step| step.element_ids.iter().copied().collect())
+        .unwrap_or_default()
+}
+
 // ============================================================================
 // Python-compatible data structures (pyclass)
 // ============================================================================
@@ -2537,35 +2559,47 @@ impl eframe::App for AssyPlanApp {
 
                                         // In Model mode: all elements are "installed" (fully active)
                                         // In Construction mode: elements up to current step/sequence
-                                        let installed_ids: HashSet<i32> = if self.ui_state.sim_view_is_model {
-                                            grid.elements.iter().map(|e| e.id).collect()
+                                        let (installed_ids, current_ids): (HashSet<i32>, HashSet<i32>) = if self.ui_state.sim_view_is_model {
+                                            let all_ids: HashSet<i32> = grid.elements.iter().map(|e| e.id).collect();
+                                            (all_ids.clone(), all_ids)
                                         } else {
                                             self
-                                            .ui_state
-                                            .sim_selected_scenario
-                                            .and_then(|idx| {
-                                                self.ui_state.sim_scenarios.get(idx)
-                                            })
-                                            .map(|scenario| {
-                                                if !self.ui_state.sim_nav_sequence_mode {
-                                                    // Step mode: show elements up to sim_current_step
-                                                    let steps_to_show = self
-                                                        .ui_state
-                                                        .sim_current_step
-                                                        .min(scenario.steps.len());
-                                                    scenario.steps[..steps_to_show]
-                                                        .iter()
-                                                        .flat_map(|s| s.element_ids.iter().copied())
-                                                        .collect()
-                                                } else {
-                                                    installed_ids_through_sim_sequence(
-                                                        scenario,
-                                                        self.ui_state.sim_current_sequence,
-                                                    )
-                                                }
-                                            })
-                                            .unwrap_or_default()
+                                                .ui_state
+                                                .sim_selected_scenario
+                                                .and_then(|idx| self.ui_state.sim_scenarios.get(idx))
+                                                .map(|scenario| {
+                                                    if !self.ui_state.sim_nav_sequence_mode {
+                                                        let steps_to_show = self
+                                                            .ui_state
+                                                            .sim_current_step
+                                                            .min(scenario.steps.len());
+                                                        let installed_ids: HashSet<i32> = scenario.steps[..steps_to_show]
+                                                            .iter()
+                                                            .flat_map(|s| s.element_ids.iter().copied())
+                                                            .collect();
+                                                        let current_ids = current_ids_for_sim_step(
+                                                            scenario,
+                                                            self.ui_state.sim_current_step.min(scenario.steps.len()).max(1),
+                                                        );
+                                                        (installed_ids, current_ids)
+                                                    } else {
+                                                        let installed_ids = installed_ids_through_sim_sequence(
+                                                            scenario,
+                                                            self.ui_state.sim_current_sequence,
+                                                        );
+                                                        let current_ids = current_ids_for_sim_sequence(
+                                                            scenario,
+                                                            self.ui_state.sim_current_sequence,
+                                                        );
+                                                        (installed_ids, current_ids)
+                                                    }
+                                                })
+                                                .unwrap_or_default()
                                         };
+                                        let previous_ids: HashSet<i32> = installed_ids
+                                            .difference(&current_ids)
+                                            .copied()
+                                            .collect();
 
                                         painter.rect_filled(
                                             rect_3d,
@@ -2630,8 +2664,9 @@ impl eframe::App for AssyPlanApp {
                                             }
                                         }
 
-                                        // Installed (active) — unified Dev-mode colors
+                                        // Installed elements: previous in light gray, current in dev-mode colors
                                         if self.ui_state.show_elements {
+                                            let prev_color = egui::Color32::from_gray(170);
                                             let col_color = egui::Color32::from_rgb(200, 50, 50);
                                             let gdr_color = egui::Color32::from_rgb(50, 150, 50);
                                             for e in &grid.elements {
@@ -2657,25 +2692,36 @@ impl eframe::App for AssyPlanApp {
                                                         zj,
                                                         &self.view_state,
                                                     );
-                                                    let color = if e.member_type == "Column" {
-                                                        col_color
+                                                    let color = if current_ids.contains(&e.id) {
+                                                        if e.member_type == "Column" {
+                                                            col_color
+                                                        } else {
+                                                            gdr_color
+                                                        }
                                                     } else {
-                                                        gdr_color
+                                                        prev_color
                                                     };
                                                     painter.line_segment(
                                                         [p1, p2],
-                                                        egui::Stroke::new(2.0, color),
+                                                        egui::Stroke::new(
+                                                            if current_ids.contains(&e.id) { 2.0 } else { 1.5 },
+                                                            color,
+                                                        ),
                                                     );
                                                 }
                                             }
                                         }
 
-                                        // Nodes — ghost (inactive) + active (blue dot)
+                                        // Nodes — ghost (future) + previous (light gray) + current (blue)
                                         if self.ui_state.show_nodes {
-                                            // Collect active node IDs
-                                            let active_node_ids: std::collections::HashSet<i32> =
+                                            let current_node_ids: std::collections::HashSet<i32> =
                                                 grid.elements.iter()
-                                                    .filter(|e| installed_ids.contains(&e.id))
+                                                    .filter(|e| current_ids.contains(&e.id))
+                                                    .flat_map(|e| [e.node_i_id, e.node_j_id])
+                                                    .collect();
+                                            let previous_node_ids: std::collections::HashSet<i32> =
+                                                grid.elements.iter()
+                                                    .filter(|e| previous_ids.contains(&e.id))
                                                     .flat_map(|e| [e.node_i_id, e.node_j_id])
                                                     .collect();
 
@@ -2689,15 +2735,19 @@ impl eframe::App for AssyPlanApp {
                                                 if !rect_3d.contains(p) {
                                                     continue;
                                                 }
-                                                if active_node_ids.contains(&n.id) {
-                                                    // Active: blue dot (Dev-mode standard)
+                                                if current_node_ids.contains(&n.id) {
                                                     painter.circle_filled(
                                                         p,
                                                         graphics::renderer::ACTIVE_NODE_RADIUS,
                                                         graphics::renderer::ACTIVE_NODE_COLOR,
                                                     );
+                                                } else if previous_node_ids.contains(&n.id) {
+                                                    painter.circle_filled(
+                                                        p,
+                                                        graphics::renderer::ACTIVE_NODE_RADIUS,
+                                                        egui::Color32::from_gray(180),
+                                                    );
                                                 } else if self.ui_state.show_hidden {
-                                                    // Inactive ghost node
                                                     painter.circle_filled(
                                                         p,
                                                         graphics::renderer::GHOST_NODE_RADIUS,

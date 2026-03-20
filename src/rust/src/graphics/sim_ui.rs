@@ -783,6 +783,9 @@ pub fn render_sim_result(ui: &mut Ui, state: &mut UiState) {
             // ── XY Plot: Members-per-step ──────────────────────────────────
             render_members_per_step_plot(ui, scenario);
 
+            // ── Workfront chart (new Chart 2) ──────────────────────────────
+            render_workfront_members_per_step_chart(ui, scenario);
+
             // ── Floor chart (Dev Chart 2 equivalent) ───────────────────────
             render_floor_column_installation_rate_chart(ui, state, scenario);
 
@@ -1183,6 +1186,190 @@ fn render_floor_column_installation_rate_chart(
 
             let label_step = (n_steps / 10).max(1);
             for s in (1..=n_steps).step_by(label_step) {
+                let x = plot_rect.left()
+                    + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                painter.text(
+                    pos2(x, plot_rect.bottom() + 4.0),
+                    egui::Align2::CENTER_TOP,
+                    format!("{}", s),
+                    font_id.clone(),
+                    axis_color,
+                );
+            }
+            painter.text(
+                pos2(plot_rect.center().x, chart_rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                "Step",
+                font_id.clone(),
+                axis_color,
+            );
+        });
+}
+
+fn render_workfront_members_per_step_chart(
+    ui: &mut Ui,
+    scenario: &crate::graphics::ui::SimScenario,
+) {
+    use eframe::egui::pos2;
+
+    if scenario.steps.is_empty() {
+        return;
+    }
+
+    let mut workfront_ids: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    for step in &scenario.steps {
+        for local_step in &step.local_steps {
+            workfront_ids.insert(local_step.workfront_id);
+        }
+    }
+    if workfront_ids.is_empty() {
+        return;
+    }
+
+    let workfront_ids: Vec<i32> = workfront_ids.into_iter().collect();
+    let step_count = scenario.steps.len();
+    let mut series_map: std::collections::BTreeMap<i32, Vec<f32>> = workfront_ids
+        .iter()
+        .copied()
+        .map(|wf_id| (wf_id, vec![0.0; step_count]))
+        .collect();
+
+    for (step_idx, step) in scenario.steps.iter().enumerate() {
+        for local_step in &step.local_steps {
+            if let Some(series) = series_map.get_mut(&local_step.workfront_id) {
+                series[step_idx] += local_step.element_ids.len() as f32;
+            }
+        }
+    }
+
+    let y_max = series_map
+        .values()
+        .flat_map(|series| series.iter().copied())
+        .fold(1.0f32, f32::max)
+        .max(1.0);
+
+    let line_colors: [Color32; 10] = [
+        Color32::from_rgb(100, 200, 255),
+        Color32::from_rgb(100, 255, 150),
+        Color32::from_rgb(255, 200, 80),
+        Color32::from_rgb(255, 110, 190),
+        Color32::from_rgb(180, 130, 255),
+        Color32::from_rgb(255, 255, 100),
+        Color32::from_rgb(255, 100, 100),
+        Color32::from_rgb(80, 240, 220),
+        Color32::from_rgb(200, 180, 255),
+        Color32::from_rgb(255, 160, 80),
+    ];
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.heading("Workfront Members per Step");
+    ui.add_space(4.0);
+
+    let chart_h = 180.0f32;
+    let legend_w = 86.0f32;
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(CHART_MARGIN_H, 0.0))
+        .show(ui, |ui| {
+            let (chart_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), chart_h),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(chart_rect);
+            painter.rect_filled(chart_rect, 2.0, Color32::from_rgb(30, 30, 40));
+
+            let plot_rect = Rect::from_min_max(
+                pos2(
+                    chart_rect.left() + CHART_PADDING_LEFT,
+                    chart_rect.top() + CHART_PADDING_TOP,
+                ),
+                pos2(
+                    chart_rect.right() - CHART_PADDING_RIGHT - legend_w,
+                    chart_rect.bottom() - CHART_PADDING_BOTTOM,
+                ),
+            );
+
+            let axis_color = Color32::from_rgb(160, 160, 160);
+            let grid_color = Color32::from_rgb(60, 60, 70);
+            let font_id = FontId::proportional(10.0);
+
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.left_top()],
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
+            );
+            painter.line_segment(
+                [plot_rect.left_bottom(), plot_rect.right_bottom()],
+                Stroke::new(CHART_AXIS_STROKE_WIDTH, axis_color),
+            );
+
+            for (frac, label) in &[
+                (0.0f32, "0".to_string()),
+                (0.5f32, format!("{:.1}", y_max * 0.5)),
+                (1.0f32, format!("{:.1}", y_max)),
+            ] {
+                let y = plot_rect.bottom() - frac * plot_rect.height();
+                painter.line_segment(
+                    [pos2(plot_rect.left(), y), pos2(plot_rect.right(), y)],
+                    Stroke::new(if *frac == 1.0 { 0.8 } else { 0.5 }, grid_color),
+                );
+                painter.text(
+                    pos2(y_axis_label_x(plot_rect), y),
+                    egui::Align2::RIGHT_CENTER,
+                    label,
+                    font_id.clone(),
+                    axis_color,
+                );
+            }
+            draw_rotated_y_axis_title(
+                &painter,
+                plot_rect,
+                "Members / Step",
+                font_id.clone(),
+                axis_color,
+            );
+
+            let max_step_f = step_count as f32;
+            let to_screen = |step: f32, count: f32| -> Pos2 {
+                let x = plot_rect.left()
+                    + (step - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
+                let y = plot_rect.bottom() - (count / y_max) * plot_rect.height();
+                pos2(x, y)
+            };
+
+            for (rank, wf_id) in workfront_ids.iter().enumerate() {
+                let color = line_colors[rank % line_colors.len()];
+                if let Some(series) = series_map.get(wf_id) {
+                    if series.len() >= 2 {
+                        let points: Vec<Pos2> = series
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, count)| to_screen(idx as f32 + 1.0, *count))
+                            .collect();
+                        painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+                    } else if let Some(count) = series.first() {
+                        painter.circle_filled(to_screen(1.0, *count), 2.0, color);
+                    }
+                }
+
+                let legend_x = plot_rect.right() + 6.0;
+                let legend_y = chart_rect.top() + CHART_PADDING_TOP + rank as f32 * 14.0;
+                if legend_y + 10.0 < chart_rect.bottom() {
+                    painter.line_segment(
+                        [pos2(legend_x, legend_y + 5.0), pos2(legend_x + 14.0, legend_y + 5.0)],
+                        Stroke::new(2.0, color),
+                    );
+                    painter.text(
+                        pos2(legend_x + 18.0, legend_y + 5.0),
+                        egui::Align2::LEFT_CENTER,
+                        format!("WF{}", wf_id),
+                        font_id.clone(),
+                        color,
+                    );
+                }
+            }
+
+            let label_step = (step_count / 10).max(1);
+            for s in (1..=step_count).step_by(label_step) {
                 let x = plot_rect.left()
                     + (s as f32 - 1.0) / (max_step_f - 1.0).max(1.0) * plot_rect.width();
                 painter.text(
