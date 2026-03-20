@@ -46,10 +46,10 @@ fn draw_rotated_y_axis_title(
 }
 
 // ============================================================================
-// Settings tab (Grid config + algorithm weights + workfront list)
+// Settings tab (general settings + workfront panel)
 // ============================================================================
 
-/// Render the Simulation settings panel.
+/// Render the left column of the Simulation settings panel.
 /// Called from the "Settings" tab in lib.rs when mode == Simulation.
 /// Returns true if the grid config changed (needs new pool rebuild).
 pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
@@ -378,54 +378,6 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         );
     });
 
-    ui.add_space(12.0);
-    ui.separator();
-
-    // ── Workfront list ────────────────────────────────────────────────────
-    ui.heading("Workfronts");
-    ui.add_space(4.0);
-    if state.sim_workfronts.is_empty() {
-        ui.colored_label(
-            Color32::from_rgb(200, 180, 80),
-            "No workfronts set. Switch to View tab and click grid intersections.",
-        );
-    } else {
-        egui::ScrollArea::vertical()
-            .id_source("wf_list_scroll")
-            .max_height(120.0)
-            .show(ui, |ui| {
-                let mut to_remove: Option<usize> = None;
-                egui::Grid::new("sim_workfront_table")
-                    .num_columns(4)
-                    .spacing([16.0, 6.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.strong("WF");
-                        ui.strong("Grid X");
-                        ui.strong("Grid Y");
-                        ui.strong("Delete");
-                        ui.end_row();
-
-                        for (i, wf) in state.sim_workfronts.iter().enumerate() {
-                            ui.label(format!("{}", wf.id));
-                            ui.label(format!("{}", wf.grid_x));
-                            ui.label(format!("{}", wf.grid_y));
-                            if ui.small_button("✕").clicked() {
-                                to_remove = Some(i);
-                            }
-                            ui.end_row();
-                        }
-                    });
-                if let Some(idx) = to_remove {
-                    state.sim_workfronts.remove(idx);
-                    // Re-assign IDs (1-indexed, sequential)
-                    for (i, wf) in state.sim_workfronts.iter_mut().enumerate() {
-                        wf.id = (i + 1) as i32;
-                    }
-                }
-            });
-    }
-
     if changed {
         // Grid changed → clear workfronts (they might be out of range) and scenarios
         state.sim_workfronts.clear();
@@ -434,6 +386,59 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     }
 
     changed
+}
+
+/// Render the dedicated workfront panel on the right side of Simulation settings.
+pub fn render_sim_workfront_panel(ui: &mut Ui, state: &mut UiState) {
+    ui.heading("Workfronts");
+    ui.add_space(4.0);
+    ui.label("Use the View tab to add or remove workfronts by clicking grid intersections.");
+    ui.add_space(8.0);
+
+    if state.sim_workfronts.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(200, 180, 80),
+            "No workfronts set. Switch to View tab and click grid intersections.",
+        );
+        return;
+    }
+
+    let mut to_remove: Option<usize> = None;
+    egui::Grid::new("sim_workfront_table")
+        .num_columns(6)
+        .spacing([16.0, 6.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong("WF");
+            ui.strong("xi");
+            ui.strong("yi");
+            ui.strong("x (mm)");
+            ui.strong("y (mm)");
+            ui.strong("Delete");
+            ui.end_row();
+
+            for (i, wf) in state.sim_workfronts.iter().enumerate() {
+                let x_coord = wf.grid_x as f64 * state.grid_config.dx;
+                let y_coord = wf.grid_y as f64 * state.grid_config.dy;
+
+                ui.label(format!("{}", wf.id));
+                ui.label(format!("{}", wf.grid_x));
+                ui.label(format!("{}", wf.grid_y));
+                ui.label(format!("{:.0}", x_coord));
+                ui.label(format!("{:.0}", y_coord));
+                if ui.small_button("✕").clicked() {
+                    to_remove = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+
+    if let Some(idx) = to_remove {
+        state.sim_workfronts.remove(idx);
+        for (i, wf) in state.sim_workfronts.iter_mut().enumerate() {
+            wf.id = (i + 1) as i32;
+        }
+    }
 }
 
 // ============================================================================

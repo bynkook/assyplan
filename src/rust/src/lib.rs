@@ -2132,79 +2132,97 @@ impl eframe::App for AssyPlanApp {
                     ui.heading("Settings");
                     ui.separator();
 
-                    egui::ScrollArea::vertical()
-                        .id_source("settings_tab_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-
-                    ui.label("Show Model Info:");
-                    ui.indent("model_info_opts", |ui| {
-                        ui.checkbox(&mut self.ui_state.show_grid, "Grid");
-                        ui.checkbox(&mut self.ui_state.show_nodes, "Nodes");
-                        ui.checkbox(&mut self.ui_state.show_elements, "Elements");
-                        // Hidden: inactive/uninstalled nodes & elements in ghost style.
-                        // Only meaningful in Construction mode — disable in Model mode.
-                        let is_construction = self.ui_state.display_mode != graphics::DisplayMode::Model;
-                        ui.add_enabled(
-                            is_construction,
-                            egui::Checkbox::new(&mut self.ui_state.show_hidden, "Hidden"),
-                        );
-                    });
-
-                    ui.separator();
-                    // Settings 탭 Show ID Labels: prev 패턴으로 on/off 동기화
-                    let prev_show_id_labels = self.ui_state.show_id_labels;
-                    ui.checkbox(&mut self.ui_state.show_id_labels, "Show ID Labels");
-                    if self.ui_state.show_id_labels && !prev_show_id_labels {
-                        // 방금 켜진 경우 → 하위 플래그 복원
-                        self.ui_state.show_node_ids = true;
-                        self.ui_state.show_element_ids = true;
-                    }
-                    if self.ui_state.show_id_labels {
-                        ui.indent("id_label_opts", |ui| {
-                            ui.checkbox(&mut self.ui_state.show_node_ids, "Node ID");
-                            ui.checkbox(&mut self.ui_state.show_element_ids, "Element ID");
-                        });
-                        // 하위 둘 다 꺼지면 부모도 off
-                        if !self.ui_state.show_node_ids && !self.ui_state.show_element_ids {
-                            self.ui_state.show_id_labels = false;
-                        }
-                    }
-
-                    // ── Simulation Mode Settings ──────────────────────────
-                    if self.ui_state.mode == "Simulation" {
-                        ui.separator();
-                        let grid_changed =
-                            graphics::sim_ui::render_sim_settings(ui, &mut self.ui_state);
-                        if grid_changed {
-                            // Settings changed — highlight Recalc button to prompt re-run
-                            self.ui_state.needs_recalc = true;
-                        }
-                    }
-
-                    // ── Development Mode: Construction Constraints ────────
-                    if self.ui_state.mode != "Simulation" {
-                        ui.separator();
-                        ui.heading("Construction Constraints");
-                        ui.add_space(4.0);
-                        ui.label("Upper-Floor Column Rate Threshold:");
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut self.ui_state.upper_floor_threshold,
-                                    0.0..=1.0,
-                                )
-                                .text("")
-                                .fixed_decimals(2)
-                                .clamp_to_range(true),
+                    let render_common_settings = |ui: &mut egui::Ui,
+                                                  ui_state: &mut graphics::UiState| {
+                        ui.label("Show Model Info:");
+                        ui.indent("model_info_opts", |ui| {
+                            ui.checkbox(&mut ui_state.show_grid, "Grid");
+                            ui.checkbox(&mut ui_state.show_nodes, "Nodes");
+                            ui.checkbox(&mut ui_state.show_elements, "Elements");
+                            let is_construction =
+                                ui_state.display_mode != graphics::DisplayMode::Model;
+                            ui.add_enabled(
+                                is_construction,
+                                egui::Checkbox::new(&mut ui_state.show_hidden, "Hidden"),
                             );
-                            ui.label(format!(
-                                "{:.0}%",
-                                self.ui_state.upper_floor_threshold * 100.0
-                            ));
                         });
+
+                        ui.separator();
+                        let prev_show_id_labels = ui_state.show_id_labels;
+                        ui.checkbox(&mut ui_state.show_id_labels, "Show ID Labels");
+                        if ui_state.show_id_labels && !prev_show_id_labels {
+                            ui_state.show_node_ids = true;
+                            ui_state.show_element_ids = true;
+                        }
+                        if ui_state.show_id_labels {
+                            ui.indent("id_label_opts", |ui| {
+                                ui.checkbox(&mut ui_state.show_node_ids, "Node ID");
+                                ui.checkbox(&mut ui_state.show_element_ids, "Element ID");
+                            });
+                            if !ui_state.show_node_ids && !ui_state.show_element_ids {
+                                ui_state.show_id_labels = false;
+                            }
+                        }
+                    };
+
+                    if self.ui_state.mode == "Simulation" {
+                        ui.columns(2, |columns| {
+                            egui::ScrollArea::vertical()
+                                .id_source("settings_left_scroll")
+                                .auto_shrink([false, false])
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                )
+                                .show(&mut columns[0], |ui| {
+                                    render_common_settings(ui, &mut self.ui_state);
+                                    ui.separator();
+                                    let grid_changed =
+                                        graphics::sim_ui::render_sim_settings(ui, &mut self.ui_state);
+                                    if grid_changed {
+                                        self.ui_state.needs_recalc = true;
+                                    }
+                                });
+
+                            egui::ScrollArea::vertical()
+                                .id_source("settings_right_scroll")
+                                .auto_shrink([false, false])
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                )
+                                .show(&mut columns[1], |ui| {
+                                    graphics::sim_ui::render_sim_workfront_panel(
+                                        ui,
+                                        &mut self.ui_state,
+                                    );
+                                });
+                        });
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_source("settings_tab_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                render_common_settings(ui, &mut self.ui_state);
+                                ui.separator();
+                                ui.heading("Construction Constraints");
+                                ui.add_space(4.0);
+                                ui.label("Upper-Floor Column Rate Threshold:");
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut self.ui_state.upper_floor_threshold,
+                                            0.0..=1.0,
+                                        )
+                                        .text("")
+                                        .fixed_decimals(2)
+                                        .clamp_to_range(true),
+                                    );
+                                    ui.label(format!(
+                                        "{:.0}%",
+                                        self.ui_state.upper_floor_threshold * 100.0
+                                    ));
+                                });
+                            });
                     }
-                        });
                 }
                 "View" => {
                     // Simulation mode has its own view (grid plan), independent of render_data
@@ -2441,8 +2459,8 @@ impl eframe::App for AssyPlanApp {
                                         // Keep a fixed two-line height so long messages do not resize the 3D viewport.
                                         let detail_font = egui::FontId::proportional(10.0);
                                         let detail_line_height = ui.fonts(|fonts| fonts.row_height(&detail_font));
-                                        let detail_bar_height = detail_line_height + 6.0;
-                                        let detail_scroll_height = detail_line_height + 2.0;
+                                        let detail_bar_height = detail_line_height * 2.0 + 6.0;
+                                        let detail_scroll_height = detail_line_height * 2.0 + 2.0;
                                         let (detail_text, detail_color) = if !self.ui_state.sim_nav_sequence_mode {
                                             (
                                                 step_info,
