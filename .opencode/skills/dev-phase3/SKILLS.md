@@ -4,9 +4,10 @@
 정본 우선순위는 다음과 같다.
 
 1. `.github/copilot-instructions.md`
-2. `devplandoc.md`
-3. 이 문서
-4. 실제 코드
+2. `AGENTS.md`
+3. `devplandoc.md`
+4. 이 문서
+5. 실제 코드
 
 ## 1. Phase 3 목표
 
@@ -14,7 +15,7 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 
 - Grid 설정으로 전체 node/element pool 생성
 - Workfront 선택 기반 시뮬레이션 실행
-- Monte-Carlo + weighted sampling + pruning 조합으로 시나리오 생성
+- Monte-Carlo + weighted sampling + retry loop 조합으로 시나리오 생성
 - 패턴 기반 안정 조건을 만족할 때만 Step 생성
 - 결과를 3D View, scenario table, metrics chart, debug export로 검토
 
@@ -35,12 +36,12 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 
 - `GridConfig`: `nx=4`, `ny=8`, `nz=3`, `dx=6000`, `dy=6000`, `dz=4000`
 - `upper_floor_threshold = 0.3`
-- `lower_floor_completion_ratio = 0.8`
-- `lower_floor_forced_completion = 10`
+- `lower_floor_completion_ratio = 0.5`
 - `sim_weights = (0.5, 0.3, 0.2)`
 - `sim_scenario_count = 2`
 - `sim_nav_sequence_mode = false`
 - `sim_view_is_model = false`
+- `sim_trace_write_jsonl = false`
 
 문서를 수정할 때 예전 값인 `ny=4`, `forced_completion=5`, `scenario_count=100` 같은 설명이 남아 있지 않은지 먼저 확인한다.
 
@@ -73,22 +74,25 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 - `WorkfrontState`
   - `owned_ids`
   - `buffer_sequences`
-  - `planned_pattern`
   - `committed_floor`
-  - `last_failed_floor`
 
 - `SimConstraints`
   - `upper_floor_column_rate_threshold`
   - `lower_floor_completion_ratio_threshold`
-  - `lower_floor_forced_completion_threshold`
+
+- 버퍼/방출 관련 타입
+  - `StepBufferDecision`
+  - `StepCandidateMask`
+  - `EmitResult`
 
 핵심 구현 포인트:
 
 - candidate collection 전에 `allowed_floors` 를 먼저 계산한다.
 - 허용되지 않은 floor 는 수집 단계에서 early skip 한다.
-- floor prefilter 는 legacy/optimized candidate collection parity를 유지해야 한다.
-- `planned_pattern` 이 소진됐는데 complete step이 아니면 `plan_exhausted` 재계획을 강제한다.
-- `committed_floor` 에서 후보가 끊기면 rollback 하고 `last_failed_floor` 를 기록한다.
+- floor prefilter 는 single-candidate retry loop 앞단에서 강제된다.
+- 후보는 하나씩 뽑아 현재 buffer 를 실제로 진전시키는지 검사한다.
+- complete pattern 이더라도 stability fail 이면 즉시 infeasible rollback 한다.
+- `committed_floor` 에서 후보가 끊기면 해당 buffer 만 rollback 한다.
 
 ### `src/rust/src/stability.rs`
 
@@ -101,6 +105,10 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 규칙:
 
 - Step pass/fail 판단 기준은 여기의 공통 규칙을 따른다.
+- 연결되지 않은 bundle 은 pass 할 수 없다.
+- 단독 column 은 pass 할 수 없다.
+- 단독 girder 는 이미 안정된 두 column 을 잇는 closure 일 때만 pass 할 수 있다.
+- `Col + Girder` 는 인접 안정 구조와의 직교 연결까지 만족해야 pass 할 수 있다.
 - Simulation 전용 오케스트레이션을 이 파일로 옮기지 않는다.
 
 ### `src/rust/src/graphics/ui.rs`
@@ -124,6 +132,8 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 - Settings / View / Result 패널 렌더링
 - grid/workfront 선택 UI
 - scenario table, playback, chart, export 버튼 렌더링
+- trace logger 설정과 JSONL 저장 옵션 렌더링
+- algorithm weights(`w1/w2/w3`) 설정 렌더링
 
 ### `src/rust/src/lib.rs`
 
@@ -153,12 +163,15 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 
 1. 각 cycle에서 모든 workfront가 round 단위로 움직인다.
 2. 각 workfront는 한 round에 최대 1개 element만 선택한다.
-3. 선택 결과는 workfront 로컬 버퍼(`buffer_sequences`)에 쌓인다.
-4. 버퍼 시그니처를 `classify_member_signature` 로 판정한다.
-5. complete pattern + stability pass일 때만 `LocalStep` 을 만든다.
-6. cycle 내에서 `LocalStep` 을 만든 workfront는 해당 cycle 남은 round에서 제외된다.
-7. cycle 종료 시 여러 `LocalStep` 을 `SimStep::from_local_steps()` 로 병합한다.
-8. 병합된 `SimStep.sequences` 는 round-robin collation이며 같은 round는 같은 sequence 번호를 공유한다.
+3. active workfront 수는 남은 미설치 부재 수에 비례해 줄어드는 방식으로 조정된다.
+4. 초기 안정 구조가 비어 있으면 bootstrap bundle 을 먼저 선택한다.
+5. 이후 증분 확장은 single-candidate retry loop 로 수행한다.
+6. 선택 결과는 workfront 로컬 버퍼(`buffer_sequences`)에 쌓인다.
+7. 버퍼 시그니처를 `classify_member_signature` 로 판정한다.
+8. complete pattern + stability pass일 때만 `LocalStep` 을 만든다.
+9. cycle 내에서 `LocalStep` 을 만든 workfront는 해당 cycle 남은 round에서 제외된다.
+10. cycle 종료 시 여러 `LocalStep` 을 `SimStep::from_local_steps()` 로 병합한다.
+11. 병합된 `SimStep.sequences` 는 round-robin collation이며 같은 round는 같은 sequence 번호를 공유한다.
 
 문서/코드 검토 시 가장 먼저 볼 회귀 신호:
 
@@ -166,14 +179,14 @@ Phase 3의 핵심은 grid 기반 전체 구조요소 풀을 생성한 뒤, multi
 - Sequence마다 기계적으로 Step이 하나씩 생기는가
 - `local_steps` 정보가 사라졌는가
 - Step 수가 Sequence 수와 거의 1:1로 무너졌는가
+- 후보를 한 번에 여러 개 밀어 넣고 사후 subset 추출로 step 을 만드는가
 
 ## 6. Floor constraint canonical behavior
 
 floor 선택은 단순 점수 경쟁이 아니라 제약 기반 타깃팅이다.
 
-- 비잠금 상태: 허용된 floor 중 target floor 선택
+- 비잠금 상태: 허용된 floor 집합(`allowed_floors`)만 candidate collection 에 전달
 - 잠금 상태: `committed_floor` 만 허용
-- 실패 직후 같은 floor 무한 재시도를 막기 위해 `last_failed_floor` 를 사용
 
 upper/lower floor gate의 현재 의미:
 
@@ -183,11 +196,7 @@ upper/lower floor gate의 현재 의미:
 
 - `lower_floor_completion_ratio`
   - 상층 신규 진입 허용 조건
-  - 기본값 `0.8`
-
-- `lower_floor_forced_completion`
-  - 하층 잔여량이 작아지면 하층 마감 우선
-  - 기본값 `10`
+  - 기본값 `0.5`
 
 추가 구현 포인트:
 
@@ -200,6 +209,7 @@ upper/lower floor gate의 현재 의미:
 
 - grid sliders
 - constraint sliders
+- trace logger + JSONL 옵션
 - algorithm weights
 - scenario count
 - workfront 목록
@@ -235,6 +245,7 @@ upper/lower floor gate의 현재 의미:
 - simulation이 항상 동기/blocking이라고 적는 것
 - export 기능이 없다고 적는 것
 - progress/cancel 구조를 누락하는 것
+- 이미 제거된 forced-completion/throttle/rebase 상태를 현재 canonical flow 인 것처럼 적는 것
 
 ## 9. 자주 틀리는 포인트
 
@@ -254,6 +265,12 @@ upper/lower floor gate의 현재 의미:
 
 - `SimStep.pattern` 은 human-readable summary다.
 - multi-workfront 병합 step은 `Multi(n)` 형식이 될 수 있다.
+
+### Algorithm weights
+
+- 현재 코드에서 `w1`, `w2` 는 incremental single-candidate retry 점수에 사용된다.
+- `w3` 는 bootstrap candidate bundle 점수에서 사용된다.
+- 거리성은 incremental path 에서도 locality filter 와 `frontier_dist` 계산으로 구조적으로 반영된다.
 
 ### Simulation without CSV
 

@@ -241,20 +241,6 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
         changed = true;
     }
 
-    ui.add_space(8.0);
-    ui.label("Lower-Floor Forced Completion Threshold:");
-    let prev_lower_floor_forced_completion = state.lower_floor_forced_completion;
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(&mut state.lower_floor_forced_completion, 0..=50)
-                .text("")
-                .clamp_to_range(true),
-        );
-        ui.label("members");
-    });
-    if state.lower_floor_forced_completion != prev_lower_floor_forced_completion {
-        changed = true;
-    }
 
     ui.add_space(12.0);
     ui.separator();
@@ -264,6 +250,12 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
     ui.checkbox(
         &mut state.sim_trace_enabled,
         "Enable simulation trace logger (writes a user-readable log file)",
+    );
+
+    ui.add_space(6.0);
+    ui.checkbox(
+        &mut state.sim_trace_write_jsonl,
+        "Also save JSONL trace file",
     );
 
     ui.add_space(6.0);
@@ -359,7 +351,7 @@ pub fn render_sim_settings(ui: &mut Ui, state: &mut UiState) -> bool {
             });
             ui.end_row();
 
-            ui.label("w3 — Distance / Closure (0.20):");
+            ui.label("w3 — Distance (0.20):");
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Slider::new(w3, 0.0..=1.0)

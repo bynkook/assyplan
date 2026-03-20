@@ -299,6 +299,37 @@ fn is_node_connected_to_installed_girder(
         .any(|gir| gir.node_i_id == node_id || gir.node_j_id == node_id)
 }
 
+fn is_node_stable_column_top(
+    node_id: i32,
+    all_elements: &[StabilityElement],
+    stable_element_ids: &HashSet<i32>,
+) -> bool {
+    all_elements
+        .iter()
+        .filter(|e| e.member_type == "Column" && stable_element_ids.contains(&e.id))
+        .any(|col| col.node_j_id == node_id)
+}
+
+fn has_perpendicular_stable_girder_at_node(
+    node_id: i32,
+    new_girder: &StabilityElement,
+    element_by_id: &HashMap<i32, &StabilityElement>,
+    nodes: &[StabilityNode],
+    stable_element_ids: &HashSet<i32>,
+) -> bool {
+    let new_direction = get_girder_direction(new_girder, nodes);
+
+    stable_element_ids.iter().any(|eid| {
+        let Some(girder) = element_by_id.get(eid).copied() else {
+            return false;
+        };
+
+        girder.member_type == "Girder"
+            && (girder.node_i_id == node_id || girder.node_j_id == node_id)
+            && are_perpendicular(&new_direction, &get_girder_direction(girder, nodes))
+    })
+}
+
 fn check_girders_perpendicular(
     girder_ids: &[i32],
     element_by_id: &HashMap<i32, &StabilityElement>,
@@ -320,6 +351,55 @@ fn check_girders_perpendicular(
     false
 }
 
+fn is_bundle_connected(
+    element_ids: &[i32],
+    element_by_id: &HashMap<i32, &StabilityElement>,
+) -> bool {
+    if element_ids.len() <= 1 {
+        return true;
+    }
+
+    let mut node_to_elements: HashMap<i32, Vec<i32>> = HashMap::new();
+    for element_id in element_ids {
+        let Some(element) = element_by_id.get(element_id) else {
+            return false;
+        };
+        node_to_elements
+            .entry(element.node_i_id)
+            .or_default()
+            .push(*element_id);
+        node_to_elements
+            .entry(element.node_j_id)
+            .or_default()
+            .push(*element_id);
+    }
+
+    let mut visited: HashSet<i32> = HashSet::new();
+    let mut queue: VecDeque<i32> = VecDeque::from([element_ids[0]]);
+
+    while let Some(current_id) = queue.pop_front() {
+        if !visited.insert(current_id) {
+            continue;
+        }
+
+        let Some(element) = element_by_id.get(&current_id) else {
+            return false;
+        };
+
+        for node_id in [element.node_i_id, element.node_j_id] {
+            if let Some(neighbors) = node_to_elements.get(&node_id) {
+                for neighbor_id in neighbors {
+                    if !visited.contains(neighbor_id) {
+                        queue.push_back(*neighbor_id);
+                    }
+                }
+            }
+        }
+    }
+
+    visited.len() == element_ids.len()
+}
+
 pub fn check_step_bundle_stability(
     element_ids: &[i32],
     all_elements: &[StabilityElement],
@@ -328,6 +408,10 @@ pub fn check_step_bundle_stability(
 ) -> bool {
     let element_by_id: HashMap<i32, &StabilityElement> =
         all_elements.iter().map(|e| (e.id, e)).collect();
+
+    if !is_bundle_connected(element_ids, &element_by_id) {
+        return false;
+    }
 
     let local_stable_ids = collect_local_stable_context(element_ids, all_elements, installed_ids);
     let mut combined_local_ids: HashSet<i32> = local_stable_ids.clone();
@@ -362,6 +446,55 @@ pub fn check_step_bundle_stability(
         })
         .copied()
         .collect();
+
+    if pattern_columns.len() == 1 && pattern_girders.is_empty() {
+        return false;
+    }
+
+    if pattern_columns.is_empty() && pattern_girders.len() == 1 {
+        let Some(girder) = element_by_id.get(&pattern_girders[0]).copied() else {
+            return false;
+        };
+
+        return validate_girder_support(girder, nodes, all_elements, &local_stable_ids);
+    }
+
+    if pattern_columns.len() == 1 && pattern_girders.len() == 1 {
+        let Some(column) = element_by_id.get(&pattern_columns[0]).copied() else {
+            return false;
+        };
+        let Some(girder) = element_by_id.get(&pattern_girders[0]).copied() else {
+            return false;
+        };
+
+        if !validate_column_support(column, nodes, all_elements, &local_stable_ids) {
+            return false;
+        }
+        if !validate_girder_support(girder, nodes, all_elements, &combined_local_ids) {
+            return false;
+        }
+
+        let new_column_top = column.node_j_id;
+        let stable_junction_node = if girder.node_i_id == new_column_top {
+            girder.node_j_id
+        } else if girder.node_j_id == new_column_top {
+            girder.node_i_id
+        } else {
+            return false;
+        };
+
+        if !is_node_stable_column_top(stable_junction_node, all_elements, &local_stable_ids) {
+            return false;
+        }
+
+        return has_perpendicular_stable_girder_at_node(
+            stable_junction_node,
+            girder,
+            &element_by_id,
+            nodes,
+            &local_stable_ids,
+        );
+    }
 
     for col_id in &pattern_columns {
         let Some(col) = element_by_id.get(col_id) else {
@@ -2127,6 +2260,155 @@ mod tests {
         assert!(
             !validate_girder_support(girder, &nodes, &all_elements, &stable_ids),
             "Cantilever girder (free end at node 7) must NOT be supported"
+        );
+    }
+
+    #[test]
+    fn test_single_column_bundle_not_stable_even_with_existing_context() {
+        let nodes = create_test_nodes();
+        let all_elements = vec![
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 3,
+                node_i_id: 5,
+                node_j_id: 6,
+                member_type: "Girder".to_string(),
+            },
+            StabilityElement {
+                id: 4,
+                node_i_id: 4,
+                node_j_id: 8,
+                member_type: "Column".to_string(),
+            },
+        ];
+        let stable_ids: HashSet<i32> = [1, 2, 3].into_iter().collect();
+
+        assert!(
+            !check_step_bundle_stability(&[4], &all_elements, &nodes, &stable_ids),
+            "A single column must never be accepted as a complete stable step"
+        );
+    }
+
+    #[test]
+    fn test_single_girder_closure_between_two_stable_columns_passes() {
+        let nodes = create_test_nodes();
+        let all_elements = vec![
+            StabilityElement {
+                id: 1,
+                node_i_id: 1,
+                node_j_id: 5,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 2,
+                node_i_id: 2,
+                node_j_id: 6,
+                member_type: "Column".to_string(),
+            },
+            StabilityElement {
+                id: 3,
+                node_i_id: 5,
+                node_j_id: 6,
+                member_type: "Girder".to_string(),
+            },
+        ];
+        let stable_ids: HashSet<i32> = [1, 2].into_iter().collect();
+
+        assert!(
+            check_step_bundle_stability(&[3], &all_elements, &nodes, &stable_ids),
+            "A single girder closing two already-stable columns must pass"
+        );
+    }
+
+    #[test]
+    fn test_col_girder_parallel_adjacent_girder_not_stable() {
+        let nodes = vec![
+            StabilityNode { id: 1, x: 0.0, y: 0.0, z: 0.0 },
+            StabilityNode { id: 2, x: 1000.0, y: 0.0, z: 0.0 },
+            StabilityNode { id: 3, x: 2000.0, y: 0.0, z: 0.0 },
+            StabilityNode { id: 4, x: 0.0, y: 0.0, z: 3000.0 },
+            StabilityNode { id: 5, x: 1000.0, y: 0.0, z: 3000.0 },
+            StabilityNode { id: 6, x: 2000.0, y: 0.0, z: 3000.0 },
+        ];
+        let all_elements = vec![
+            StabilityElement { id: 1, node_i_id: 1, node_j_id: 4, member_type: "Column".to_string() },
+            StabilityElement { id: 2, node_i_id: 2, node_j_id: 5, member_type: "Column".to_string() },
+            StabilityElement { id: 3, node_i_id: 4, node_j_id: 5, member_type: "Girder".to_string() },
+            StabilityElement { id: 4, node_i_id: 3, node_j_id: 6, member_type: "Column".to_string() },
+            StabilityElement { id: 5, node_i_id: 5, node_j_id: 6, member_type: "Girder".to_string() },
+        ];
+        let stable_ids: HashSet<i32> = [1, 2, 3].into_iter().collect();
+
+        assert!(
+            !check_step_bundle_stability(&[4, 5], &all_elements, &nodes, &stable_ids),
+            "Col+Girder must fail when the adjacent stable girder is parallel to the new girder"
+        );
+    }
+
+    #[test]
+    fn test_col_girder_perpendicular_adjacent_girder_passes() {
+        let nodes = create_test_nodes();
+        let all_elements = vec![
+            StabilityElement { id: 1, node_i_id: 1, node_j_id: 5, member_type: "Column".to_string() },
+            StabilityElement { id: 2, node_i_id: 2, node_j_id: 6, member_type: "Column".to_string() },
+            StabilityElement { id: 3, node_i_id: 5, node_j_id: 6, member_type: "Girder".to_string() },
+            StabilityElement { id: 4, node_i_id: 4, node_j_id: 8, member_type: "Column".to_string() },
+            StabilityElement { id: 5, node_i_id: 6, node_j_id: 8, member_type: "Girder".to_string() },
+        ];
+        let stable_ids: HashSet<i32> = [1, 2, 3].into_iter().collect();
+
+        assert!(
+            check_step_bundle_stability(&[4, 5], &all_elements, &nodes, &stable_ids),
+            "Col+Girder must pass when it ties into an adjacent stable girder with perpendicular direction"
+        );
+    }
+
+    #[test]
+    fn test_disconnected_complete_bundle_fails_even_if_one_component_is_anchored() {
+        let nodes = vec![
+            StabilityNode { id: 1, x: 0.0, y: 0.0, z: 0.0 },
+            StabilityNode { id: 2, x: 1000.0, y: 0.0, z: 0.0 },
+            StabilityNode { id: 3, x: 0.0, y: 1000.0, z: 0.0 },
+            StabilityNode { id: 4, x: 1000.0, y: 1000.0, z: 0.0 },
+            StabilityNode { id: 5, x: 2000.0, y: 0.0, z: 0.0 },
+            StabilityNode { id: 6, x: 0.0, y: 0.0, z: 3000.0 },
+            StabilityNode { id: 7, x: 1000.0, y: 0.0, z: 3000.0 },
+            StabilityNode { id: 8, x: 0.0, y: 1000.0, z: 3000.0 },
+            StabilityNode { id: 9, x: 1000.0, y: 1000.0, z: 3000.0 },
+            StabilityNode { id: 10, x: 2000.0, y: 0.0, z: 3000.0 },
+            StabilityNode { id: 11, x: 0.0, y: 0.0, z: 6000.0 },
+            StabilityNode { id: 12, x: 1000.0, y: 0.0, z: 6000.0 },
+            StabilityNode { id: 13, x: 0.0, y: 1000.0, z: 6000.0 },
+            StabilityNode { id: 14, x: 1000.0, y: 1000.0, z: 6000.0 },
+            StabilityNode { id: 15, x: 2000.0, y: 0.0, z: 6000.0 },
+        ];
+        let all_elements = vec![
+            StabilityElement { id: 1, node_i_id: 1, node_j_id: 6, member_type: "Column".to_string() },
+            StabilityElement { id: 2, node_i_id: 2, node_j_id: 7, member_type: "Column".to_string() },
+            StabilityElement { id: 3, node_i_id: 6, node_j_id: 7, member_type: "Girder".to_string() },
+            StabilityElement { id: 4, node_i_id: 1, node_j_id: 6, member_type: "Column".to_string() },
+            StabilityElement { id: 5, node_i_id: 6, node_j_id: 11, member_type: "Column".to_string() },
+            StabilityElement { id: 6, node_i_id: 7, node_j_id: 12, member_type: "Column".to_string() },
+            StabilityElement { id: 7, node_i_id: 6, node_j_id: 7, member_type: "Girder".to_string() },
+            StabilityElement { id: 8, node_i_id: 6, node_j_id: 8, member_type: "Girder".to_string() },
+            StabilityElement { id: 9, node_i_id: 10, node_j_id: 15, member_type: "Column".to_string() },
+        ];
+        let stable_ids: HashSet<i32> = [1, 2, 3].into_iter().collect();
+
+        assert!(
+            !check_step_bundle_stability(&[5, 6, 7, 8, 9], &all_elements, &nodes, &stable_ids),
+            "A complete pattern must fail when one new column is disconnected from the anchored assembly"
         );
     }
 

@@ -151,32 +151,35 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 
 #### 기술 구현
 - **sim_grid.rs**: 격자 설정(nx, ny, nz, dx, dy, dz)으로 전체 node/element pool 자동 생성
-- **sim_engine.rs**: Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성
+- **sim_engine.rs**: Monte-Carlo + weighted sampling 기반 시나리오 생성
   - `SimSequence`: 단위 시간에 설치되는 부재 기록 (1-indexed global sequence_number)
   - `LocalStep`: 한 workfront 가 global step cycle 안에서 완성한 로컬 패턴 단위
   - `SimStep`: 여러 `LocalStep` 을 병합한 global step (`local_steps`, `pattern` 필드 포함)
-  - 허용 패턴: `Col`, `Girder`, `ColCol`, `ColGirder`, `GirderGirder`, `ColColGirder`, `ColGirderCol`, `ColGirderGirder`, `ColColGirderGirder`, `ColColGirderColGirder`
-  - **금지 패턴**: `Col→Col→Col`, `Col→Col→Col→Girder` (3개 연속 Column 금지)
-- **floor target/lock canonical**:
-  - floor 선택은 층 간 점수경쟁이 아니라 제약 기반으로 결정한다.
-  - 비잠금 상태에서는 제약을 통과한 floor를 대상으로 타깃 floor를 고른다.
-  - 잠금 상태(`committed_floor`)에서는 해당 floor 후보만 선택한다.
-  - 잠금 floor 실패 시 즉시 rollback 하고 `last_failed_floor`로 동일 floor 즉시 재시도 루프를 회피한다.
-  - `planned_pattern` 소진 + step 미완성(`plan_exhausted`) 시 재계획을 강제한다.
+  - `WorkfrontState`: 현재 핵심 상태는 `owned_ids`, `buffer_sequences`, `committed_floor`
+  - `StepBufferDecision`: `Incomplete(mask)` / `Complete(pattern)` / `Invalid`
+  - `StepCandidateMask`: 버퍼 확장 시 column/girder 허용 타입을 제한하는 마스크
+  - `EmitResult`: `Emitted` / `Deferred` / `Infeasible`
+  - **금지 패턴**: `Col→Col→Col`, `Col→Col→Col→Girder`
+- **실행 루프 canonical**:
+  - global step cycle 내부에서 각 active workfront 가 round 당 최대 1개 부재만 선택한다.
+  - 초기 안정 구조가 비어 있으면 workfront anchor 근처 bootstrap bundle 을 weighted sampling 으로 선택한다.
+  - bootstrap 이후에는 single-candidate retry loop 로 후보를 하나씩 시험하며, 현재 buffer 를 진전시키지 못하는 후보는 즉시 버리고 다음 후보를 다시 시도한다.
+  - complete pattern + stability pass 일 때만 `LocalStep` 을 만들고 cycle 종료 시 `SimStep::from_local_steps()` 로 병합한다.
+  - invalid / infeasible / no-candidate locked buffer 는 즉시 rollback 한다.
 - **candidate floor prefilter**:
-  - workfront round마다 `allowed_floors` 를 먼저 계산한다.
+  - round 시작 시 `allowed_floors` 를 먼저 계산한다.
   - 허용되지 않은 floor 는 candidate collection 단계에서 즉시 제외한다.
-  - legacy/optimized candidate collection parity 를 유지해야 한다.
-- **upper_floor_threshold**: `sim_engine.rs`에서 `threshold * 100.0`으로 변환 후 `stability.rs`에 전달
 - **simulation execution**:
-  - `lib.rs` 는 simulation을 background worker 로 실행한다.
+  - `lib.rs` 는 simulation 을 background worker 로 실행한다.
   - progress / cancel / export 흐름을 현재 canonical behavior로 본다.
+- **trace logger**:
+  - text trace 는 기본이며, 설정에서 JSONL trace 를 추가 저장할 수 있다.
+  - workfront 별 승인된 local step 이력은 `sim.wf.approved_local_step_recorded` 이벤트로 남는다.
 - **console build**: `main.rs` `#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]`
 
 #### Simulation 기본값 (현재)
 - Grid Y lines (`GridConfig.ny`): `8`
-- Lower-floor completion ratio threshold (`lower_floor_completion_ratio`): `0.8`
-- Lower-floor forced completion threshold (`lower_floor_forced_completion`): `10`
+- Lower-floor completion ratio threshold (`lower_floor_completion_ratio`): `0.5`
 - Scenario count (`sim_scenario_count`): `2`
 
 ---
@@ -234,16 +237,17 @@ Sequence 3: WF-A → Girder2, WF-B → Col4  (동시 2개 설치)
 - IDs 1-indexed: nodes는 `(z→x→y)` 정렬 의미를 유지하고, elements는 columns first then girders 순서를 유지한다.
 
 ### `src/rust/src/sim_engine.rs` (Phase 3 신규)
-Monte-Carlo + Weighted Sampling, rayon 병렬 시나리오 생성.
-- `run_scenario(scenario_id, grid, workfronts, seed, weights, threshold)` → SimScenario
-- `run_all_scenarios_with_progress_and_cancel(count, grid, workfronts, weights, constraints, progress, cancel)` → Vec<SimScenario>
-- `try_build_pattern(seed_id, grid, installed_ids, ...)` — 패턴 확장 (금지 패턴 차단)
-- threshold 변환: `threshold * 100.0` (stability.rs는 0~100 범위 기대)
-- global step cycle 집계, floor prefilter, rollback/replan 로직의 중심 파일이다.
+Monte-Carlo + weighted sampling, rayon 병렬 시나리오 생성.
+- `run_scenario(scenario_id, grid, workfronts, seed, weights, constraints)` → SimScenario
+- `run_all_scenarios_with_progress_and_cancel(count, grid, workfronts, weights, constraints, progress, cancel)` → SimScenario 목록
+- `try_pick_incremental_candidate(...)` — single-candidate retry loop 의 핵심
+- `candidate_advances_local_step(...)` — 후보가 현재 버퍼를 실제로 진전시키는지 판정
+- `try_emit_completed_buffer(...)` — complete pattern 의 emission 또는 infeasible rollback 판정
+- global step cycle 집계, floor prefilter, rollback, bootstrap/incremental 분기의 중심 파일이다.
 
 현재 역할 주의:
 - `sim_engine.rs` 는 시뮬레이션 전용 오케스트레이션 파일이다.
-- 후보 생성, weighted sampling, global step cycle 집계는 여기서 수행한다.
+- 후보 생성, retry loop, weighted sampling, global step cycle 집계는 여기서 수행한다.
 - 적합 안정 패턴의 공통 판정 코어는 `stability.rs` 를 재사용한다.
 
 ### `src/rust/src/graphics/sim_ui.rs` (Phase 3 신규)
@@ -295,7 +299,8 @@ python -m maturin build --release
 
 ### 오류 수정 원칙
 - 증상 패치는 금지한다. 로그, 스크린샷, 재현 결과는 현상을 좁히는 용도로만 사용하고, 수정은 반드시 구조적 원인 확인 뒤 진행한다.
-- `sim_engine.rs` 같은 상태기계 성격의 코드는 먼저 책임 경계를 분리해서 본다. 특히 throttle, plan refresh, buffer reset, emit eligibility 를 섞어서 한 번에 땜질하지 않는다.
+- 시뮬레이션 모드 빌드의 기능 디버깅에서는 로그를 확인하며 작업한다. 이때 증상 패치와 휴리스틱 패치는 금지하고, 반복 루프/탈출 구조와 부재적합안정조건 로직의 실제 오판정 경로를 먼저 추적한다.
+- `sim_engine.rs` 같은 상태기계 성격의 코드는 먼저 책임 경계를 분리해서 본다. 특히 candidate retry, buffer classification, stability evaluation, rollback/emission 을 섞어서 한 번에 땜질하지 않는다.
 - 새 `if` 분기나 예외 처리 추가 전, 기존 상태 전이에서 무엇이 잘못 연결됐는지 설명 가능해야 한다. 설명이 안 되면 패치를 미룬다.
 
 ### 디버깅 순서

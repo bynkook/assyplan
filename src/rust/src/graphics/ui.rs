@@ -385,10 +385,6 @@ pub struct UiState {
     /// Upper-floor new work is allowed once the lower floor reaches this ratio,
     /// and the upper-floor ratio gate may be relaxed.
     pub lower_floor_completion_ratio: f64,
-    /// Lower-floor forced completion threshold (member count)
-    /// If remaining members on a lower floor are <= this value,
-    /// lower-floor completion is strongly preferred.
-    pub lower_floor_forced_completion: usize,
 
     // ============================================================================
     // Simulation Mode State (Phase 3)
@@ -427,6 +423,8 @@ pub struct UiState {
     pub sim_trace_level: SimulationTraceLevel,
     /// Selected trace verbosity
     pub sim_trace_verbosity: SimulationTraceVerbosity,
+    /// Whether to also save simulation trace as JSONL
+    pub sim_trace_write_jsonl: bool,
     /// Last generated simulation trace file path
     pub sim_trace_last_path: String,
     /// Last simulation trace status message
@@ -475,7 +473,6 @@ impl UiState {
             step_elements: Vec::new(),
             upper_floor_threshold: 0.3,
             lower_floor_completion_ratio: 0.5,
-            lower_floor_forced_completion: 10,
             // Simulation Mode (Phase 3)
             grid_config: GridConfig::default(),
             sim_workfronts: Vec::new(),
@@ -494,6 +491,7 @@ impl UiState {
             sim_trace_enabled: false,
             sim_trace_level: SimulationTraceLevel::Info,
             sim_trace_verbosity: SimulationTraceVerbosity::Normal,
+            sim_trace_write_jsonl: false,
             sim_trace_last_path: String::new(),
             sim_trace_status: String::new(),
             sim_nav_sequence_mode: false,
@@ -1330,13 +1328,13 @@ mod tests {
         state.has_sequence_data = true;
         state.upper_floor_threshold = 0.75;
         state.lower_floor_completion_ratio = 0.25;
-        state.lower_floor_forced_completion = 3;
         state.grid_config.nx = 9;
         state.grid_config.ny = 11;
         state.grid_config.nz = 5;
         state.sim_weights = (0.2, 0.6, 0.2);
         state.sim_scenario_count = 10;
         state.sim_trace_enabled = true;
+        state.sim_trace_write_jsonl = true;
         state.sim_trace_last_path = "output/sim.log".to_string();
         state.sim_trace_status = "logger enabled".to_string();
 
@@ -1355,13 +1353,13 @@ mod tests {
         assert!(!state.has_sequence_data);
         assert_eq!(state.upper_floor_threshold, 0.3);
         assert_eq!(state.lower_floor_completion_ratio, 0.5);
-        assert_eq!(state.lower_floor_forced_completion, 10);
         assert_eq!(state.grid_config.nx, 4);
         assert_eq!(state.grid_config.ny, 8);
         assert_eq!(state.grid_config.nz, 3);
         assert_eq!(state.sim_weights, (0.5, 0.3, 0.2));
         assert_eq!(state.sim_scenario_count, 2);
         assert!(!state.sim_trace_enabled);
+        assert!(!state.sim_trace_write_jsonl);
         assert!(state.sim_trace_last_path.is_empty());
         assert!(state.sim_trace_status.is_empty());
     }

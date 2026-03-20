@@ -205,36 +205,30 @@ fn generate_next_step(current_structure: &Structure, workfronts: &[Workfront]) -
 
 ##### 4. Workfront-local candidate search
 
-- 각 workfront 는 자신의 `(x, y)` 시작점과 현재까지 형성된 로컬 프론티어 근처에서만 다음 후보를 탐색한다.
+- 각 workfront 는 자신의 `(x, y)` 시작점과 현재 buffer 가 형성한 로컬 footprint 근처에서만 다음 후보를 탐색한다.
 - 후보 위치는 전역 frontier 전체보다 **해당 workfront 인접성** 을 우선한다.
 - 여러 workfront 를 지정하면 각 workfront 주변에서 부재 생성이 병렬적으로 진행되는 모습이 보여야 한다.
-- 후보 탐색은 기본적으로 특정 floor 를 정하고 그 floor 에서 우선 탐색하되, 불가능할 때만 인접 상층부로 확장한다.
+- 후보 탐색은 round 시작 시 계산한 `allowed_floors` 와 `committed_floor` 제약 안에서만 수행한다.
+- 구현은 “후보 묶음을 한 번에 만든 뒤 나중에 부분집합을 추출”하는 방식이 아니라, **후보를 하나씩 시도하고 현재 local step 을 진전시키는 후보만 채택하는 retry loop** 여야 한다.
 
 ##### 5. 강한 Pruning (개발 1·2단계 검사 로직 재사용)
 
 - 매 후보 생성 직후 기하학 및 설치 가능 조건을 먼저 검사한다.
-- 그 다음 Step 적합 안정 조건과 상층부 제약을 순차적으로 검사한다.
+- 그 다음 floor gate 와 Step 적합 안정 조건을 순차적으로 검사한다.
 - Step 적합 안정 조건 검사는 매번 모델 전체를 다시 훑지 않고, **후보 패턴과 실제로 맞닿는 국소 안정 문맥(local stable context)** 만 추출하여 수행한다.
 - 단, 국소 안정 문맥이 비어 있다고 해서 곧바로 fail 하지 않는다. 이 경우에는 **독립 bootstrap 가능성** 을 별도로 검사한다.
-- 검사 순서는 아래를 권장한다.
+- 현재 구현은 아래 순서의 구조적 판정을 사용한다.
 
-1. 기본 기하학 조건 검사
-2. 개별 부재 설치 가능 후보 검사
-3. 층별 우선 완료 규칙 검사
-4. 상층부 기둥 설치율 제약 검사
-5. 패턴 주변 국소 안정 문맥 추출
-6. 패턴 기반 Step 적합 안정 조건 검사
+1. 미리 생성된 유효 element pool 에서만 후보를 고른다.
+2. `allowed_floors` 와 `committed_floor` 제약으로 floor 를 먼저 줄인다.
+3. 로컬 footprint 와 anchor 기준 locality 조건을 통과한 후보만 남긴다.
+4. 현재 buffer 시그니처가 요구하는 `StepCandidateMask` 와 맞는 후보만 남긴다.
+5. 후보를 하나 선택해 현재 buffer 를 실제로 진전시키는지 검사한다.
+6. complete pattern 이 되면 `check_step_bundle_stability` 로 최종 적합 안정 판정을 한다.
 
-##### 6. Floor completion priority
+##### 6. Weighted Sampling – Minimal Incremental Attachment Search
 
-- 각 Sequence 시작 전에 층별 미설치 부재 수를 계산한다.
-- 어떤 층의 미설치 부재가 5개 이하이면 그 층을 우선 마감 대상으로 본다.
-- 이 경우 해당 층 후보를 먼저 선택하고, 그 층에서 후보가 없을 때만 일반 탐색으로 되돌아간다.
-- 목적은 1층이 완료되지 않았는데 2층 작업율이 급격히 상승하는 현상을 방지하는 것이다.
-
-##### 7. Weighted Sampling – Minimal Incremental Attachment Search
-
-- 각 workfront 는 다음 확장 후보를 생성할 때 **완성 가능성이 있는 증분 패턴 후보** 를 우선 나열한다.
+- 각 workfront 는 다음 확장 후보를 생성할 때 **완성 가능성이 있는 증분 패턴 방향** 을 우선 고려한다.
 - 우선 후보 순서는 아래와 같다.
 
 1. 1기둥 + 1거더
@@ -244,7 +238,9 @@ fn generate_next_step(current_structure: &Structure, workfronts: &[Workfront]) -
 5. 독립 3기둥 + 2거더 bootstrap
 
 - 기존 구조에 연결 가능한 증분 후보가 1개라도 있으면 독립 bootstrap 후보보다 우선한다.
-- 점수는 부재 수 최소화, 기존 구조와의 연결성, workfront 거리를 반영한다.
+- bootstrap bundle 은 `w1/w2/w3` 점수로 weighted sampling 한다.
+- bootstrap 이후 증분 확장은 **single-candidate retry loop** 로 수행한다. 즉, 현재 round 에서 선택된 후보가 local step 을 진전시키지 못하면 즉시 버리고 다음 후보를 다시 뽑는다.
+- 현재 코드에서 incremental 점수는 `w1`(connectivity), `w2`(frontier distance) 기준으로 계산되고, `w3` 는 bootstrap bundle 점수에 반영된다.
 
 ```rust
 fn compute_score(c: &Candidate) -> f64 {
@@ -255,15 +251,18 @@ fn compute_score(c: &Candidate) -> f64 {
 }
 ```
 
-##### 8. Pattern-buffered Step generation
+##### 7. Pattern-buffered Step generation
 
 - 각 workfront 는 자신의 Sequence 결과를 별도 버퍼에 누적한다.
 - 버퍼가 sub pattern 상태이면 Step 을 생성하지 않고 다음 Sequence 로 넘긴다.
 - 버퍼가 완성 패턴이 되고 적합 안정 조건을 pass 할 때만 Step 을 방출한다.
+- buffer 분류는 `Incomplete(mask)`, `Complete(pattern)`, `Invalid` 3가지로만 다룬다.
+- `Incomplete(mask)` 는 다음 후보의 member type 을 제한하는 구조적 규칙이며, 임시 점수 보정이나 휴리스틱 우회 규칙이 아니다.
+- `Invalid` 또는 `Infeasible` 이 된 buffer 는 즉시 rollback 한다.
 - Step 은 부재 개수만으로 강제 완료하지 않는다.
 - 정상 결과에서는 Step 수가 Sequence 수보다 현저히 적어야 한다.
 
-##### 9. Early termination
+##### 8. Early termination
 
 - 종료 조건은 “더 이상 유효 후보가 없음”, “장기간 진전이 없음”, “모든 부재 설치 완료” 같이 시나리오 수준의 조건으로 제한한다.
 - 부재 수 또는 Step 개수만으로 종료하지 않는다.
@@ -301,45 +300,32 @@ fn compute_score(c: &Candidate) -> f64 {
 - 사용자는 `0~1` 사이의 값을 설정할 수 있으며 기본값은 **0.5(50%)** 이다.
 - 이 값은 상층부 진입 시점을 제어하는 **hard gate** 이다.
 
-###### 3. 하층부 강제 마감 기준 (`lower floor forced completion threshold`)
-
-- 하층 미설치 부재(기둥 + 거더) 수가 임계값 이하가 되면 상층 신규 탐색을 차단하고 하층 마감을 우선한다.
-- 사용자는 정수값을 설정할 수 있으며 기본값은 **5** 이다.
-- 이 값은 하층 마감 구간에서 상층 우선 진입을 차단하는 **hard gate** 이다.
-
-###### 4. 추가 제약 : 증분 후보 우선
+###### 3. 추가 제약 : 증분 후보 우선
 
 - 하나의 Step 에서 독립안정구조(5개 단위)를 생성할 수 있는 경우라도, 기존 구조에 연결 가능한 증분 후보가 1개 이상 존재하면 반드시 증분 후보를 우선 선택하도록 강제한다.
 - 즉, bootstrap 은 가능하더라도 항상 1순위 선택이 아니다.
 
-###### 5. Floor Commitment 제약
+###### 4. Floor Commitment 제약
 
 - workfront 가 어떤 층에서 step 형성을 위해 첫 부재를 buffer 에 넣는 순간, 해당 층에 commitment 된다.
 - commitment 상태에서는 동일 층 후보만 계속 탐색하며 step 완성(Complete + 안정 조건 pass) 전에는 다른 층으로 이동하지 않는다.
 - commitment 상태에서 유효 후보가 완전히 소진되면 즉시 rollback 한다.
-- rollback 시 해당 buffer 부재를 workfront 로컬 점유에서 해제하고, buffer, planned pattern, committed floor 를 초기화한 뒤, 다음 라운드에서 제약조건 기반 전체 층 재탐색으로 복귀한다.
+- rollback 시 해당 buffer 부재를 workfront 로컬 점유에서 해제하고, `buffer_sequences`, `committed_floor` 를 초기화한 뒤 다음 라운드에서 다시 제약조건 기반 탐색으로 복귀한다.
 - step 이 완성되어 LocalStep 이 방출되면 commitment 는 해제된다.
 
-###### 6. 3-threshold + commitment 정책의 결합 규칙
+###### 5. 2-threshold + commitment 정책의 결합 규칙
 
 - 상층부 기둥 설치 후보는 먼저 `upper floor column rate threshold`를 검사한다. `(상층 누적 + 1) / 하층 누적 > threshold` 이면 후보를 거부한다.
 - workfront 가 아직 uncommitted 인 상태에서 상층 후보를 신규 탐색하려면 아래 Gate 를 모두 통과해야 한다.
 - 하층 기둥 완료율 `하층 설치 기둥 / 하층 전체 기둥 >= lower floor column completion ratio threshold`
-- 하층 미설치 부재(기둥 + 거더) 수가 `lower floor forced completion threshold` 보다 큰 상태
-- 즉, 3개 threshold 는 모두 hard constraint 로 작동하며 bonus 점수 가감은 사용하지 않는다.
+- 즉, 현재 구현에서 hard constraint 는 `upper floor column rate threshold` 와 `lower floor column completion ratio threshold` 두 가지이며 bonus 점수 가감은 사용하지 않는다.
 
 #### 성능 목표 및 최적화 전략
 
 - 목표 모델 규모 : 최대 60×20 그리드 ≈ 12,000~25,000 부재
 - 1개의 시나리오 평균 소요시간 : **0.7~1.8초** (Minimal 전략은 후보 수가 적어 더 빨라짐)
 - 100개 시나리오 전체 소요시간 : **1.2~3분** 이내 (8코어 병렬)
-- **핵심 사전 최적화 전략** : 전체 그리드 공간 내 가능한 모든 부재를 **시뮬레이션 시작 전에 한 번에 생성·검증**
-- 개발 1단계의 “입력데이터의 검사 : 부재 생성 기본 원칙” 전체를 이 단계에서 1회만 집중 적용한다.
-- 시뮬레이션 루프 중에는 **이미 유효성이 입증된 부재 풀**에서만 선택하므로 다음 비용을 크게 줄일 수 있다.
 
-1. 기하학 오류(대각선, zero-length, 중복 등) 검사 생략 가능
-2. orphan node 발생 가능성 사전 제거
-3. 매 step마다 반복되던 기본 기하학 검사 횟수 대폭 감소 (70~90% 수준)
 
 #### 시각화 및 사용자 인터페이스
 
@@ -349,15 +335,16 @@ fn compute_score(c: &Candidate) -> f64 {
 - 실패 원인 표시에 “독립 5개 단위 과다 사용” 항목을 신설한다.
 - `recalc` 버튼은 시뮬레이션 실행에 사용된다.
 - 재생 제어는 play, pause, 특정 step으로 이동(seek bar), 배속 재생 기능을 포함한다.
+- trace logger 는 text 로그를 기본으로 하며, 필요 시 JSONL 동시 저장 옵션을 제공한다.
 
 #### 개발 3단계에 필요한 SKILLS.md 업데이트 항목
 
 - Rust rayon을 활용한 시나리오 병렬 실행 구현
-- 후보 생성 시 증분 조합 열거 로직 (combination generator) 및 필터링
-- Minimal Incremental Attachment 점수 계산 함수 (Score = w1/부재수 + w2×연결수 + w3/거리)
-- Weighted random choice 알고리즘 (alias method 또는 cumulative distribution)
+- single-candidate retry loop 와 rollback 구조
+- buffer classification (`StepBufferDecision`, `StepCandidateMask`) 반영
+- complete pattern emission / infeasible rollback 분리
+- weighted random choice 알고리즘
 - 상층부 제약 검사 최적화 (층별 기둥 카운트 캐시)
-- 프론티어 관리 자료구조 (HashSet 또는 HashMap<NodeID, Distance>)
 - 사용자 가중치 슬라이더 UI 연동
 
 ## 용어 및 Step 적합 안정 조건 정본
@@ -414,7 +401,7 @@ fn compute_score(c: &Candidate) -> f64 {
 
 #### 1개 부재 패턴
 
-- `(거더)`: 이미 설치된 두 기둥을 연결하는 마지막 폐합 부재일 때만 pass.
+- `(거더)`: 이미 설치된 두 기둥을 연결하는 폐합 부재일 때만 pass.
 - `(기둥)`: 단독으로는 step 이 될 수 없다.
 
 #### 2개 부재 패턴
@@ -452,29 +439,31 @@ fn compute_score(c: &Candidate) -> f64 {
 ### 국소 안정 문맥 기반 판정 플로우
 
 1. workfront 확장 후보를 생성한다.
-2. 후보 패턴을 만든다.
+2. 후보가 현재 buffer 를 실제로 진전시키는지 검사한다.
 3. 후보 패턴 endpoint 와 닿는 국소 안정 문맥을 추출한다.
 4. 국소 안정 문맥이 있으면 확장 패턴으로 평가한다.
 5. 국소 안정 문맥이 없으면 독립 bootstrap 가능성으로 평가한다.
-6. 금지 패턴, 지지 조건, 연결성, 캔틸레버 여부를 순차 검사한다.
-7. 완성 패턴 + 적합 안정 조건 pass 일 때만 Step 을 생성한다.
+6. 금지 패턴, bundle connectivity, 지지 조건, 연결성, 캔틸레버 여부를 순차 검사한다.
+7. 완성 패턴 + 적합 안정 조건 pass 일 때만 LocalStep 을 생성한다.
 
 ### 층별 우선 완료 규칙
 
-- 어떤 층의 미설치 부재가 5개 이하이면 해당 층을 우선 마감 대상으로 본다.
-- 이 규칙은 매 Sequence 시작 전 층별 잔여 부재 수 계산으로 적용한다.
-- 하층부가 거의 완료된 상태에서는 상층부보다 하층부 마감을 우선한다.
-- 목적은 하층부가 미완료인데 상층부 작업율이 과도하게 증가하는 현상을 막는 것이다.
+- 현재 canonical 구현은 별도 `forced completion threshold` 를 두지 않는다.
+- 하층 우선성은 `upper floor column rate threshold` 와 `lower floor column completion ratio threshold` 의 hard gate 로만 제어한다.
+- 목적은 상층부 진입 타이밍을 구조적으로 제한하되, 예외용 보정 로직 없이 단순한 제약 기반 탐색을 유지하는 것이다.
 
 ### 현재 구현 기준 반영 사항
 
 - Sequence-driven parallel installation 을 사용한다.
 - 각 workfront 는 같은 Sequence 라운드에서 최대 1개 부재만 선택한다.
+- 각 round 의 active workfront 수는 남은 미설치 부재 수에 비례해 줄어든다.
 - workfront 별 버퍼에 Sequence 결과를 누적하고 완성 패턴일 때만 LocalStep 을 만든다.
 - Step 생성은 workfront 즉시 방출이 아니라 global step cycle 집계 방식이다.
 - 같은 cycle 에서 LocalStep 생성에 성공한 workfront 는 해당 cycle 의 남은 라운드에서 제외된다.
 - cycle 종료 시 여러 LocalStep 을 1개의 global step 으로 병합한다.
 - 병합된 global step 의 sequence 는 round-robin collation 으로 구성하며 같은 round 는 동일 sequence 번호를 공유한다.
+- invalid / infeasible / no-candidate committed buffer 는 즉시 rollback 한다.
+- trace logger 는 승인된 local step 이력을 workfront 별로 기록할 수 있다.
 - 결과적으로 `Sequence != Step` 가정이 유지되어야 하며 multi-workfront 에서 Step 수는 Sequence 수보다 작아야 정상이다.
 
 ### 구현 원칙 요약

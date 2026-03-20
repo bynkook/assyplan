@@ -1231,7 +1231,7 @@ impl AssyPlanApp {
             level: self.ui_state.sim_trace_level,
             verbosity: self.ui_state.sim_trace_verbosity,
             write_text: true,
-            write_jsonl: false,
+            write_jsonl: self.ui_state.sim_trace_write_jsonl,
             flush_each_event: true,
         };
         let constraints = sim_engine::SimConstraints {
@@ -1239,9 +1239,7 @@ impl AssyPlanApp {
             lower_floor_completion_ratio_threshold: self
                 .ui_state
                 .lower_floor_completion_ratio,
-            lower_floor_forced_completion_threshold: self
-                .ui_state
-                .lower_floor_forced_completion,
+
         };
         let count = self.ui_state.sim_scenario_count;
 
@@ -1290,7 +1288,6 @@ impl AssyPlanApp {
             count,
             constraints.upper_floor_column_rate_threshold,
             constraints.lower_floor_completion_ratio_threshold,
-            constraints.lower_floor_forced_completion_threshold,
             2654435761,
         );
 

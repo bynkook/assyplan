@@ -77,7 +77,6 @@ pub struct SimulationTraceRunContext {
     pub scenario_count: usize,
     pub upper_floor_threshold: f64,
     pub lower_floor_completion_ratio: f64,
-    pub lower_floor_forced_completion: usize,
     pub base_seed: u64,
 }
 
@@ -357,7 +356,6 @@ pub fn build_run_context(
     scenario_count: usize,
     upper_floor_threshold: f64,
     lower_floor_completion_ratio: f64,
-    lower_floor_forced_completion: usize,
     base_seed: u64,
 ) -> SimulationTraceRunContext {
     SimulationTraceRunContext {
@@ -368,7 +366,6 @@ pub fn build_run_context(
         scenario_count,
         upper_floor_threshold,
         lower_floor_completion_ratio,
-        lower_floor_forced_completion,
         base_seed,
     }
 }
@@ -474,7 +471,6 @@ mod tests {
             1,
             0.3,
             0.8,
-            10,
             42,
         );
         let config = SimulationTraceConfig {
