@@ -1727,7 +1727,7 @@ impl eframe::App for AssyPlanApp {
         // Top panel - Header with buttons
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("AssyPlan - Development Mode");
+                ui.label("AssyPlan");
                 ui.separator();
 
                 // File open button
@@ -3336,7 +3336,7 @@ pub fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("AssyPlan - Development Mode"),
+            .with_title("AssyPlan"),
         ..Default::default()
     };
     eframe::run_native(
